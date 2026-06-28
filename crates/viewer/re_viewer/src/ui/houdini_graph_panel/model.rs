@@ -84,6 +84,8 @@ impl GraphDocument {
                     kind: NodeKind::Source,
                     layout_position: GraphPoint::new(0.0, 0.5),
                     generated: None,
+                    evaluation: NodeEvaluation::clean(),
+                    participates_in_output: true,
                     parameter: NodeParameter::scalar(
                         "Read",
                         1.0,
@@ -97,6 +99,8 @@ impl GraphDocument {
                     kind: NodeKind::Filter,
                     layout_position: GraphPoint::new(0.33, 0.5),
                     generated: None,
+                    evaluation: NodeEvaluation::clean(),
+                    participates_in_output: true,
                     parameter: NodeParameter::attribute_rule(
                         "Minimum score",
                         "score",
@@ -112,6 +116,8 @@ impl GraphDocument {
                     kind: NodeKind::Style,
                     layout_position: GraphPoint::new(0.66, 0.5),
                     generated: None,
+                    evaluation: NodeEvaluation::clean(),
+                    participates_in_output: true,
                     parameter: NodeParameter::scalar(
                         "Stroke scale",
                         0.75,
@@ -125,6 +131,8 @@ impl GraphDocument {
                     kind: NodeKind::Output,
                     layout_position: GraphPoint::new(1.0, 0.5),
                     generated: None,
+                    evaluation: NodeEvaluation::clean(),
+                    participates_in_output: true,
                     parameter: NodeParameter::scalar(
                         "Adaptive segments",
                         1.0,
@@ -413,10 +421,17 @@ impl GraphDocument {
             })
             .collect();
 
-        let edges = (0..self.nodes.len().saturating_sub(1))
-            .map(|index| GraphEdge {
-                from_node: index,
-                to_node: index + 1,
+        let output_nodes = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| node.participates_in_output.then_some(index))
+            .collect::<Vec<_>>();
+        let edges = output_nodes
+            .windows(2)
+            .map(|nodes| GraphEdge {
+                from_node: nodes[0],
+                to_node: nodes[1],
             })
             .collect();
 
@@ -426,6 +441,74 @@ impl GraphDocument {
     pub fn set_node_layout_position(&mut self, index: usize, position: GraphPoint) {
         if let Some(node) = self.nodes.get_mut(index) {
             node.layout_position = position.clamped_to_unit();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn mark_node_stale(&mut self, index: usize) {
+        if let Some(node) = self.nodes.get_mut(index) {
+            node.evaluation.state = EvaluationState::Stale;
+            node.evaluation.message = None;
+        }
+    }
+
+    pub fn set_node_manual(&mut self, index: usize, manual: bool) {
+        if let Some(node) = self.nodes.get_mut(index) {
+            node.evaluation.manual = manual;
+            node.evaluation.state = if manual {
+                EvaluationState::Manual
+            } else {
+                EvaluationState::Stale
+            };
+            node.evaluation.message = None;
+        }
+    }
+
+    pub fn demand_output_evaluation(&mut self) {
+        for node in &mut self.nodes {
+            if !node.participates_in_output || node.evaluation.manual {
+                continue;
+            }
+            if matches!(
+                node.evaluation.state,
+                EvaluationState::Stale | EvaluationState::Running
+            ) {
+                node.evaluation.state = EvaluationState::Cached;
+                node.evaluation.message = None;
+            }
+        }
+    }
+
+    pub fn request_node_run(&mut self, index: usize) {
+        if let Some(node) = self.nodes.get_mut(index) {
+            node.evaluation.state = EvaluationState::Running;
+            node.evaluation.message = None;
+        }
+    }
+
+    pub fn complete_node_run(&mut self, index: usize) {
+        if let Some(node) = self.nodes.get_mut(index) {
+            node.evaluation.state = EvaluationState::Clean;
+            node.evaluation.manual = false;
+            node.evaluation.message = None;
+        }
+    }
+
+    pub fn cancel_node_run(&mut self, index: usize) {
+        if let Some(node) = self.nodes.get_mut(index)
+            && node.evaluation.state == EvaluationState::Running
+        {
+            node.evaluation.state = EvaluationState::Manual;
+            node.evaluation.manual = true;
+            node.evaluation.message = Some("Run cancelled".to_owned());
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn fail_node_run(&mut self, index: usize, message: impl Into<String>) {
+        if let Some(node) = self.nodes.get_mut(index) {
+            node.evaluation.state = EvaluationState::Failed;
+            node.evaluation.message = Some(message.into());
         }
     }
 
@@ -458,6 +541,7 @@ impl GraphDocument {
                 source_error: self.source.import_error.clone(),
                 style: None,
                 generated: node.generated,
+                evaluation: node.evaluation.clone(),
                 warnings: Vec::new(),
             },
             NodeKind::Filter => NodeInfo {
@@ -481,6 +565,7 @@ impl GraphDocument {
                 source_error: None,
                 style: None,
                 generated: node.generated,
+                evaluation: node.evaluation.clone(),
                 warnings: filter_warnings,
             },
             NodeKind::Style => NodeInfo {
@@ -504,6 +589,7 @@ impl GraphDocument {
                 source_error: None,
                 style: Some(self.resolved_style()),
                 generated: node.generated,
+                evaluation: node.evaluation.clone(),
                 warnings: style_warnings,
             },
             NodeKind::Output => NodeInfo {
@@ -523,6 +609,7 @@ impl GraphDocument {
                 source_error: None,
                 style: None,
                 generated: node.generated,
+                evaluation: node.evaluation.clone(),
                 warnings: Vec::new(),
             },
         })
@@ -1387,8 +1474,51 @@ pub(crate) struct GraphNode {
     pub kind: NodeKind,
     pub layout_position: GraphPoint,
     pub generated: Option<GeneratedNodeInfo>,
+    pub evaluation: NodeEvaluation,
+    pub participates_in_output: bool,
     pub parameter: NodeParameter,
     pub info: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NodeEvaluation {
+    pub state: EvaluationState,
+    pub manual: bool,
+    pub message: Option<String>,
+}
+
+impl NodeEvaluation {
+    fn clean() -> Self {
+        Self {
+            state: EvaluationState::Clean,
+            manual: false,
+            message: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EvaluationState {
+    Clean,
+    Cached,
+    Stale,
+    Running,
+    #[allow(dead_code)]
+    Failed,
+    Manual,
+}
+
+impl EvaluationState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "Clean",
+            Self::Cached => "Cached",
+            Self::Stale => "Stale",
+            Self::Running => "Running",
+            Self::Failed => "Failed",
+            Self::Manual => "Manual",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -1610,6 +1740,7 @@ pub(crate) struct NodeInfo {
     pub source_error: Option<String>,
     pub style: Option<GraphStyle>,
     pub generated: Option<GeneratedNodeInfo>,
+    pub evaluation: NodeEvaluation,
     pub warnings: Vec<String>,
 }
 
@@ -2018,12 +2149,12 @@ pub(crate) enum RerunSceneDebugItem {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttributeTableQuery, AttributeTableSort, ExportGeometry, GeneratedNodeSource, Geometry,
-        GeometryKind, GraphColor, GraphDocument, GraphPoint, GraphStyle,
-        HoudiniCubicBezierParquetSchema, HoudiniGeometryRecord, HoudiniGeometrySchema, LayerKind,
-        NodeKind, NodeParameterKind, NodeStatus, RerunSceneDebugItem, RerunSceneItem,
-        SourceProvenance, ViewerGeometry, load_cubic_bezier_parquet,
-        load_cubic_bezier_parquet_with_metadata,
+        AttributeTableQuery, AttributeTableSort, EvaluationState, ExportGeometry,
+        GeneratedNodeSource, Geometry, GeometryKind, GraphColor, GraphDocument, GraphNode,
+        GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema, HoudiniGeometryRecord,
+        HoudiniGeometrySchema, LayerKind, NodeEvaluation, NodeKind, NodeParameter,
+        NodeParameterKind, NodeStatus, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
+        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -2517,6 +2648,88 @@ mod tests {
         assert_eq!(layout.edges[0].to_node, 1);
         assert_eq!(layout.edges[2].from_node, 2);
         assert_eq!(layout.edges[2].to_node, 3);
+    }
+
+    #[test]
+    fn output_demand_evaluates_stale_connected_nodes_only() {
+        let mut graph = GraphDocument::sample();
+        graph.nodes.push(GraphNode {
+            name: "Scratch Filter",
+            kind: NodeKind::Filter,
+            layout_position: GraphPoint::new(0.5, 0.1),
+            generated: None,
+            evaluation: NodeEvaluation {
+                state: EvaluationState::Stale,
+                manual: false,
+                message: None,
+            },
+            participates_in_output: false,
+            parameter: NodeParameter::attribute_rule(
+                "Scratch score",
+                "score",
+                super::FilterComparison::GreaterOrEqual,
+                0.2,
+                0.0..=1.0,
+                "Disconnected exploratory filter.",
+            ),
+            info: "Disconnected exploratory filter.",
+        });
+        graph.mark_node_stale(1);
+
+        graph.demand_output_evaluation();
+
+        assert_eq!(graph.nodes[1].evaluation.state, EvaluationState::Cached);
+        assert_eq!(
+            graph
+                .nodes
+                .last()
+                .expect("scratch node should exist")
+                .evaluation
+                .state,
+            EvaluationState::Stale
+        );
+        assert_eq!(graph.graph_layout().edges.len(), graph.nodes.len() - 2);
+    }
+
+    #[test]
+    fn manual_node_waits_for_explicit_run() {
+        let mut graph = GraphDocument::sample();
+        graph.set_node_manual(1, true);
+
+        graph.demand_output_evaluation();
+
+        assert_eq!(graph.nodes[1].evaluation.state, EvaluationState::Manual);
+        graph.request_node_run(1);
+        assert_eq!(graph.nodes[1].evaluation.state, EvaluationState::Running);
+        graph.complete_node_run(1);
+        assert_eq!(graph.nodes[1].evaluation.state, EvaluationState::Clean);
+        assert!(!graph.nodes[1].evaluation.manual);
+    }
+
+    #[test]
+    fn failed_node_supports_cancel_and_retry_transitions() {
+        let mut graph = GraphDocument::sample();
+        graph.fail_node_run(1, "bad attribute");
+
+        let info = graph
+            .selected_node_info(1)
+            .expect("filter node info should exist");
+        assert_eq!(info.evaluation.state, EvaluationState::Failed);
+        assert_eq!(info.evaluation.message.as_deref(), Some("bad attribute"));
+
+        graph.request_node_run(1);
+        assert_eq!(graph.nodes[1].evaluation.state, EvaluationState::Running);
+        graph.cancel_node_run(1);
+        assert_eq!(graph.nodes[1].evaluation.state, EvaluationState::Manual);
+        assert_eq!(
+            graph.nodes[1].evaluation.message.as_deref(),
+            Some("Run cancelled")
+        );
+
+        graph.request_node_run(1);
+        graph.complete_node_run(1);
+        assert_eq!(graph.nodes[1].evaluation.state, EvaluationState::Clean);
+        assert!(graph.nodes[1].evaluation.message.is_none());
     }
 
     #[test]

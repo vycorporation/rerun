@@ -8,8 +8,8 @@ use re_ui::UiExt as _;
 pub(crate) mod model;
 
 use self::model::{
-    AttributeTableQuery, AttributeTableRow, AttributeTableSort, ExportGeometry, GeometryBounds,
-    GraphDocument, GraphPoint, GraphStyle, LayerKind, NodeStatus, SourceMetadata,
+    AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState, ExportGeometry,
+    GeometryBounds, GraphDocument, GraphPoint, GraphStyle, LayerKind, NodeStatus, SourceMetadata,
 };
 
 pub(crate) type SharedHoudiniGraph = Arc<Mutex<GraphDocument>>;
@@ -100,6 +100,7 @@ impl HoudiniGraphPanel {
                 )
                 .on_hover_text(node.parameter.help);
             }
+            self.evaluation_controls_ui(ui, &mut graph);
 
             ui.add_space(8.0);
             ui.strong("Node Info");
@@ -288,6 +289,37 @@ impl HoudiniGraphPanel {
         }
     }
 
+    fn evaluation_controls_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        if self.selected_node >= graph.nodes.len() {
+            return;
+        }
+
+        ui.horizontal(|ui| {
+            let mut manual = graph.nodes[self.selected_node].evaluation.manual;
+            if ui.re_checkbox(&mut manual, "Manual").changed() {
+                graph.set_node_manual(self.selected_node, manual);
+            }
+
+            if ui.button("Run").clicked() {
+                graph.request_node_run(self.selected_node);
+                graph.complete_node_run(self.selected_node);
+            }
+            if ui.button("Start").clicked() {
+                graph.request_node_run(self.selected_node);
+            }
+            if ui.button("Cancel").clicked() {
+                graph.cancel_node_run(self.selected_node);
+            }
+            if ui.button("Retry").clicked() {
+                graph.request_node_run(self.selected_node);
+                graph.complete_node_run(self.selected_node);
+            }
+        });
+        if ui.button("Evaluate Output").clicked() {
+            graph.demand_output_evaluation();
+        }
+    }
+
     fn node_graph_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) -> Response {
         let desired_size = egui::vec2(ui.available_width().max(280.0), 176.0);
         let (response, painter) = ui.allocate_painter(desired_size, Sense::click_and_drag());
@@ -390,6 +422,13 @@ impl HoudiniGraphPanel {
                 FontId::monospace(11.0),
                 ui.visuals().weak_text_color(),
             );
+            painter.text(
+                node_rect.left_bottom() + egui::vec2(6.0, -8.0),
+                Align2::LEFT_BOTTOM,
+                node.evaluation.state.as_str(),
+                FontId::monospace(9.0),
+                evaluation_color(ui, node.evaluation.state),
+            );
             if node.generated.is_some() {
                 painter.text(
                     node_rect.right_top() + egui::vec2(-6.0, 6.0),
@@ -455,6 +494,19 @@ impl HoudiniGraphPanel {
                     if let Some(generated) = info.generated {
                         ui.weak("Generated");
                         ui.colored_label(ui.visuals().warn_fg_color, generated.as_str());
+                        ui.end_row();
+                    }
+
+                    ui.weak("Eval");
+                    ui.colored_label(
+                        evaluation_color(ui, info.evaluation.state),
+                        info.evaluation.state.as_str(),
+                    );
+                    ui.end_row();
+
+                    if let Some(message) = &info.evaluation.message {
+                        ui.weak("Eval note");
+                        ui.label(message);
                         ui.end_row();
                     }
 
@@ -700,6 +752,16 @@ fn status_color(ui: &Ui, status: NodeStatus) -> Color32 {
         NodeStatus::Healthy => ui.visuals().text_color(),
         NodeStatus::Warning => ui.visuals().warn_fg_color,
         NodeStatus::Failed => ui.visuals().error_fg_color,
+    }
+}
+
+fn evaluation_color(ui: &Ui, state: EvaluationState) -> Color32 {
+    match state {
+        EvaluationState::Clean => ui.visuals().text_color(),
+        EvaluationState::Cached => ui.visuals().weak_text_color(),
+        EvaluationState::Stale | EvaluationState::Manual => ui.visuals().warn_fg_color,
+        EvaluationState::Running => ui.visuals().selection.stroke.color,
+        EvaluationState::Failed => ui.visuals().error_fg_color,
     }
 }
 
