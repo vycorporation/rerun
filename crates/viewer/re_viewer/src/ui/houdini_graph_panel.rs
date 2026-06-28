@@ -58,6 +58,10 @@ impl HoudiniGraphPanel {
             self.node_info_ui(ui);
 
             ui.add_space(8.0);
+            ui.strong("Pipeline Trace");
+            self.pipeline_trace_ui(ui);
+
+            ui.add_space(8.0);
             ui.strong("Viewer Output Preview");
             self.output_preview_ui(ui);
 
@@ -192,6 +196,28 @@ impl HoudiniGraphPanel {
                 });
             ui.label(info.summary);
         }
+    }
+
+    fn pipeline_trace_ui(&self, ui: &mut Ui) {
+        egui::Grid::new("houdini_graph_pipeline_trace")
+            .num_columns(4)
+            .spacing([10.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.weak("Stage");
+                ui.weak("In");
+                ui.weak("Out");
+                ui.weak("Operation");
+                ui.end_row();
+
+                for stage in self.graph.pipeline_stages() {
+                    ui.label(stage.name);
+                    ui.label(stage.input_count.to_string());
+                    ui.label(stage.output_count.to_string());
+                    ui.label(stage.note);
+                    ui.end_row();
+                }
+            });
     }
 
     fn output_preview_ui(&self, ui: &mut Ui) -> Response {

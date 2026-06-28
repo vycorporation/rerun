@@ -181,9 +181,7 @@ impl GraphDocument {
         self.viewer_output().items.len()
     }
 
-    pub fn selected_node_info(&self, index: usize) -> Option<NodeInfo> {
-        let node = self.nodes.get(index)?;
-        let visible_output_count = self.visible_output_count();
+    pub fn pipeline_stages(&self) -> Vec<PipelineStage> {
         let source_count = self.geometry.len();
         let filtered_count = self
             .geometry
@@ -191,30 +189,63 @@ impl GraphDocument {
             .filter(|geometry| geometry.score() >= self.filter_minimum_score())
             .count();
         let styled_count = filtered_count;
+        let output_count = self.visible_output_count();
+
+        vec![
+            PipelineStage {
+                name: "Source",
+                input_count: 0,
+                output_count: source_count,
+                note: "Loaded native graph geometry.",
+            },
+            PipelineStage {
+                name: "Filter",
+                input_count: source_count,
+                output_count: filtered_count,
+                note: "Applied minimum score threshold.",
+            },
+            PipelineStage {
+                name: "Style",
+                input_count: filtered_count,
+                output_count: styled_count,
+                note: "Prepared stroke scale for viewer output.",
+            },
+            PipelineStage {
+                name: "Rerun Output",
+                input_count: styled_count,
+                output_count,
+                note: "Applied layer visibility and boundary preparation.",
+            },
+        ]
+    }
+
+    pub fn selected_node_info(&self, index: usize) -> Option<NodeInfo> {
+        let node = self.nodes.get(index)?;
+        let stages = self.pipeline_stages();
 
         Some(match node.kind {
             NodeKind::Source => NodeInfo {
                 kind: node.kind,
-                input_count: 0,
-                output_count: source_count,
+                input_count: stages[0].input_count,
+                output_count: stages[0].output_count,
                 summary: "Source geometry lives in the graph model before any viewer adaptation.",
             },
             NodeKind::Filter => NodeInfo {
                 kind: node.kind,
-                input_count: source_count,
-                output_count: filtered_count,
+                input_count: stages[1].input_count,
+                output_count: stages[1].output_count,
                 summary: "Filter removes geometry below the minimum sample score.",
             },
             NodeKind::Style => NodeInfo {
                 kind: node.kind,
-                input_count: filtered_count,
-                output_count: styled_count,
+                input_count: stages[2].input_count,
+                output_count: stages[2].output_count,
                 summary: "Style changes viewer presentation without mutating graph geometry.",
             },
             NodeKind::Output => NodeInfo {
                 kind: node.kind,
-                input_count: styled_count,
-                output_count: visible_output_count,
+                input_count: stages[3].input_count,
+                output_count: stages[3].output_count,
                 summary: "Output prepares boundary data while preserving native graph geometry.",
             },
         })
@@ -285,6 +316,13 @@ pub(crate) struct NodeInfo {
     pub input_count: usize,
     pub output_count: usize,
     pub summary: &'static str,
+}
+
+pub(crate) struct PipelineStage {
+    pub name: &'static str,
+    pub input_count: usize,
+    pub output_count: usize,
+    pub note: &'static str,
 }
 
 pub(crate) struct Layer {
@@ -476,6 +514,21 @@ mod tests {
             .selected_node_info(3)
             .expect("sample graph should include output node");
         assert_eq!(output.output_count, 2);
+    }
+
+    #[test]
+    fn pipeline_stages_report_execution_trace() {
+        let graph = GraphDocument::sample();
+        let stages = graph.pipeline_stages();
+
+        assert_eq!(stages.len(), 4);
+        assert_eq!(stages[0].name, "Source");
+        assert_eq!(stages[0].output_count, 4);
+        assert_eq!(stages[1].name, "Filter");
+        assert_eq!(stages[1].input_count, 4);
+        assert_eq!(stages[1].output_count, 2);
+        assert_eq!(stages[3].name, "Rerun Output");
+        assert_eq!(stages[3].output_count, graph.visible_output_count());
     }
 
     #[test]
