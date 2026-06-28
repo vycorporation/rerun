@@ -22,6 +22,7 @@ pub(crate) struct GraphDocument {
     pub nodes: Vec<GraphNode>,
     pub layers: Vec<Layer>,
     pub geometry: Vec<Geometry>,
+    pub recording_geometry: Vec<Geometry>,
 }
 
 impl GraphDocument {
@@ -129,6 +130,7 @@ impl GraphDocument {
                     score: 0.35,
                 }),
             ],
+            recording_geometry: Vec::new(),
         }
     }
 
@@ -410,12 +412,85 @@ impl GraphDocument {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn import_recording_geometry(
+        &mut self,
+        query_bridge: &RerunQueryBridge,
+        records: impl IntoIterator<Item = HoudiniGeometryRecord>,
+    ) {
+        self.update_source_from_query_bridge(query_bridge);
+        self.source.mode = GraphSourceMode::RecordingQuery;
+        self.recording_geometry = records.into_iter().map(|record| record.geometry).collect();
+    }
+
     fn active_geometry(&self) -> &[Geometry] {
         match self.source.mode {
             GraphSourceMode::DemoFallback => &self.geometry,
-            GraphSourceMode::RecordingQuery => &[],
+            GraphSourceMode::RecordingQuery => &self.recording_geometry,
         }
     }
+}
+
+#[allow(dead_code)]
+pub(crate) struct HoudiniGeometrySchema;
+
+#[allow(dead_code)]
+impl HoudiniGeometrySchema {
+    pub const ARCHETYPE_NAME: &'static str = "vy.houdini.Geometry2D";
+    pub const KIND_COMPONENT: &'static str = "HoudiniGeometry2D:kind";
+    pub const POINTS_COMPONENT: &'static str = "HoudiniGeometry2D:points";
+    pub const SCORE_COMPONENT: &'static str = "HoudiniGeometry2D:score";
+    pub const LAYER_COMPONENT: &'static str = "HoudiniGeometry2D:layer";
+
+    pub fn component_names() -> [&'static str; 4] {
+        [
+            Self::KIND_COMPONENT,
+            Self::POINTS_COMPONENT,
+            Self::SCORE_COMPONENT,
+            Self::LAYER_COMPONENT,
+        ]
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) struct HoudiniGeometryRecord {
+    pub kind: HoudiniGeometryKind,
+    pub layer: LayerKind,
+    pub score: f32,
+    pub geometry: Geometry,
+}
+
+impl HoudiniGeometryRecord {
+    #[allow(dead_code)]
+    pub fn polygon(layer: LayerKind, points: Vec<GraphPoint>, score: f32) -> Option<Self> {
+        if points.len() < 3 {
+            return None;
+        }
+
+        Some(Self {
+            kind: HoudiniGeometryKind::Polygon,
+            layer,
+            score,
+            geometry: Geometry::Polygon(Polygon { points, score }),
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn cubic_bezier(layer: LayerKind, curve: CubicBezier) -> Self {
+        Self {
+            kind: HoudiniGeometryKind::CubicBezier,
+            layer,
+            score: curve.score,
+            geometry: Geometry::CubicBezier(curve),
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HoudiniGeometryKind {
+    Polygon,
+    CubicBezier,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -583,6 +658,7 @@ pub(crate) enum LayerKind {
     Debug,
 }
 
+#[derive(Clone)]
 pub(crate) enum Geometry {
     Polygon(Polygon),
     CubicBezier(CubicBezier),
@@ -705,8 +781,9 @@ pub(crate) enum RerunSceneDebugItem {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportGeometry, Geometry, GraphDocument, GraphPoint, LayerKind, NodeParameterKind,
-        RerunSceneDebugItem, RerunSceneItem, ViewerGeometry,
+        ExportGeometry, Geometry, GraphDocument, GraphPoint, HoudiniGeometryRecord,
+        HoudiniGeometrySchema, LayerKind, NodeParameterKind, RerunSceneDebugItem, RerunSceneItem,
+        ViewerGeometry,
     };
 
     #[test]
@@ -969,5 +1046,59 @@ mod tests {
 
         assert_eq!(graph.source.mode, super::GraphSourceMode::DemoFallback);
         assert_eq!(graph.visible_output_count(), 2);
+    }
+
+    #[test]
+    fn houdini_geometry_schema_names_native_geometry_without_polyline_storage() {
+        assert_eq!(
+            HoudiniGeometrySchema::ARCHETYPE_NAME,
+            "vy.houdini.Geometry2D"
+        );
+        assert!(HoudiniGeometrySchema::component_names().contains(&"HoudiniGeometry2D:points"));
+        assert!(
+            !HoudiniGeometrySchema::component_names()
+                .iter()
+                .any(|component| component.contains("polyline"))
+        );
+    }
+
+    #[test]
+    fn imported_recording_geometry_preserves_native_cubic_bezier() {
+        let mut graph = GraphDocument::sample();
+        let bridge = super::RerunQueryBridge {
+            mode: super::RerunQueryBridgeMode::ProductForkViewOwned,
+            view_id: "view(1234)".to_owned(),
+            space_origin: "/".to_owned(),
+            timeline: "frame".to_owned(),
+            latest_at: 42,
+            matching_entity_count: 1,
+            visualized_entity_count: 1,
+            visible_data_result_count: 1,
+        };
+        let curve = super::CubicBezier {
+            start: GraphPoint::new(0.0, 0.0),
+            control_1: GraphPoint::new(0.2, 0.8),
+            control_2: GraphPoint::new(0.8, 0.2),
+            end: GraphPoint::new(1.0, 1.0),
+            score: 0.9,
+        };
+
+        graph.import_recording_geometry(
+            &bridge,
+            [HoudiniGeometryRecord::cubic_bezier(
+                LayerKind::Curves,
+                curve,
+            )],
+        );
+
+        assert_eq!(graph.source.mode, super::GraphSourceMode::RecordingQuery);
+        assert_eq!(graph.cubic_bezier_count(), 1);
+        assert!(
+            graph
+                .viewer_output()
+                .items
+                .iter()
+                .any(|geometry| matches!(geometry, ViewerGeometry::CubicBezier(_)))
+        );
     }
 }
