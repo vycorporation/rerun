@@ -7,7 +7,9 @@ use re_ui::UiExt as _;
 
 pub(crate) mod model;
 
-use self::model::{ExportGeometry, GeometryBounds, GraphDocument, GraphPoint, SourceMetadata};
+use self::model::{
+    ExportGeometry, GeometryBounds, GraphDocument, GraphPoint, GraphStyle, SourceMetadata,
+};
 
 pub(crate) type SharedHoudiniGraph = Arc<Mutex<GraphDocument>>;
 
@@ -375,6 +377,12 @@ impl HoudiniGraphPanel {
                         ));
                         ui.end_row();
                     }
+
+                    if let Some(style) = info.style {
+                        ui.weak("Style");
+                        ui.label(format_style(style));
+                        ui.end_row();
+                    }
                 });
             ui.label(info.summary);
             for warning in &info.warnings {
@@ -458,6 +466,13 @@ fn format_bounds(bounds: Option<&GeometryBounds>) -> String {
                 bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y
             )
         },
+    )
+}
+
+fn format_style(style: GraphStyle) -> String {
+    format!(
+        "rgb({}, {}, {}), opacity {:.2}, stroke {:.2}",
+        style.color.r, style.color.g, style.color.b, style.opacity, style.stroke_scale
     )
 }
 

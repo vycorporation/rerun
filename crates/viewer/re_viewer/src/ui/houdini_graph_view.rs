@@ -13,8 +13,8 @@ use re_viewer_context::{
 };
 
 use crate::ui::houdini_graph_panel::model::{
-    CubicBezier, GraphDocument, GraphPoint, LayerKind, RerunQueryBridge, RerunQueryBridgeMode,
-    RerunSceneDebugItem, RerunSceneItem, RerunSceneOutput,
+    CubicBezier, GraphDocument, GraphPoint, GraphStyle, LayerKind, RerunQueryBridge,
+    RerunQueryBridgeMode, RerunSceneDebugItem, RerunSceneItem, RerunSceneOutput,
 };
 use crate::ui::houdini_graph_panel::{lock_houdini_graph, shared_houdini_graph_from_context};
 
@@ -283,26 +283,26 @@ fn draw_houdini_output_view(
     for (item_index, geometry) in scene.items.iter().enumerate() {
         let selected = selected_item_index == Some(item_index);
         match geometry {
-            RerunSceneItem::Polygon { points, .. } => {
+            RerunSceneItem::Polygon { points, style, .. } => {
                 let points = points
                     .iter()
                     .map(|point| view_transform.map_point(*point))
                     .collect::<Vec<_>>();
                 ui.painter().add(egui::Shape::convex_polygon(
                     points.clone(),
-                    Color32::from_rgba_unmultiplied(38, 125, 255, 50),
+                    style_color(*style, 0.45),
                     Stroke::new(
-                        1.0 + 3.0 * scene.stroke_scale + selected_stroke_boost(selected),
-                        Color32::from_rgb(91, 169, 255),
+                        1.0 + 3.0 * style.stroke_scale + selected_stroke_boost(selected),
+                        style_color(*style, 1.0),
                     ),
                 ));
                 for point in points {
                     ui.painter()
-                        .circle_filled(point, 3.5, Color32::from_rgb(131, 192, 255));
+                        .circle_filled(point, 3.5, style_color(*style, 1.0));
                 }
             }
-            RerunSceneItem::NativeCubicBezier { curve, .. } => {
-                draw_native_cubic(ui, view_transform, *curve, scene.stroke_scale, selected);
+            RerunSceneItem::NativeCubicBezier { curve, style, .. } => {
+                draw_native_cubic(ui, view_transform, *curve, *style, selected);
             }
         }
     }
@@ -318,9 +318,11 @@ fn draw_houdini_output_view(
         rect.left_top() + egui::vec2(14.0, 32.0),
         Align2::LEFT_TOP,
         format!(
-            "{} emitted, {} export segments per cubic",
+            "{} emitted, {} export segments per cubic, stroke {:.2}, opacity {:.2}",
             scene.items.len(),
-            scene.export_segments
+            scene.export_segments,
+            scene.stroke_scale,
+            scene.style.opacity
         ),
         FontId::monospace(11.0),
         ui.visuals().weak_text_color(),
@@ -355,7 +357,7 @@ fn draw_native_cubic(
     ui: &mut egui::Ui,
     view_transform: HoudiniViewTransform,
     curve: CubicBezier,
-    stroke_scale: f32,
+    style: GraphStyle,
     selected: bool,
 ) {
     let painter = ui.painter();
@@ -367,15 +369,22 @@ fn draw_native_cubic(
         closed: false,
         fill: Color32::TRANSPARENT,
         stroke: Stroke::new(
-            1.0 + 4.0 * stroke_scale + selected_stroke_boost(selected),
-            Color32::from_rgb(239, 188, 84),
+            1.0 + 4.0 * style.stroke_scale + selected_stroke_boost(selected),
+            style_color(style, 1.0),
         )
         .into(),
     });
 
     for point in points {
-        painter.circle_filled(point, 3.0, Color32::from_rgb(250, 212, 124));
+        painter.circle_filled(point, 3.0, style_color(style, 1.0));
     }
+}
+
+fn style_color(style: GraphStyle, opacity_multiplier: f32) -> Color32 {
+    let alpha = (255.0 * style.opacity * opacity_multiplier)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    Color32::from_rgba_unmultiplied(style.color.r, style.color.g, style.color.b, alpha)
 }
 
 fn selected_stroke_boost(selected: bool) -> f32 {
@@ -383,11 +392,13 @@ fn selected_stroke_boost(selected: bool) -> f32 {
 }
 
 fn selected_item_summary(item: &RerunSceneItem) -> String {
+    let style = item.style();
     format!(
-        "Selected: {} in {} layer, score {:.2}, {} {}",
+        "Selected: {} in {} layer, score {:.2}, opacity {:.2}, {} {}",
         item.kind_name(),
         layer_name(item.layer()),
         item.score(),
+        style.opacity,
         item.control_or_vertex_count(),
         match item {
             RerunSceneItem::Polygon { .. } => "vertices",
@@ -685,7 +696,7 @@ impl GraphBounds {
 mod tests {
     use super::{GraphBounds, HoudiniViewTransform, hit_test_scene};
     use crate::ui::houdini_graph_panel::model::{
-        CubicBezier, GraphPoint, LayerKind, RerunSceneItem, RerunSceneOutput,
+        CubicBezier, GraphPoint, GraphStyle, LayerKind, RerunSceneItem, RerunSceneOutput,
     };
 
     fn test_viewport() -> egui::Rect {
@@ -710,9 +721,11 @@ mod tests {
                 curve,
                 layer: LayerKind::Curves,
                 score: curve.score,
+                style: GraphStyle::default(),
             }],
             debug_items: vec![],
             stroke_scale: 1.0,
+            style: GraphStyle::default(),
             export_segments: 8,
             query_bridge: None,
         };
@@ -732,9 +745,11 @@ mod tests {
                 points: vec![point(2.0, 5.0), point(4.0, 5.0)],
                 layer: LayerKind::Polygons,
                 score: 1.0,
+                style: GraphStyle::default(),
             }],
             debug_items: vec![],
             stroke_scale: 1.0,
+            style: GraphStyle::default(),
             export_segments: 8,
             query_bridge: None,
         };
@@ -752,9 +767,11 @@ mod tests {
                 points: vec![point(0.0, 0.0), point(10.0, 10.0)],
                 layer: LayerKind::Polygons,
                 score: 1.0,
+                style: GraphStyle::default(),
             }],
             debug_items: vec![],
             stroke_scale: 1.0,
+            style: GraphStyle::default(),
             export_segments: 8,
             query_bridge: None,
         };
@@ -778,9 +795,11 @@ mod tests {
                 ],
                 layer: LayerKind::Polygons,
                 score: 0.75,
+                style: GraphStyle::default(),
             }],
             debug_items: vec![],
             stroke_scale: 1.0,
+            style: GraphStyle::default(),
             export_segments: 8,
             query_bridge: None,
         };
@@ -806,9 +825,11 @@ mod tests {
                 curve,
                 layer: LayerKind::Curves,
                 score: curve.score,
+                style: GraphStyle::default(),
             }],
             debug_items: vec![],
             stroke_scale: 1.0,
+            style: GraphStyle::default(),
             export_segments: 8,
             query_bridge: None,
         };

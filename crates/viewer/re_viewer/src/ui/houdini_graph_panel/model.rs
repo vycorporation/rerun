@@ -27,6 +27,7 @@ pub(crate) struct GraphDocument {
     pub source: GraphSource,
     pub nodes: Vec<GraphNode>,
     pub layers: Vec<Layer>,
+    pub style: GraphStyle,
     pub geometry: Vec<Geometry>,
     pub recording_geometry: Vec<Geometry>,
 }
@@ -144,6 +145,7 @@ impl GraphDocument {
                     visible: false,
                 },
             ],
+            style: GraphStyle::default(),
             geometry,
             recording_geometry: Vec::new(),
         }
@@ -201,6 +203,10 @@ impl GraphDocument {
             .iter()
             .find(|node| node.kind == NodeKind::Style)
             .map_or(0.5, |node| node.parameter.value)
+    }
+
+    pub fn resolved_style(&self) -> GraphStyle {
+        self.style.with_stroke_scale(self.style_scale())
     }
 
     pub fn export_segments(&self) -> usize {
@@ -316,6 +322,7 @@ impl GraphDocument {
                 summary: "Source geometry lives in the graph model before any viewer adaptation.",
                 source_metadata: Some(self.source.metadata.clone()),
                 source_error: self.source.import_error.clone(),
+                style: None,
                 warnings: Vec::new(),
             },
             NodeKind::Filter => NodeInfo {
@@ -327,6 +334,7 @@ impl GraphDocument {
                 summary: "Filter removes geometry that does not satisfy its typed attribute rule.",
                 source_metadata: None,
                 source_error: None,
+                style: None,
                 warnings: self.filter_rule_warning().into_iter().collect(),
             },
             NodeKind::Style => NodeInfo {
@@ -338,6 +346,7 @@ impl GraphDocument {
                 summary: "Style changes viewer presentation without mutating graph geometry.",
                 source_metadata: None,
                 source_error: None,
+                style: Some(self.resolved_style()),
                 warnings: Vec::new(),
             },
             NodeKind::Output => NodeInfo {
@@ -349,14 +358,17 @@ impl GraphDocument {
                 summary: "Output prepares boundary data while preserving native graph geometry.",
                 source_metadata: None,
                 source_error: None,
+                style: None,
                 warnings: Vec::new(),
             },
         })
     }
 
     pub fn viewer_output(&self) -> ViewerOutput {
+        let style = self.resolved_style();
         ViewerOutput {
-            stroke_scale: self.style_scale(),
+            stroke_scale: style.stroke_scale,
+            style,
             items: self
                 .active_geometry()
                 .iter()
@@ -396,10 +408,12 @@ impl GraphDocument {
         query_bridge: Option<RerunQueryBridge>,
     ) -> RerunSceneOutput {
         let viewer_output = self.viewer_output();
+        let style = viewer_output.style;
         let adaptive_export_output = self.adaptive_export_output();
 
         RerunSceneOutput {
             stroke_scale: viewer_output.stroke_scale,
+            style,
             export_segments: self.export_segments(),
             query_bridge,
             items: viewer_output
@@ -410,11 +424,13 @@ impl GraphDocument {
                         points: polygon.points,
                         layer: LayerKind::Polygons,
                         score: polygon.score,
+                        style,
                     },
                     ViewerGeometry::CubicBezier(curve) => RerunSceneItem::NativeCubicBezier {
                         curve,
                         layer: LayerKind::Curves,
                         score: curve.score,
+                        style,
                     },
                 })
                 .collect(),
@@ -968,6 +984,8 @@ struct HoudiniGraphSidecar {
     source: GraphSourceSidecar,
     nodes: Vec<NodeSidecar>,
     layers: Vec<LayerSidecar>,
+    #[serde(default)]
+    style: GraphStyle,
     demo_geometry: Vec<Geometry>,
     recording_geometry: Vec<Geometry>,
 }
@@ -1004,6 +1022,7 @@ impl HoudiniGraphSidecar {
                     visible: layer.visible,
                 })
                 .collect(),
+            style: graph.resolved_style(),
             demo_geometry: graph.geometry.clone(),
             recording_geometry: graph.recording_geometry.clone(),
         }
@@ -1028,6 +1047,7 @@ impl HoudiniGraphSidecar {
         };
         graph.geometry = self.demo_geometry;
         graph.recording_geometry = self.recording_geometry;
+        graph.style = self.style;
 
         for node_snapshot in self.nodes {
             if let Some(node) = graph
@@ -1056,6 +1076,7 @@ impl HoudiniGraphSidecar {
         }
 
         graph.update_source_node_readiness();
+        graph.style.stroke_scale = graph.style_scale();
         Ok(())
     }
 }
@@ -1282,6 +1303,7 @@ pub(crate) struct NodeInfo {
     pub summary: &'static str,
     pub source_metadata: Option<SourceMetadata>,
     pub source_error: Option<String>,
+    pub style: Option<GraphStyle>,
     pub warnings: Vec<String>,
 }
 
@@ -1366,6 +1388,7 @@ impl CubicBezier {
 pub(crate) struct ViewerOutput {
     pub items: Vec<ViewerGeometry>,
     pub stroke_scale: f32,
+    pub style: GraphStyle,
 }
 
 pub(crate) enum ViewerGeometry {
@@ -1386,8 +1409,46 @@ pub(crate) struct RerunSceneOutput {
     pub items: Vec<RerunSceneItem>,
     pub debug_items: Vec<RerunSceneDebugItem>,
     pub stroke_scale: f32,
+    pub style: GraphStyle,
     pub export_segments: usize,
     pub query_bridge: Option<RerunQueryBridge>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct GraphStyle {
+    pub color: GraphColor,
+    pub opacity: f32,
+    pub stroke_scale: f32,
+}
+
+impl GraphStyle {
+    fn with_stroke_scale(self, stroke_scale: f32) -> Self {
+        Self {
+            stroke_scale,
+            ..self
+        }
+    }
+}
+
+impl Default for GraphStyle {
+    fn default() -> Self {
+        Self {
+            color: GraphColor {
+                r: 91,
+                g: 169,
+                b: 255,
+            },
+            opacity: 0.55,
+            stroke_scale: 0.75,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct GraphColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1420,11 +1481,13 @@ pub(crate) enum RerunSceneItem {
         points: Vec<GraphPoint>,
         layer: LayerKind,
         score: f32,
+        style: GraphStyle,
     },
     NativeCubicBezier {
         curve: CubicBezier,
         layer: LayerKind,
         score: f32,
+        style: GraphStyle,
     },
 }
 
@@ -1448,6 +1511,12 @@ impl RerunSceneItem {
         }
     }
 
+    pub fn style(&self) -> GraphStyle {
+        match self {
+            Self::Polygon { style, .. } | Self::NativeCubicBezier { style, .. } => *style,
+        }
+    }
+
     pub fn control_or_vertex_count(&self) -> usize {
         match self {
             Self::Polygon { points, .. } => points.len(),
@@ -1464,9 +1533,9 @@ pub(crate) enum RerunSceneDebugItem {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportGeometry, Geometry, GraphDocument, GraphPoint, HoudiniCubicBezierParquetSchema,
-        HoudiniGeometryRecord, HoudiniGeometrySchema, LayerKind, NodeParameterKind,
-        RerunSceneDebugItem, RerunSceneItem, SourceProvenance, ViewerGeometry,
+        ExportGeometry, Geometry, GraphColor, GraphDocument, GraphPoint, GraphStyle,
+        HoudiniCubicBezierParquetSchema, HoudiniGeometryRecord, HoudiniGeometrySchema, LayerKind,
+        NodeParameterKind, RerunSceneDebugItem, RerunSceneItem, SourceProvenance, ViewerGeometry,
         load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
@@ -1549,6 +1618,51 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item, RerunSceneItem::NativeCubicBezier { .. }))
         );
+    }
+
+    #[test]
+    fn style_node_reports_graph_owned_defaults() {
+        let graph = GraphDocument::sample();
+        let style = graph.resolved_style();
+
+        assert_eq!(style, GraphStyle::default());
+        assert_eq!(style.color, GraphStyle::default().color);
+        assert_eq!(style.opacity, 0.55);
+        assert_eq!(style.stroke_scale, 0.75);
+
+        let info = graph
+            .selected_node_info(2)
+            .expect("sample graph should include style node");
+        assert_eq!(info.style, Some(style));
+        assert_eq!(info.parameter.name, "Stroke scale");
+    }
+
+    #[test]
+    fn rerun_scene_output_carries_graph_owned_style_metadata() {
+        let mut graph = GraphDocument::sample();
+        graph.style = GraphStyle {
+            color: GraphColor {
+                r: 12,
+                g: 34,
+                b: 56,
+            },
+            opacity: 0.42,
+            stroke_scale: 0.75,
+        };
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == super::NodeKind::Style)
+            .expect("sample graph should include style node")
+            .parameter
+            .value = 0.33;
+
+        let scene = graph.rerun_scene_output();
+
+        assert_eq!(scene.style.color, graph.style.color);
+        assert_eq!(scene.style.opacity, graph.style.opacity);
+        assert_eq!(scene.style.stroke_scale, 0.33);
+        assert!(scene.items.iter().all(|item| item.style() == scene.style));
     }
 
     #[test]
@@ -2062,6 +2176,22 @@ mod tests {
             .as_mut()
             .expect("filter node should have rule spec")
             .comparison = super::FilterComparison::LessOrEqual;
+        graph.style = GraphStyle {
+            color: GraphColor {
+                r: 22,
+                g: 44,
+                b: 66,
+            },
+            opacity: 0.38,
+            stroke_scale: 0.75,
+        };
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == super::NodeKind::Style)
+            .expect("sample graph should include style node")
+            .parameter
+            .value = 0.63;
         graph
             .layers
             .iter_mut()
@@ -2103,6 +2233,18 @@ mod tests {
                 .expect("restored graph should include filter rule")
                 .comparison,
             super::FilterComparison::LessOrEqual
+        );
+        assert_eq!(
+            restored.resolved_style(),
+            GraphStyle {
+                color: GraphColor {
+                    r: 22,
+                    g: 44,
+                    b: 66,
+                },
+                opacity: 0.38,
+                stroke_scale: 0.63,
+            }
         );
     }
 
