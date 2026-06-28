@@ -12,21 +12,13 @@ use re_viewer_context::{
 use crate::ui::houdini_graph_panel::model::{
     CubicBezier, ExportGeometry, GraphDocument, GraphPoint, LayerKind, ViewerGeometry,
 };
+use crate::ui::houdini_graph_panel::shared_houdini_graph;
 
 #[derive(Default)]
 pub(crate) struct HoudiniGraphView;
 
-struct HoudiniGraphViewState {
-    graph: GraphDocument,
-}
-
-impl Default for HoudiniGraphViewState {
-    fn default() -> Self {
-        Self {
-            graph: GraphDocument::sample(),
-        }
-    }
-}
+#[derive(Default)]
+struct HoudiniGraphViewState {}
 
 impl ViewState for HoudiniGraphViewState {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -102,16 +94,17 @@ impl ViewClass for HoudiniGraphView {
         _space_origin: &EntityPath,
         _view_id: re_viewer_context::ViewId,
     ) -> Result<(), ViewSystemExecutionError> {
-        let state = state.downcast_ref::<HoudiniGraphViewState>()?;
+        state.downcast_ref::<HoudiniGraphViewState>()?;
+        let graph = shared_houdini_graph();
         ui.label("Product-fork spike view. The graph model is not Rerun viewer state.");
         ui.label(format!(
             "{} polygons, {} native cubic Bezier curves",
-            state.graph.polygon_count(),
-            state.graph.cubic_bezier_count()
+            graph.polygon_count(),
+            graph.cubic_bezier_count()
         ));
         ui.label(format!(
             "{} adaptive export segments at the current output boundary",
-            state.graph.export_segments()
+            graph.export_segments()
         ));
         Ok(())
     }
@@ -125,7 +118,7 @@ impl ViewClass for HoudiniGraphView {
         query: &ViewQuery<'_>,
         _system_output: SystemExecutionOutput,
     ) -> Result<(), ViewSystemExecutionError> {
-        let state = state.downcast_mut::<HoudiniGraphViewState>()?;
+        state.downcast_mut::<HoudiniGraphViewState>()?;
         let rect = ui.max_rect();
         let response = ui.allocate_rect(rect, Sense::click());
 
@@ -138,7 +131,8 @@ impl ViewClass for HoudiniGraphView {
                 .send_system(SystemCommand::set_selection(Item::View(query.view_id)));
         }
 
-        draw_houdini_output_view(ui, rect, &state.graph);
+        let graph = shared_houdini_graph();
+        draw_houdini_output_view(ui, rect, &graph);
         Ok(())
     }
 }

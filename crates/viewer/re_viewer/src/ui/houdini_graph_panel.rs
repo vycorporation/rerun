@@ -1,3 +1,5 @@
+use std::sync::{LazyLock, Mutex, MutexGuard};
+
 use egui::epaint::CubicBezierShape;
 use egui::{
     Align2, Color32, FontId, Pos2, Rect, Response, Sense, Slider, Stroke, StrokeKind, Ui, Vec2,
@@ -8,22 +10,28 @@ pub(crate) mod model;
 
 use self::model::{ExportGeometry, GraphDocument, GraphPoint, LayerKind, ViewerGeometry};
 
+static SHARED_HOUDINI_GRAPH: LazyLock<Mutex<GraphDocument>> =
+    LazyLock::new(|| Mutex::new(GraphDocument::sample()));
+
+pub(crate) fn shared_houdini_graph() -> MutexGuard<'static, GraphDocument> {
+    SHARED_HOUDINI_GRAPH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub(crate) struct HoudiniGraphPanel {
-    graph: GraphDocument,
     selected_node: usize,
 }
 
 impl Default for HoudiniGraphPanel {
     fn default() -> Self {
-        Self {
-            graph: GraphDocument::sample(),
-            selected_node: 1,
-        }
+        Self { selected_node: 1 }
     }
 }
 
 impl HoudiniGraphPanel {
     pub(crate) fn show(&mut self, ui: &mut Ui) {
+        let mut graph = shared_houdini_graph();
         egui::Frame {
             inner_margin: egui::Margin::same(8),
             ..Default::default()
@@ -34,17 +42,17 @@ impl HoudiniGraphPanel {
             ui.add_space(6.0);
 
             ui.strong("Graph Canvas");
-            self.node_graph_ui(ui);
+            self.node_graph_ui(ui, &graph);
 
             ui.add_space(8.0);
             ui.strong("Layers");
-            for layer in &mut self.graph.layers {
+            for layer in &mut graph.layers {
                 ui.re_checkbox(&mut layer.visible, layer.name);
             }
 
             ui.add_space(8.0);
             ui.strong("Parameters");
-            if let Some(node) = self.graph.nodes.get_mut(self.selected_node) {
+            if let Some(node) = graph.nodes.get_mut(self.selected_node) {
                 ui.label(node.info);
                 let response = ui.add(Slider::new(&mut node.weight, 0.0..=1.0).text(node.parameter));
                 if node.name == "Rerun Output" {
@@ -56,19 +64,19 @@ impl HoudiniGraphPanel {
 
             ui.add_space(8.0);
             ui.strong("Node Info");
-            self.node_info_ui(ui);
+            self.node_info_ui(ui, &graph);
 
             ui.add_space(8.0);
             ui.strong("Pipeline Trace");
-            self.pipeline_trace_ui(ui);
+            self.pipeline_trace_ui(ui, &graph);
 
             ui.add_space(8.0);
             ui.strong("Viewer Output Preview");
-            self.output_preview_ui(ui);
+            self.output_preview_ui(ui, &graph);
 
             ui.add_space(8.0);
             ui.strong("Graph Model");
-            let export_output = self.graph.adaptive_export_output();
+            let export_output = graph.adaptive_export_output();
             let export_polyline_points = export_output
                 .items
                 .iter()
@@ -80,17 +88,17 @@ impl HoudiniGraphPanel {
                 .sum::<usize>();
             ui.label(format!(
                 "{} source polygons, {} source cubic Bezier curves",
-                self.graph.polygon_count(),
-                self.graph.cubic_bezier_count()
+                graph.polygon_count(),
+                graph.cubic_bezier_count()
             ));
             ui.label(format!(
                 "{} polygon vertices, {} cubic control points",
-                self.graph.polygon_vertex_count(),
-                self.graph.cubic_control_point_count()
+                graph.polygon_vertex_count(),
+                graph.cubic_control_point_count()
             ));
             ui.label(format!(
                 "{} visible output items after layer and filter controls",
-                self.graph.visible_output_count()
+                graph.visible_output_count()
             ));
             ui.label(format!(
                 "{} prepared export points at output boundary",
@@ -98,12 +106,12 @@ impl HoudiniGraphPanel {
             ));
             ui.label(format!(
                 "{} adaptive segments per emitted cubic at boundary",
-                self.graph.export_segments()
+                graph.export_segments()
             ));
         });
     }
 
-    fn node_graph_ui(&mut self, ui: &mut Ui) -> Response {
+    fn node_graph_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) -> Response {
         let desired_size = egui::vec2(ui.available_width().max(280.0), 176.0);
         let (response, painter) = ui.allocate_painter(desired_size, Sense::click());
         let rect = response.rect;
@@ -117,8 +125,8 @@ impl HoudiniGraphPanel {
 
         let rect = rect.shrink2(egui::vec2(12.0, 10.0));
         let node_size = Vec2::new(116.0, 48.0);
-        let layout = self.graph.graph_layout();
-        let mut node_rects = vec![Rect::NOTHING; self.graph.nodes.len()];
+        let layout = graph.graph_layout();
+        let mut node_rects = vec![Rect::NOTHING; graph.nodes.len()];
         for layout_node in &layout.nodes {
             node_rects[layout_node.node_index] = Rect::from_center_size(
                 map_node_layout_point(rect, layout_node.position, node_size),
@@ -149,7 +157,7 @@ impl HoudiniGraphPanel {
         }
 
         for layout_node in &layout.nodes {
-            let Some(node) = self.graph.nodes.get(layout_node.node_index) else {
+            let Some(node) = graph.nodes.get(layout_node.node_index) else {
                 continue;
             };
             let node_rect = node_rects[layout_node.node_index];
@@ -186,8 +194,8 @@ impl HoudiniGraphPanel {
         response
     }
 
-    fn node_info_ui(&self, ui: &mut Ui) {
-        if let Some(info) = self.graph.selected_node_info(self.selected_node) {
+    fn node_info_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
+        if let Some(info) = graph.selected_node_info(self.selected_node) {
             egui::Grid::new("houdini_graph_node_info")
                 .num_columns(2)
                 .spacing([12.0, 4.0])
@@ -219,7 +227,7 @@ impl HoudiniGraphPanel {
         }
     }
 
-    fn pipeline_trace_ui(&self, ui: &mut Ui) {
+    fn pipeline_trace_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
         egui::Grid::new("houdini_graph_pipeline_trace")
             .num_columns(4)
             .spacing([10.0, 4.0])
@@ -231,7 +239,7 @@ impl HoudiniGraphPanel {
                 ui.weak("Operation");
                 ui.end_row();
 
-                for stage in self.graph.pipeline_stages() {
+                for stage in graph.pipeline_stages() {
                     ui.label(stage.name);
                     ui.label(stage.input_count.to_string());
                     ui.label(stage.output_count.to_string());
@@ -241,7 +249,7 @@ impl HoudiniGraphPanel {
             });
     }
 
-    fn output_preview_ui(&self, ui: &mut Ui) -> Response {
+    fn output_preview_ui(&self, ui: &mut Ui, graph: &GraphDocument) -> Response {
         let desired_size = egui::vec2(ui.available_width().max(280.0), 150.0);
         let (response, painter) = ui.allocate_painter(desired_size, Sense::hover());
         let rect = response.rect.shrink(4.0);
@@ -252,11 +260,11 @@ impl HoudiniGraphPanel {
         painter.rect_stroke(rect, 4.0, border, StrokeKind::Inside);
 
         let viewport = rect.shrink2(egui::vec2(16.0, 14.0));
-        let output = self.graph.viewer_output();
-        let debug_visible = self.graph.layer_visible(LayerKind::Debug);
+        let output = graph.viewer_output();
+        let debug_visible = graph.layer_visible(LayerKind::Debug);
 
         if debug_visible {
-            self.debug_output_preview_ui(ui, viewport);
+            self.debug_output_preview_ui(ui, viewport, graph);
         }
 
         for geometry in &output.items {
@@ -303,7 +311,7 @@ impl HoudiniGraphPanel {
         painter.text(
             rect.left_top() + egui::vec2(8.0, 8.0),
             Align2::LEFT_TOP,
-            format!("{} emitted", self.graph.visible_output_count()),
+            format!("{} emitted", graph.visible_output_count()),
             FontId::monospace(11.0),
             ui.visuals().weak_text_color(),
         );
@@ -311,11 +319,11 @@ impl HoudiniGraphPanel {
         response
     }
 
-    fn debug_output_preview_ui(&self, ui: &mut Ui, viewport: Rect) {
+    fn debug_output_preview_ui(&self, ui: &mut Ui, viewport: Rect, graph: &GraphDocument) {
         let painter = ui.painter();
         let control_stroke = Stroke::new(1.0, Color32::from_rgb(150, 150, 150));
         let export_stroke = Stroke::new(1.0, Color32::from_rgb(115, 210, 155));
-        let export_output = self.graph.adaptive_export_output();
+        let export_output = graph.adaptive_export_output();
 
         for geometry in &export_output.items {
             if let ExportGeometry::Polyline(points) = geometry {
@@ -338,7 +346,7 @@ impl HoudiniGraphPanel {
             }
         }
 
-        for geometry in &self.graph.viewer_output().items {
+        for geometry in &graph.viewer_output().items {
             if let ViewerGeometry::CubicBezier(curve) = geometry {
                 let control_points = curve.control_points();
                 for pair in control_points.windows(2) {
