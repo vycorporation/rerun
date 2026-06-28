@@ -22,24 +22,28 @@ impl GraphDocument {
             nodes: vec![
                 GraphNode {
                     name: "Source",
+                    kind: NodeKind::Source,
                     weight: 1.0,
                     parameter: "Read",
                     info: "Loads polygon and cubic Bezier records.",
                 },
                 GraphNode {
                     name: "Filter",
+                    kind: NodeKind::Filter,
                     weight: 0.55,
                     parameter: "Minimum score",
                     info: "Filters features by sample score.",
                 },
                 GraphNode {
                     name: "Style",
+                    kind: NodeKind::Style,
                     weight: 0.75,
                     parameter: "Stroke scale",
                     info: "Assigns visual parameters before viewer output.",
                 },
                 GraphNode {
                     name: "Rerun Output",
+                    kind: NodeKind::Output,
                     weight: 1.0,
                     parameter: "Export",
                     info: "Prepares adaptive viewer geometry only at the output edge.",
@@ -72,12 +76,28 @@ impl GraphDocument {
                     ],
                     score: 0.62,
                 }),
+                Geometry::Polygon(Polygon {
+                    points: vec![
+                        GraphPoint::new(0.08, 0.25),
+                        GraphPoint::new(0.36, 0.18),
+                        GraphPoint::new(0.42, 0.44),
+                        GraphPoint::new(0.2, 0.56),
+                    ],
+                    score: 0.48,
+                }),
                 Geometry::CubicBezier(CubicBezier {
                     start: GraphPoint::new(0.0, 0.0),
                     control_1: GraphPoint::new(0.25, 1.0),
                     control_2: GraphPoint::new(0.75, -0.4),
                     end: GraphPoint::new(1.0, 0.6),
                     score: 0.82,
+                }),
+                Geometry::CubicBezier(CubicBezier {
+                    start: GraphPoint::new(0.18, 0.12),
+                    control_1: GraphPoint::new(0.35, 0.9),
+                    control_2: GraphPoint::new(0.68, 0.05),
+                    end: GraphPoint::new(0.92, 0.88),
+                    score: 0.35,
                 }),
             ],
         }
@@ -161,6 +181,45 @@ impl GraphDocument {
         self.viewer_output().items.len()
     }
 
+    pub fn selected_node_info(&self, index: usize) -> Option<NodeInfo> {
+        let node = self.nodes.get(index)?;
+        let visible_output_count = self.visible_output_count();
+        let source_count = self.geometry.len();
+        let filtered_count = self
+            .geometry
+            .iter()
+            .filter(|geometry| geometry.score() >= self.filter_minimum_score())
+            .count();
+        let styled_count = filtered_count;
+
+        Some(match node.kind {
+            NodeKind::Source => NodeInfo {
+                kind: node.kind,
+                input_count: 0,
+                output_count: source_count,
+                summary: "Source geometry lives in the graph model before any viewer adaptation.",
+            },
+            NodeKind::Filter => NodeInfo {
+                kind: node.kind,
+                input_count: source_count,
+                output_count: filtered_count,
+                summary: "Filter removes geometry below the minimum sample score.",
+            },
+            NodeKind::Style => NodeInfo {
+                kind: node.kind,
+                input_count: filtered_count,
+                output_count: styled_count,
+                summary: "Style changes viewer presentation without mutating graph geometry.",
+            },
+            NodeKind::Output => NodeInfo {
+                kind: node.kind,
+                input_count: styled_count,
+                output_count: visible_output_count,
+                summary: "Output prepares boundary data while preserving native graph geometry.",
+            },
+        })
+    }
+
     pub fn viewer_output(&self) -> ViewerOutput {
         ViewerOutput {
             stroke_scale: self.style_scale(),
@@ -196,9 +255,36 @@ impl GraphDocument {
 
 pub(crate) struct GraphNode {
     pub name: &'static str,
+    pub kind: NodeKind,
     pub weight: f32,
     pub parameter: &'static str,
     pub info: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NodeKind {
+    Source,
+    Filter,
+    Style,
+    Output,
+}
+
+impl NodeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "Source",
+            Self::Filter => "Filter",
+            Self::Style => "Style",
+            Self::Output => "Output",
+        }
+    }
+}
+
+pub(crate) struct NodeInfo {
+    pub kind: NodeKind,
+    pub input_count: usize,
+    pub output_count: usize,
+    pub summary: &'static str,
 }
 
 pub(crate) struct Layer {
@@ -297,18 +383,18 @@ mod tests {
     #[test]
     fn sample_curve_is_native_cubic_with_four_points() {
         let graph = GraphDocument::sample();
-        let curve = graph
+        let curves = graph
             .geometry
             .iter()
-            .find_map(|geometry| match geometry {
-                Geometry::CubicBezier(curve) => Some(curve),
+            .filter_map(|geometry| match geometry {
+                Geometry::CubicBezier(curve) => Some(*curve),
                 Geometry::Polygon(_) => None,
             })
-            .expect("sample graph should include a cubic Bezier");
+            .collect::<Vec<_>>();
 
-        assert_eq!(curve.control_points().len(), 4);
-        assert_eq!(graph.cubic_bezier_count(), 1);
-        assert_eq!(graph.cubic_control_point_count(), 4);
+        assert_eq!(curves.len(), graph.cubic_bezier_count());
+        assert!(curves.iter().all(|curve| curve.control_points().len() == 4));
+        assert_eq!(graph.cubic_control_point_count(), curves.len() * 4);
     }
 
     #[test]
@@ -339,7 +425,10 @@ mod tests {
             ExportGeometry::Polyline(points) => points.len() == 9,
             ExportGeometry::Polygon(_) => false,
         }));
-        assert_eq!(graph.cubic_control_point_count(), 4);
+        assert_eq!(
+            graph.cubic_control_point_count(),
+            graph.cubic_bezier_count() * 4
+        );
     }
 
     #[test]
@@ -361,7 +450,32 @@ mod tests {
             .expect("sample graph should include output node")
             .weight = 1.0;
         assert_eq!(graph.export_segments(), 16);
-        assert_eq!(graph.cubic_control_point_count(), 4);
+        assert_eq!(
+            graph.cubic_control_point_count(),
+            graph.cubic_bezier_count() * 4
+        );
+    }
+
+    #[test]
+    fn selected_node_info_reports_pipeline_counts() {
+        let graph = GraphDocument::sample();
+
+        let source = graph
+            .selected_node_info(0)
+            .expect("sample graph should include source node");
+        assert_eq!(source.input_count, 0);
+        assert_eq!(source.output_count, 4);
+
+        let filter = graph
+            .selected_node_info(1)
+            .expect("sample graph should include filter node");
+        assert_eq!(filter.input_count, 4);
+        assert_eq!(filter.output_count, 2);
+
+        let output = graph
+            .selected_node_info(3)
+            .expect("sample graph should include output node");
+        assert_eq!(output.output_count, 2);
     }
 
     #[test]

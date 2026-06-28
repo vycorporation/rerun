@@ -54,6 +54,10 @@ impl HoudiniGraphPanel {
             }
 
             ui.add_space(8.0);
+            ui.strong("Node Info");
+            self.node_info_ui(ui);
+
+            ui.add_space(8.0);
             ui.strong("Viewer Output Preview");
             self.output_preview_ui(ui);
 
@@ -166,6 +170,28 @@ impl HoudiniGraphPanel {
         }
 
         response
+    }
+
+    fn node_info_ui(&self, ui: &mut Ui) {
+        if let Some(info) = self.graph.selected_node_info(self.selected_node) {
+            egui::Grid::new("houdini_graph_node_info")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    ui.weak("Kind");
+                    ui.label(info.kind.as_str());
+                    ui.end_row();
+
+                    ui.weak("Inputs");
+                    ui.label(info.input_count.to_string());
+                    ui.end_row();
+
+                    ui.weak("Outputs");
+                    ui.label(info.output_count.to_string());
+                    ui.end_row();
+                });
+            ui.label(info.summary);
+        }
     }
 
     fn output_preview_ui(&self, ui: &mut Ui) -> Response {
