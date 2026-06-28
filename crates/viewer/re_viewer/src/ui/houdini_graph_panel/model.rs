@@ -240,6 +240,45 @@ impl GraphDocument {
         self.viewer_output().items.len()
     }
 
+    pub fn attribute_table_rows(&self, query: &AttributeTableQuery) -> Vec<AttributeTableRow> {
+        let source_path = self
+            .source
+            .source_path
+            .clone()
+            .or_else(|| self.source.metadata.source_path.clone());
+        let provenance = self.source.metadata.provenance;
+        let search = query.search.trim().to_ascii_lowercase();
+
+        let mut rows = self
+            .active_geometry()
+            .iter()
+            .enumerate()
+            .filter(|(_, geometry)| self.emits(geometry))
+            .map(|(record_index, geometry)| AttributeTableRow {
+                record_index,
+                geometry_kind: geometry.kind(),
+                score: geometry.score(),
+                layer: geometry.layer(),
+                point_count: geometry.control_or_vertex_count(),
+                source_path: source_path.clone(),
+                provenance,
+                is_native_cubic_bezier: matches!(geometry, Geometry::CubicBezier(_)),
+            })
+            .filter(|row| {
+                query
+                    .minimum_score
+                    .is_none_or(|minimum_score| row.score >= minimum_score)
+            })
+            .filter(|row| search.is_empty() || row.matches_search(&search))
+            .collect::<Vec<_>>();
+
+        rows.sort_by(|left, right| query.sort.compare(left, right));
+        if query.sort_descending {
+            rows.reverse();
+        }
+        rows
+    }
+
     pub fn pipeline_stages(&self) -> Vec<PipelineStage> {
         let source_count = self.active_geometry().len();
         let filtered_count = self
@@ -1436,6 +1475,87 @@ pub(crate) struct PipelineStage {
     pub note: &'static str,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AttributeTableQuery {
+    pub search: String,
+    pub minimum_score: Option<f32>,
+    pub sort: AttributeTableSort,
+    pub sort_descending: bool,
+}
+
+impl Default for AttributeTableQuery {
+    fn default() -> Self {
+        Self {
+            search: String::new(),
+            minimum_score: None,
+            sort: AttributeTableSort::RecordIndex,
+            sort_descending: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AttributeTableSort {
+    RecordIndex,
+    GeometryKind,
+    Score,
+    Layer,
+}
+
+impl AttributeTableSort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RecordIndex => "Index",
+            Self::GeometryKind => "Kind",
+            Self::Score => "Score",
+            Self::Layer => "Layer",
+        }
+    }
+
+    fn compare(self, left: &AttributeTableRow, right: &AttributeTableRow) -> std::cmp::Ordering {
+        match self {
+            Self::RecordIndex => left.record_index.cmp(&right.record_index),
+            Self::GeometryKind => left
+                .geometry_kind
+                .as_str()
+                .cmp(right.geometry_kind.as_str()),
+            Self::Score => left.score.total_cmp(&right.score),
+            Self::Layer => left.layer.as_str().cmp(right.layer.as_str()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AttributeTableRow {
+    pub record_index: usize,
+    pub geometry_kind: GeometryKind,
+    pub score: f32,
+    pub layer: LayerKind,
+    pub point_count: usize,
+    pub source_path: Option<String>,
+    pub provenance: SourceProvenance,
+    pub is_native_cubic_bezier: bool,
+}
+
+impl AttributeTableRow {
+    fn matches_search(&self, search: &str) -> bool {
+        self.geometry_kind
+            .as_str()
+            .to_ascii_lowercase()
+            .contains(search)
+            || self.layer.as_str().to_ascii_lowercase().contains(search)
+            || self
+                .provenance
+                .as_str()
+                .to_ascii_lowercase()
+                .contains(search)
+            || self
+                .source_path
+                .as_deref()
+                .is_some_and(|path| path.to_ascii_lowercase().contains(search))
+    }
+}
+
 pub(crate) struct Layer {
     pub name: &'static str,
     pub kind: LayerKind,
@@ -1449,6 +1569,16 @@ pub(crate) enum LayerKind {
     Debug,
 }
 
+impl LayerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Polygons => "Polygons",
+            Self::Curves => "Curves",
+            Self::Debug => "Debug",
+        }
+    }
+}
+
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) enum Geometry {
     Polygon(Polygon),
@@ -1460,6 +1590,42 @@ impl Geometry {
         match self {
             Self::Polygon(polygon) => polygon.score,
             Self::CubicBezier(curve) => curve.score,
+        }
+    }
+
+    pub fn kind(&self) -> GeometryKind {
+        match self {
+            Self::Polygon(_) => GeometryKind::Polygon,
+            Self::CubicBezier(_) => GeometryKind::CubicBezier,
+        }
+    }
+
+    pub fn layer(&self) -> LayerKind {
+        match self {
+            Self::Polygon(_) => LayerKind::Polygons,
+            Self::CubicBezier(_) => LayerKind::Curves,
+        }
+    }
+
+    pub fn control_or_vertex_count(&self) -> usize {
+        match self {
+            Self::Polygon(polygon) => polygon.points.len(),
+            Self::CubicBezier(curve) => curve.control_points().len(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GeometryKind {
+    Polygon,
+    CubicBezier,
+}
+
+impl GeometryKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Polygon => "Polygon",
+            Self::CubicBezier => "Native cubic Bezier",
         }
     }
 }
@@ -1655,10 +1821,11 @@ pub(crate) enum RerunSceneDebugItem {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportGeometry, Geometry, GraphColor, GraphDocument, GraphPoint, GraphStyle,
-        HoudiniCubicBezierParquetSchema, HoudiniGeometryRecord, HoudiniGeometrySchema, LayerKind,
-        NodeParameterKind, NodeStatus, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
-        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        AttributeTableQuery, AttributeTableSort, ExportGeometry, Geometry, GeometryKind,
+        GraphColor, GraphDocument, GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema,
+        HoudiniGeometryRecord, HoudiniGeometrySchema, LayerKind, NodeParameterKind, NodeStatus,
+        RerunSceneDebugItem, RerunSceneItem, SourceProvenance, ViewerGeometry,
+        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -1949,6 +2116,52 @@ mod tests {
         assert_eq!(stages[1].output_count, 2);
         assert_eq!(stages[3].name, "Rerun Output");
         assert_eq!(stages[3].output_count, graph.visible_output_count());
+    }
+
+    #[test]
+    fn attribute_table_rows_report_visible_native_output_records() {
+        let graph = GraphDocument::sample();
+        let rows = graph.attribute_table_rows(&AttributeTableQuery::default());
+
+        assert_eq!(rows.len(), graph.visible_output_count());
+        assert_eq!(rows[0].record_index, 0);
+        assert_eq!(rows[0].geometry_kind, GeometryKind::Polygon);
+        assert_eq!(rows[0].layer, LayerKind::Polygons);
+        assert_eq!(rows[0].score, 0.62);
+        assert_eq!(rows[0].point_count, 4);
+        assert_eq!(rows[0].provenance, SourceProvenance::DemoFallback);
+        assert!(rows[0].source_path.is_none());
+
+        let cubic_row = rows
+            .iter()
+            .find(|row| row.geometry_kind == GeometryKind::CubicBezier)
+            .expect("sample visible output should include a cubic row");
+        assert!(cubic_row.is_native_cubic_bezier);
+        assert_eq!(cubic_row.point_count, 4);
+    }
+
+    #[test]
+    fn attribute_table_query_filters_searches_and_sorts_locally() {
+        let graph = GraphDocument::sample();
+        let rows = graph.attribute_table_rows(&AttributeTableQuery {
+            search: "curves".to_owned(),
+            minimum_score: Some(0.8),
+            sort: AttributeTableSort::Score,
+            sort_descending: true,
+        });
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].geometry_kind, GeometryKind::CubicBezier);
+        assert_eq!(rows[0].layer, LayerKind::Curves);
+        assert_eq!(rows[0].score, 0.82);
+        assert_eq!(graph.visible_output_count(), 2);
+        assert!(
+            graph
+                .viewer_output()
+                .items
+                .iter()
+                .any(|geometry| matches!(geometry, ViewerGeometry::CubicBezier(_)))
+        );
     }
 
     #[test]

@@ -8,8 +8,8 @@ use re_ui::UiExt as _;
 pub(crate) mod model;
 
 use self::model::{
-    ExportGeometry, GeometryBounds, GraphDocument, GraphPoint, GraphStyle, NodeStatus,
-    SourceMetadata,
+    AttributeTableQuery, AttributeTableRow, AttributeTableSort, ExportGeometry, GeometryBounds,
+    GraphDocument, GraphPoint, GraphStyle, NodeStatus, SourceMetadata,
 };
 
 pub(crate) type SharedHoudiniGraph = Arc<Mutex<GraphDocument>>;
@@ -44,6 +44,11 @@ pub(crate) struct HoudiniGraphPanel {
     last_parquet_path: Option<String>,
     parquet_status: Option<String>,
     graph_document_status: Option<String>,
+    table_search: String,
+    table_minimum_score_enabled: bool,
+    table_minimum_score: f32,
+    table_sort: AttributeTableSort,
+    table_sort_descending: bool,
 }
 
 impl Default for HoudiniGraphPanel {
@@ -54,6 +59,11 @@ impl Default for HoudiniGraphPanel {
             last_parquet_path: None,
             parquet_status: None,
             graph_document_status: None,
+            table_search: String::new(),
+            table_minimum_score_enabled: false,
+            table_minimum_score: 0.0,
+            table_sort: AttributeTableSort::RecordIndex,
+            table_sort_descending: false,
         }
     }
 }
@@ -98,6 +108,10 @@ impl HoudiniGraphPanel {
             ui.add_space(8.0);
             ui.strong("Pipeline Trace");
             self.pipeline_trace_ui(ui, &graph);
+
+            ui.add_space(8.0);
+            ui.strong("Attribute Table");
+            self.attribute_table_ui(ui, &graph);
 
             ui.add_space(8.0);
             ui.strong("Graph Model");
@@ -477,6 +491,102 @@ impl HoudiniGraphPanel {
                     ui.end_row();
                 }
             });
+    }
+
+    fn attribute_table_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) {
+        ui.horizontal(|ui| {
+            ui.label("Search");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.table_search)
+                    .desired_width(160.0)
+                    .hint_text("kind, layer, source"),
+            );
+
+            ui.re_checkbox(&mut self.table_minimum_score_enabled, "Min score");
+            if self.table_minimum_score_enabled {
+                ui.add(
+                    Slider::new(&mut self.table_minimum_score, 0.0..=1.0)
+                        .text("")
+                        .show_value(true),
+                );
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.weak("Sort");
+            for sort in [
+                AttributeTableSort::RecordIndex,
+                AttributeTableSort::GeometryKind,
+                AttributeTableSort::Score,
+                AttributeTableSort::Layer,
+            ] {
+                if ui
+                    .selectable_label(self.table_sort == sort, sort.as_str())
+                    .clicked()
+                {
+                    if self.table_sort == sort {
+                        self.table_sort_descending = !self.table_sort_descending;
+                    } else {
+                        self.table_sort = sort;
+                        self.table_sort_descending = false;
+                    }
+                }
+            }
+            ui.weak(if self.table_sort_descending {
+                "descending"
+            } else {
+                "ascending"
+            });
+        });
+
+        let query = AttributeTableQuery {
+            search: self.table_search.clone(),
+            minimum_score: self
+                .table_minimum_score_enabled
+                .then_some(self.table_minimum_score),
+            sort: self.table_sort,
+            sort_descending: self.table_sort_descending,
+        };
+        let rows = graph.attribute_table_rows(&query);
+
+        ui.weak(format!(
+            "{} visible read-only records; table filters do not change graph output",
+            rows.len()
+        ));
+        egui::ScrollArea::vertical()
+            .id_salt("houdini_graph_attribute_table")
+            .max_height(160.0)
+            .show(ui, |ui| {
+                egui::Grid::new("houdini_graph_attribute_table_grid")
+                    .num_columns(7)
+                    .spacing([10.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.weak("Index");
+                        ui.weak("Kind");
+                        ui.weak("Score");
+                        ui.weak("Layer");
+                        ui.weak("Points");
+                        ui.weak("Provenance");
+                        ui.weak("Source");
+                        ui.end_row();
+
+                        for row in rows {
+                            self.attribute_table_row_ui(ui, &row);
+                        }
+                    });
+            });
+    }
+
+    fn attribute_table_row_ui(&self, ui: &mut Ui, row: &AttributeTableRow) {
+        ui.label(row.record_index.to_string());
+        ui.label(row.geometry_kind.as_str());
+        ui.label(format!("{:.2}", row.score));
+        ui.label(row.layer.as_str());
+        ui.label(row.point_count.to_string());
+        ui.label(row.provenance.as_str());
+        ui.label(row.source_path.as_deref().unwrap_or("none"));
+        ui.end_row();
     }
 }
 
