@@ -8,7 +8,8 @@ use re_ui::UiExt as _;
 pub(crate) mod model;
 
 use self::model::{
-    ExportGeometry, GeometryBounds, GraphDocument, GraphPoint, GraphStyle, SourceMetadata,
+    ExportGeometry, GeometryBounds, GraphDocument, GraphPoint, GraphStyle, NodeStatus,
+    SourceMetadata,
 };
 
 pub(crate) type SharedHoudiniGraph = Arc<Mutex<GraphDocument>>;
@@ -356,6 +357,32 @@ impl HoudiniGraphPanel {
                     ui.label(info.output_count.to_string());
                     ui.end_row();
 
+                    ui.weak("Status");
+                    ui.colored_label(status_color(ui, info.status), info.status.as_str());
+                    ui.end_row();
+
+                    ui.weak("Data");
+                    ui.label(info.data_kind);
+                    ui.end_row();
+
+                    ui.weak("Records");
+                    ui.label(info.record_count.to_string());
+                    ui.end_row();
+
+                    ui.weak("Bounds");
+                    ui.label(format_bounds(info.bounds.as_ref()));
+                    ui.end_row();
+
+                    if let Some(provenance) = info.provenance {
+                        ui.weak("Provenance");
+                        ui.label(provenance.as_str());
+                        ui.end_row();
+                    }
+
+                    ui.weak("Attributes");
+                    ui.label(format_list(&info.attributes));
+                    ui.end_row();
+
                     ui.weak("Parameter");
                     ui.label(format!(
                         "{} = {:.2}",
@@ -474,6 +501,14 @@ fn format_style(style: GraphStyle) -> String {
         "rgb({}, {}, {}), opacity {:.2}, stroke {:.2}",
         style.color.r, style.color.g, style.color.b, style.opacity, style.stroke_scale
     )
+}
+
+fn status_color(ui: &Ui, status: NodeStatus) -> Color32 {
+    match status {
+        NodeStatus::Healthy => ui.visuals().text_color(),
+        NodeStatus::Warning => ui.visuals().warn_fg_color,
+        NodeStatus::Failed => ui.visuals().error_fg_color,
+    }
 }
 
 fn format_list(values: &[String]) -> String {

@@ -185,6 +185,7 @@ impl GraphDocument {
             .sum()
     }
 
+    #[allow(dead_code)]
     pub fn filter_minimum_score(&self) -> f32 {
         self.filter_rule()
             .and_then(|rule| rule.value.as_f32())
@@ -232,10 +233,7 @@ impl GraphDocument {
             Geometry::CubicBezier(_) => self.layer_visible(LayerKind::Curves),
         };
 
-        layer_visible
-            && self.filter_rule().map_or(true, |rule| {
-                rule.matches_geometry(geometry).unwrap_or(false)
-            })
+        layer_visible && self.passes_filter(geometry)
     }
 
     pub fn visible_output_count(&self) -> usize {
@@ -247,7 +245,7 @@ impl GraphDocument {
         let filtered_count = self
             .active_geometry()
             .iter()
-            .filter(|geometry| geometry.score() >= self.filter_minimum_score())
+            .filter(|geometry| self.passes_filter(geometry))
             .count();
         let styled_count = filtered_count;
         let output_count = self.visible_output_count();
@@ -311,6 +309,9 @@ impl GraphDocument {
     pub fn selected_node_info(&self, index: usize) -> Option<NodeInfo> {
         let node = self.nodes.get(index)?;
         let stages = self.pipeline_stages();
+        let source_metadata = self.source.metadata.clone();
+        let filter_warnings = self.filter_rule_warning().into_iter().collect::<Vec<_>>();
+        let style_warnings = self.style_warnings();
 
         Some(match node.kind {
             NodeKind::Source => NodeInfo {
@@ -318,6 +319,16 @@ impl GraphDocument {
                 role: node.kind.role(),
                 input_count: stages[0].input_count,
                 output_count: stages[0].output_count,
+                status: if self.source.import_error.is_some() {
+                    NodeStatus::Failed
+                } else {
+                    NodeStatus::Healthy
+                },
+                data_kind: "Source geometry",
+                record_count: source_metadata.record_count,
+                bounds: source_metadata.bounds,
+                provenance: Some(source_metadata.provenance),
+                attributes: source_metadata.attribute_names,
                 parameter: node.parameter.clone(),
                 summary: "Source geometry lives in the graph model before any viewer adaptation.",
                 source_metadata: Some(self.source.metadata.clone()),
@@ -330,30 +341,56 @@ impl GraphDocument {
                 role: node.kind.role(),
                 input_count: stages[1].input_count,
                 output_count: stages[1].output_count,
+                status: if filter_warnings.is_empty() {
+                    NodeStatus::Healthy
+                } else {
+                    NodeStatus::Warning
+                },
+                data_kind: "Filtered geometry",
+                record_count: stages[1].output_count,
+                bounds: self.filtered_bounds(),
+                provenance: Some(self.source.metadata.provenance),
+                attributes: self.source.metadata.attribute_names.clone(),
                 parameter: node.parameter.clone(),
                 summary: "Filter removes geometry that does not satisfy its typed attribute rule.",
                 source_metadata: None,
                 source_error: None,
                 style: None,
-                warnings: self.filter_rule_warning().into_iter().collect(),
+                warnings: filter_warnings,
             },
             NodeKind::Style => NodeInfo {
                 kind: node.kind,
                 role: node.kind.role(),
                 input_count: stages[2].input_count,
                 output_count: stages[2].output_count,
+                status: if style_warnings.is_empty() {
+                    NodeStatus::Healthy
+                } else {
+                    NodeStatus::Warning
+                },
+                data_kind: "Styled geometry",
+                record_count: stages[2].output_count,
+                bounds: self.filtered_bounds(),
+                provenance: Some(self.source.metadata.provenance),
+                attributes: self.source.metadata.attribute_names.clone(),
                 parameter: node.parameter.clone(),
                 summary: "Style changes viewer presentation without mutating graph geometry.",
                 source_metadata: None,
                 source_error: None,
                 style: Some(self.resolved_style()),
-                warnings: Vec::new(),
+                warnings: style_warnings,
             },
             NodeKind::Output => NodeInfo {
                 kind: node.kind,
                 role: node.kind.role(),
                 input_count: stages[3].input_count,
                 output_count: stages[3].output_count,
+                status: NodeStatus::Healthy,
+                data_kind: "Rerun scene output",
+                record_count: stages[3].output_count,
+                bounds: self.output_bounds(),
+                provenance: Some(self.source.metadata.provenance),
+                attributes: self.source.metadata.attribute_names.clone(),
                 parameter: node.parameter.clone(),
                 summary: "Output prepares boundary data while preserving native graph geometry.",
                 source_metadata: None,
@@ -578,12 +615,55 @@ impl GraphDocument {
         }
     }
 
+    fn passes_filter(&self, geometry: &Geometry) -> bool {
+        self.filter_rule().map_or(true, |rule| {
+            rule.matches_geometry(geometry).unwrap_or(false)
+        })
+    }
+
+    fn filtered_bounds(&self) -> Option<GeometryBounds> {
+        GeometryBounds::from_geometry(
+            self.active_geometry()
+                .iter()
+                .filter(|geometry| self.passes_filter(geometry)),
+        )
+    }
+
+    fn output_bounds(&self) -> Option<GeometryBounds> {
+        GeometryBounds::from_geometry(
+            self.active_geometry()
+                .iter()
+                .filter(|geometry| self.emits(geometry)),
+        )
+    }
+
     fn filter_rule_warning(&self) -> Option<String> {
         let rule = self.filter_rule()?;
         self.active_geometry()
             .first()
             .and_then(|geometry| rule.matches_geometry(geometry).err())
             .map(|err| err.to_string())
+    }
+
+    fn style_warnings(&self) -> Vec<String> {
+        let style = self.resolved_style();
+        let mut warnings = Vec::new();
+
+        if !(0.0..=1.0).contains(&style.opacity) {
+            warnings.push(format!(
+                "Style opacity must be between 0.0 and 1.0; got {:.2}",
+                style.opacity
+            ));
+        }
+
+        if !(0.0..=1.0).contains(&style.stroke_scale) {
+            warnings.push(format!(
+                "Style stroke scale must be between 0.0 and 1.0; got {:.2}",
+                style.stroke_scale
+            ));
+        }
+
+        warnings
     }
 }
 
@@ -880,6 +960,25 @@ pub(crate) struct GeometryBounds {
 }
 
 impl GeometryBounds {
+    fn from_geometry<'a>(geometry: impl IntoIterator<Item = &'a Geometry>) -> Option<Self> {
+        let mut bounds = None;
+        for item in geometry {
+            match item {
+                Geometry::Polygon(polygon) => {
+                    for point in &polygon.points {
+                        Self::include_point(&mut bounds, *point);
+                    }
+                }
+                Geometry::CubicBezier(curve) => {
+                    for point in curve.control_points() {
+                        Self::include_point(&mut bounds, point);
+                    }
+                }
+            }
+        }
+        bounds
+    }
+
     fn include_point(bounds: &mut Option<Self>, point: GraphPoint) {
         if let Some(bounds) = bounds {
             bounds.min.x = bounds.min.x.min(point.x);
@@ -1299,12 +1398,35 @@ pub(crate) struct NodeInfo {
     pub role: &'static str,
     pub input_count: usize,
     pub output_count: usize,
+    pub status: NodeStatus,
+    pub data_kind: &'static str,
+    pub record_count: usize,
+    pub bounds: Option<GeometryBounds>,
+    pub provenance: Option<SourceProvenance>,
+    pub attributes: Vec<String>,
     pub parameter: NodeParameter,
     pub summary: &'static str,
     pub source_metadata: Option<SourceMetadata>,
     pub source_error: Option<String>,
     pub style: Option<GraphStyle>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NodeStatus {
+    Healthy,
+    Warning,
+    Failed,
+}
+
+impl NodeStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "Healthy",
+            Self::Warning => "Warning",
+            Self::Failed => "Failed",
+        }
+    }
 }
 
 pub(crate) struct PipelineStage {
@@ -1535,8 +1657,8 @@ mod tests {
     use super::{
         ExportGeometry, Geometry, GraphColor, GraphDocument, GraphPoint, GraphStyle,
         HoudiniCubicBezierParquetSchema, HoudiniGeometryRecord, HoudiniGeometrySchema, LayerKind,
-        NodeParameterKind, RerunSceneDebugItem, RerunSceneItem, SourceProvenance, ViewerGeometry,
-        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        NodeParameterKind, NodeStatus, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
+        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -1723,6 +1845,12 @@ mod tests {
             .expect("sample graph should include source node");
         assert_eq!(source.input_count, 0);
         assert_eq!(source.output_count, 4);
+        assert_eq!(source.status, NodeStatus::Healthy);
+        assert_eq!(source.data_kind, "Source geometry");
+        assert_eq!(source.record_count, 4);
+        assert_eq!(source.provenance, Some(SourceProvenance::DemoFallback));
+        assert_eq!(source.attributes, vec!["score".to_owned()]);
+        assert!(source.bounds.is_some());
         let source_metadata = source
             .source_metadata
             .expect("source node should report source metadata");
@@ -1741,6 +1869,10 @@ mod tests {
         assert_eq!(filter.parameter.name, "Minimum score");
         assert_eq!(filter.parameter.kind, NodeParameterKind::AttributeRule);
         assert_eq!(filter.parameter.value, 0.55);
+        assert_eq!(filter.status, NodeStatus::Healthy);
+        assert_eq!(filter.data_kind, "Filtered geometry");
+        assert_eq!(filter.record_count, 2);
+        assert!(filter.bounds.is_some());
         assert!(filter.warnings.is_empty());
 
         let output = graph
@@ -1781,8 +1913,27 @@ mod tests {
         let info = graph
             .selected_node_info(1)
             .expect("sample graph should include filter node");
+        assert_eq!(info.status, NodeStatus::Warning);
+        assert_eq!(info.record_count, 0);
+        assert!(info.bounds.is_none());
         assert_eq!(info.warnings.len(), 1);
         assert!(info.warnings[0].contains("Unknown filter attribute"));
+    }
+
+    #[test]
+    fn invalid_style_parameter_reports_node_warning() {
+        let mut graph = GraphDocument::sample();
+        graph.style.opacity = 1.4;
+
+        let info = graph
+            .selected_node_info(2)
+            .expect("sample graph should include style node");
+
+        assert_eq!(info.status, NodeStatus::Warning);
+        assert_eq!(info.record_count, 2);
+        assert!(info.bounds.is_some());
+        assert_eq!(info.warnings.len(), 1);
+        assert!(info.warnings[0].contains("Style opacity"));
     }
 
     #[test]
@@ -2148,6 +2299,13 @@ mod tests {
             graph.source.source_path,
             Some(parquet_file.path().display().to_string())
         );
+
+        let info = graph
+            .selected_node_info(0)
+            .expect("sample graph should include source node");
+        assert_eq!(info.status, NodeStatus::Failed);
+        assert!(info.source_error.is_some());
+        assert_eq!(info.provenance, Some(SourceProvenance::DemoFallback));
     }
 
     #[test]
