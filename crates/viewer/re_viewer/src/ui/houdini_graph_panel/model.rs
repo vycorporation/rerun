@@ -219,6 +219,37 @@ impl GraphDocument {
         ]
     }
 
+    pub fn graph_layout(&self) -> GraphLayout {
+        let node_count = self.nodes.len().max(1);
+        let nodes = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                let x = if node_count == 1 {
+                    0.5
+                } else {
+                    index as f32 / (node_count - 1) as f32
+                };
+
+                GraphLayoutNode {
+                    node_index: index,
+                    name: node.name,
+                    position: GraphPoint::new(x, 0.5),
+                }
+            })
+            .collect();
+
+        let edges = (0..self.nodes.len().saturating_sub(1))
+            .map(|index| GraphEdge {
+                from_node: index,
+                to_node: index + 1,
+            })
+            .collect();
+
+        GraphLayout { nodes, edges }
+    }
+
     pub fn selected_node_info(&self, index: usize) -> Option<NodeInfo> {
         let node = self.nodes.get(index)?;
         let stages = self.pipeline_stages();
@@ -302,6 +333,22 @@ pub(crate) struct GraphNode {
     pub weight: f32,
     pub parameter: &'static str,
     pub info: &'static str,
+}
+
+pub(crate) struct GraphLayout {
+    pub nodes: Vec<GraphLayoutNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+pub(crate) struct GraphLayoutNode {
+    pub node_index: usize,
+    pub name: &'static str,
+    pub position: GraphPoint,
+}
+
+pub(crate) struct GraphEdge {
+    pub from_node: usize,
+    pub to_node: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -556,6 +603,25 @@ mod tests {
         assert_eq!(stages[1].output_count, 2);
         assert_eq!(stages[3].name, "Rerun Output");
         assert_eq!(stages[3].output_count, graph.visible_output_count());
+    }
+
+    #[test]
+    fn graph_layout_reports_model_owned_node_positions_and_edges() {
+        let graph = GraphDocument::sample();
+        let layout = graph.graph_layout();
+
+        assert_eq!(layout.nodes.len(), graph.nodes.len());
+        assert_eq!(layout.edges.len(), graph.nodes.len() - 1);
+        assert_eq!(layout.nodes[0].node_index, 0);
+        assert_eq!(layout.nodes[0].name, "Source");
+        assert_eq!(layout.nodes[0].position.x, 0.0);
+        assert_eq!(layout.nodes[0].position.y, 0.5);
+        assert_eq!(layout.nodes[3].name, "Rerun Output");
+        assert_eq!(layout.nodes[3].position.x, 1.0);
+        assert_eq!(layout.edges[0].from_node, 0);
+        assert_eq!(layout.edges[0].to_node, 1);
+        assert_eq!(layout.edges[2].from_node, 2);
+        assert_eq!(layout.edges[2].to_node, 3);
     }
 
     #[test]

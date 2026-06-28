@@ -33,6 +33,7 @@ impl HoudiniGraphPanel {
             ui.small("Product-fork spike panel");
             ui.add_space(6.0);
 
+            ui.strong("Graph Canvas");
             self.node_graph_ui(ui);
 
             ui.add_space(8.0);
@@ -103,30 +104,35 @@ impl HoudiniGraphPanel {
     }
 
     fn node_graph_ui(&mut self, ui: &mut Ui) -> Response {
-        let desired_size = egui::vec2(ui.available_width().max(280.0), 118.0);
+        let desired_size = egui::vec2(ui.available_width().max(280.0), 176.0);
         let (response, painter) = ui.allocate_painter(desired_size, Sense::click());
         let rect = response.rect;
-        let lane_y = rect.center().y;
-        let node_count = self.graph.nodes.len().max(1);
-        let node_size = Vec2::new(116.0, 48.0);
-        let usable_width = (rect.width() - node_size.x).max(1.0);
+        painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+        painter.rect_stroke(
+            rect,
+            4.0,
+            ui.visuals().widgets.noninteractive.bg_stroke,
+            StrokeKind::Inside,
+        );
 
-        let mut node_rects = Vec::with_capacity(node_count);
-        for index in 0..node_count {
-            let t = if node_count == 1 {
-                0.5
-            } else {
-                index as f32 / (node_count - 1) as f32
-            };
-            let center = Pos2::new(rect.left() + node_size.x * 0.5 + usable_width * t, lane_y);
-            node_rects.push(Rect::from_center_size(center, node_size));
+        let rect = rect.shrink2(egui::vec2(12.0, 10.0));
+        let node_size = Vec2::new(116.0, 48.0);
+        let layout = self.graph.graph_layout();
+        let mut node_rects = vec![Rect::NOTHING; self.graph.nodes.len()];
+        for layout_node in &layout.nodes {
+            node_rects[layout_node.node_index] = Rect::from_center_size(
+                map_node_layout_point(rect, layout_node.position, node_size),
+                node_size,
+            );
         }
 
         let connector_stroke =
             Stroke::new(1.5, ui.visuals().widgets.noninteractive.fg_stroke.color);
-        for pair in node_rects.windows(2) {
-            let start = Pos2::new(pair[0].right(), pair[0].center().y);
-            let end = Pos2::new(pair[1].left(), pair[1].center().y);
+        for edge in &layout.edges {
+            let from_rect = node_rects[edge.from_node];
+            let to_rect = node_rects[edge.to_node];
+            let start = Pos2::new(from_rect.right(), from_rect.center().y);
+            let end = Pos2::new(to_rect.left(), to_rect.center().y);
             painter.line_segment([start, end], connector_stroke);
             draw_arrowhead(&painter, end, connector_stroke.color);
         }
@@ -142,8 +148,12 @@ impl HoudiniGraphPanel {
             }
         }
 
-        for (index, (node, node_rect)) in self.graph.nodes.iter().zip(node_rects).enumerate() {
-            let selected = self.selected_node == index;
+        for layout_node in &layout.nodes {
+            let Some(node) = self.graph.nodes.get(layout_node.node_index) else {
+                continue;
+            };
+            let node_rect = node_rects[layout_node.node_index];
+            let selected = self.selected_node == layout_node.node_index;
             let fill = if selected {
                 ui.visuals().selection.bg_fill
             } else {
@@ -160,7 +170,7 @@ impl HoudiniGraphPanel {
             painter.text(
                 node_rect.center_top() + egui::vec2(0.0, 10.0),
                 Align2::CENTER_TOP,
-                node.name,
+                layout_node.name,
                 FontId::proportional(13.0),
                 ui.visuals().text_color(),
             );
@@ -349,6 +359,15 @@ fn map_preview_point(rect: Rect, point: GraphPoint) -> Pos2 {
     let x = rect.left() + point.x * rect.width();
     let y = rect.bottom() - point.y * rect.height();
     Pos2::new(x, y)
+}
+
+fn map_node_layout_point(rect: Rect, point: GraphPoint, node_size: Vec2) -> Pos2 {
+    let usable_width = (rect.width() - node_size.x).max(1.0);
+    let usable_height = (rect.height() - node_size.y).max(1.0);
+    Pos2::new(
+        rect.left() + node_size.x * 0.5 + usable_width * point.x,
+        rect.top() + node_size.y * 0.5 + usable_height * point.y,
+    )
 }
 
 fn draw_arrowhead(painter: &egui::Painter, tip: Pos2, color: Color32) {
