@@ -10,8 +10,8 @@ use re_viewer_context::{
 };
 
 use crate::ui::houdini_graph_panel::model::{
-    CubicBezier, GraphDocument, GraphPoint, LayerKind, RerunSceneDebugItem, RerunSceneItem,
-    RerunSceneOutput,
+    CubicBezier, GraphDocument, GraphPoint, LayerKind, RerunQueryBridge, RerunQueryBridgeMode,
+    RerunSceneDebugItem, RerunSceneItem, RerunSceneOutput,
 };
 use crate::ui::houdini_graph_panel::{lock_houdini_graph, shared_houdini_graph_from_context};
 
@@ -138,7 +138,8 @@ impl ViewClass for HoudiniGraphView {
 
         if let Some(shared_graph) = shared_houdini_graph_from_context(ui.ctx()) {
             let graph = lock_houdini_graph(&shared_graph);
-            draw_houdini_output_view(ui, rect, &graph);
+            let query_bridge = query_bridge_from_view_query(ctx, query);
+            draw_houdini_output_view(ui, rect, &graph, query_bridge);
         } else {
             ui.painter()
                 .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
@@ -154,8 +155,36 @@ impl ViewClass for HoudiniGraphView {
     }
 }
 
-fn draw_houdini_output_view(ui: &mut egui::Ui, rect: Rect, graph: &GraphDocument) {
-    let scene = graph.rerun_scene_output();
+fn query_bridge_from_view_query(
+    ctx: &ViewerContext<'_>,
+    query: &ViewQuery<'_>,
+) -> RerunQueryBridge {
+    let query_result = ctx.lookup_query_result(query.view_id);
+    let visible_data_result_count = query_result
+        .tree
+        .iter_data_results()
+        .filter(|data_result| data_result.visible && !data_result.tree_prefix_only)
+        .count();
+
+    RerunQueryBridge {
+        mode: RerunQueryBridgeMode::ProductForkViewOwned,
+        view_id: query.view_id.to_string(),
+        space_origin: query.space_origin.to_string(),
+        timeline: query.timeline.to_string(),
+        latest_at: query.latest_at.as_i64(),
+        matching_entity_count: query_result.num_matching_entities,
+        visualized_entity_count: query_result.num_visualized_entities,
+        visible_data_result_count,
+    }
+}
+
+fn draw_houdini_output_view(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    graph: &GraphDocument,
+    query_bridge: RerunQueryBridge,
+) {
+    let scene = graph.rerun_scene_output_with_query_bridge(Some(query_bridge));
     ui.painter()
         .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
 
@@ -215,6 +244,21 @@ fn draw_houdini_output_view(ui: &mut egui::Ui, rect: Rect, graph: &GraphDocument
         FontId::monospace(11.0),
         ui.visuals().weak_text_color(),
     );
+    if let Some(query_bridge) = &scene.query_bridge {
+        ui.painter().text(
+            rect.left_top() + egui::vec2(14.0, 50.0),
+            Align2::LEFT_TOP,
+            format!(
+                "{}: {} visible query results at {}={}",
+                query_bridge.mode.as_str(),
+                query_bridge.visible_data_result_count,
+                query_bridge.timeline,
+                query_bridge.latest_at
+            ),
+            FontId::monospace(11.0),
+            ui.visuals().weak_text_color(),
+        );
+    }
 }
 
 fn draw_native_cubic(ui: &mut egui::Ui, viewport: Rect, curve: CubicBezier, stroke_scale: f32) {

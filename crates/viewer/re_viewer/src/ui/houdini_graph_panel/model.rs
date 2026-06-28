@@ -346,13 +346,22 @@ impl GraphDocument {
         }
     }
 
+    #[cfg(test)]
     pub fn rerun_scene_output(&self) -> RerunSceneOutput {
+        self.rerun_scene_output_with_query_bridge(None)
+    }
+
+    pub fn rerun_scene_output_with_query_bridge(
+        &self,
+        query_bridge: Option<RerunQueryBridge>,
+    ) -> RerunSceneOutput {
         let viewer_output = self.viewer_output();
         let adaptive_export_output = self.adaptive_export_output();
 
         RerunSceneOutput {
             stroke_scale: viewer_output.stroke_scale,
             export_segments: self.export_segments(),
+            query_bridge,
             items: viewer_output
                 .items
                 .into_iter()
@@ -586,6 +595,32 @@ pub(crate) struct RerunSceneOutput {
     pub debug_items: Vec<RerunSceneDebugItem>,
     pub stroke_scale: f32,
     pub export_segments: usize,
+    pub query_bridge: Option<RerunQueryBridge>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RerunQueryBridge {
+    pub mode: RerunQueryBridgeMode,
+    pub view_id: String,
+    pub space_origin: String,
+    pub timeline: String,
+    pub latest_at: i64,
+    pub matching_entity_count: usize,
+    pub visualized_entity_count: usize,
+    pub visible_data_result_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RerunQueryBridgeMode {
+    ProductForkViewOwned,
+}
+
+impl RerunQueryBridgeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProductForkViewOwned => "product-fork view-owned query bridge",
+        }
+    }
 }
 
 pub(crate) enum RerunSceneItem {
@@ -652,6 +687,32 @@ mod tests {
         assert!(scene.debug_items.iter().any(|item| {
             matches!(item, RerunSceneDebugItem::NativeCubicControlPolygon(points) if points.len() == 4)
         }));
+        assert!(scene.query_bridge.is_none());
+    }
+
+    #[test]
+    fn rerun_scene_output_can_be_tagged_with_query_bridge_context() {
+        let graph = GraphDocument::sample();
+        let bridge = super::RerunQueryBridge {
+            mode: super::RerunQueryBridgeMode::ProductForkViewOwned,
+            view_id: "view(1234)".to_owned(),
+            space_origin: "/".to_owned(),
+            timeline: "frame".to_owned(),
+            latest_at: 42,
+            matching_entity_count: 3,
+            visualized_entity_count: 2,
+            visible_data_result_count: 1,
+        };
+
+        let scene = graph.rerun_scene_output_with_query_bridge(Some(bridge.clone()));
+
+        assert_eq!(scene.query_bridge, Some(bridge));
+        assert!(
+            scene
+                .items
+                .iter()
+                .any(|item| matches!(item, RerunSceneItem::NativeCubicBezier(_)))
+        );
     }
 
     #[test]
