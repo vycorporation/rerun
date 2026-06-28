@@ -38,6 +38,8 @@ fn shared_houdini_graph_id() -> egui::Id {
 pub(crate) struct HoudiniGraphPanel {
     selected_node: usize,
     dragging_node: Option<usize>,
+    parquet_path: String,
+    parquet_status: Option<String>,
 }
 
 impl Default for HoudiniGraphPanel {
@@ -45,6 +47,8 @@ impl Default for HoudiniGraphPanel {
         Self {
             selected_node: 1,
             dragging_node: None,
+            parquet_path: "crates/viewer/re_viewer/data/houdini_cubic_sample.parquet".to_owned(),
+            parquet_status: None,
         }
     }
 }
@@ -92,6 +96,8 @@ impl HoudiniGraphPanel {
 
             ui.add_space(8.0);
             ui.strong("Graph Model");
+            self.parquet_import_ui(ui, &mut graph);
+            ui.add_space(6.0);
             let export_output = graph.adaptive_export_output();
             let export_polyline_points = export_output
                 .items
@@ -131,6 +137,31 @@ impl HoudiniGraphPanel {
                 graph.export_segments()
             ));
         });
+    }
+
+    fn parquet_import_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.parquet_path);
+            if ui.button("Load Parquet").clicked() {
+                let path = self.parquet_path.trim();
+                if path.is_empty() {
+                    self.parquet_status = Some("No parquet path set".to_owned());
+                } else {
+                    match graph.import_cubic_bezier_parquet_path(path) {
+                        Ok(imported) => {
+                            self.parquet_status =
+                                Some(format!("Imported {imported} native cubic Bezier curves"));
+                        }
+                        Err(err) => {
+                            self.parquet_status = Some(format!("Parquet import failed: {err}"));
+                        }
+                    }
+                }
+            }
+        });
+        if let Some(status) = &self.parquet_status {
+            ui.weak(status);
+        }
     }
 
     fn node_graph_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) -> Response {

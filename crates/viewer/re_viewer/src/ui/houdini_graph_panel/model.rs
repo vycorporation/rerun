@@ -1,3 +1,8 @@
+use std::path::Path;
+
+use arrow::array::{Float32Array, Float64Array, RecordBatch};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct GraphPoint {
     pub x: f32,
@@ -399,6 +404,22 @@ impl GraphDocument {
 
     pub fn update_source_from_query_bridge(&mut self, query_bridge: &RerunQueryBridge) {
         self.source = GraphSource::from_query_bridge(query_bridge);
+        self.update_source_node_readiness();
+    }
+
+    pub fn import_cubic_bezier_parquet_path(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> anyhow::Result<usize> {
+        let records = load_cubic_bezier_parquet(path)?;
+        let count = records.len();
+        self.source = GraphSource::recording_import(count);
+        self.recording_geometry = records.into_iter().map(|record| record.geometry).collect();
+        self.update_source_node_readiness();
+        Ok(count)
+    }
+
+    fn update_source_node_readiness(&mut self) {
         if let Some(source_node) = self
             .nodes
             .iter_mut()
@@ -421,6 +442,19 @@ impl GraphDocument {
         self.update_source_from_query_bridge(query_bridge);
         self.source.mode = GraphSourceMode::RecordingQuery;
         self.recording_geometry = records.into_iter().map(|record| record.geometry).collect();
+        self.update_source_node_readiness();
+    }
+
+    #[allow(dead_code)]
+    pub fn import_cubic_bezier_parquet(
+        &mut self,
+        query_bridge: &RerunQueryBridge,
+        path: impl AsRef<Path>,
+    ) -> anyhow::Result<usize> {
+        let records = load_cubic_bezier_parquet(path)?;
+        let count = records.len();
+        self.import_recording_geometry(query_bridge, records);
+        Ok(count)
     }
 
     fn active_geometry(&self) -> &[Geometry] {
@@ -449,6 +483,98 @@ impl HoudiniGeometrySchema {
             Self::SCORE_COMPONENT,
             Self::LAYER_COMPONENT,
         ]
+    }
+}
+
+pub(crate) struct HoudiniCubicBezierParquetSchema;
+
+#[allow(dead_code)]
+impl HoudiniCubicBezierParquetSchema {
+    pub const CONTROL_POINT_COLUMNS: [&'static str; 8] = [
+        "cp0_x", "cp0_y", "cp1_x", "cp1_y", "cp2_x", "cp2_y", "cp3_x", "cp3_y",
+    ];
+
+    const CONTROL_POINT_ALIASES: [[&'static str; 2]; 8] = [
+        ["cp0_x", "p0_x"],
+        ["cp0_y", "p0_y"],
+        ["cp1_x", "p1_x"],
+        ["cp1_y", "p1_y"],
+        ["cp2_x", "p2_x"],
+        ["cp2_y", "p2_y"],
+        ["cp3_x", "p3_x"],
+        ["cp3_y", "p3_y"],
+    ];
+
+    pub fn required_column_count() -> usize {
+        Self::CONTROL_POINT_COLUMNS.len()
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn load_cubic_bezier_parquet(
+    path: impl AsRef<Path>,
+) -> anyhow::Result<Vec<HoudiniGeometryRecord>> {
+    let path = path.as_ref();
+    let file = std::fs::File::open(path)?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+
+    let mut records = Vec::new();
+    for batch in reader {
+        append_cubic_bezier_batch(batch?, &mut records)?;
+    }
+
+    Ok(records)
+}
+
+fn append_cubic_bezier_batch(
+    batch: RecordBatch,
+    records: &mut Vec<HoudiniGeometryRecord>,
+) -> anyhow::Result<()> {
+    let columns = HoudiniCubicBezierParquetSchema::CONTROL_POINT_ALIASES
+        .iter()
+        .map(|aliases| numeric_column(&batch, aliases))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    for row_index in 0..batch.num_rows() {
+        let curve = CubicBezier {
+            start: GraphPoint::new(columns[0](row_index), columns[1](row_index)),
+            control_1: GraphPoint::new(columns[2](row_index), columns[3](row_index)),
+            control_2: GraphPoint::new(columns[4](row_index), columns[5](row_index)),
+            end: GraphPoint::new(columns[6](row_index), columns[7](row_index)),
+            score: 1.0,
+        };
+        records.push(HoudiniGeometryRecord::cubic_bezier(
+            LayerKind::Curves,
+            curve,
+        ));
+    }
+
+    Ok(())
+}
+
+fn numeric_column<'a>(
+    batch: &'a RecordBatch,
+    aliases: &[&'static str],
+) -> anyhow::Result<Box<dyn Fn(usize) -> f32 + 'a>> {
+    let Some((name, column)) = aliases.iter().find_map(|name| {
+        batch
+            .schema()
+            .index_of(name)
+            .ok()
+            .map(|index| (*name, batch.column(index)))
+    }) else {
+        anyhow::bail!(
+            "Missing Houdini cubic Bezier parquet column: {}",
+            aliases[0]
+        );
+    };
+
+    if let Some(values) = column.as_any().downcast_ref::<Float64Array>() {
+        Ok(Box::new(|row_index| values.value(row_index) as f32))
+    } else if let Some(values) = column.as_any().downcast_ref::<Float32Array>() {
+        Ok(Box::new(|row_index| values.value(row_index)))
+    } else {
+        anyhow::bail!("Houdini cubic Bezier parquet column must be float32 or float64: {name}");
     }
 }
 
@@ -528,6 +654,14 @@ impl GraphSource {
         match self.mode {
             GraphSourceMode::DemoFallback => "demo fallback",
             GraphSourceMode::RecordingQuery => "recording query",
+        }
+    }
+
+    fn recording_import(imported_geometry_count: usize) -> Self {
+        Self {
+            mode: GraphSourceMode::RecordingQuery,
+            matching_entity_count: imported_geometry_count,
+            visible_data_result_count: imported_geometry_count,
         }
     }
 }
@@ -781,10 +915,16 @@ pub(crate) enum RerunSceneDebugItem {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportGeometry, Geometry, GraphDocument, GraphPoint, HoudiniGeometryRecord,
-        HoudiniGeometrySchema, LayerKind, NodeParameterKind, RerunSceneDebugItem, RerunSceneItem,
-        ViewerGeometry,
+        ExportGeometry, Geometry, GraphDocument, GraphPoint, HoudiniCubicBezierParquetSchema,
+        HoudiniGeometryRecord, HoudiniGeometrySchema, LayerKind, NodeParameterKind,
+        RerunSceneDebugItem, RerunSceneItem, ViewerGeometry, load_cubic_bezier_parquet,
     };
+    use std::sync::Arc;
+
+    use arrow::array::Float64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
 
     #[test]
     fn sample_curve_is_native_cubic_with_four_points() {
@@ -1100,5 +1240,150 @@ mod tests {
                 .iter()
                 .any(|geometry| matches!(geometry, ViewerGeometry::CubicBezier(_)))
         );
+    }
+
+    #[test]
+    fn cubic_bezier_parquet_loader_builds_native_curves_from_eight_columns() {
+        let parquet_file = write_cubic_bezier_parquet(&[
+            ("cp0_x", vec![0.0, 0.1]),
+            ("cp0_y", vec![0.0, 0.2]),
+            ("cp1_x", vec![0.2, 0.3]),
+            ("cp1_y", vec![0.8, 0.9]),
+            ("cp2_x", vec![0.8, 0.7]),
+            ("cp2_y", vec![0.2, 0.1]),
+            ("cp3_x", vec![1.0, 0.9]),
+            ("cp3_y", vec![1.0, 0.8]),
+        ]);
+
+        let records = load_cubic_bezier_parquet(parquet_file.path()).unwrap();
+
+        assert_eq!(HoudiniCubicBezierParquetSchema::required_column_count(), 8);
+        assert_eq!(records.len(), 2);
+        assert!(
+            records
+                .iter()
+                .all(|record| matches!(record.geometry, Geometry::CubicBezier(_)))
+        );
+        let Geometry::CubicBezier(curve) = records[0].geometry.clone() else {
+            panic!("expected native cubic Bezier");
+        };
+        assert_eq!(curve.control_points()[0], GraphPoint::new(0.0, 0.0));
+        assert_eq!(curve.control_points()[1], GraphPoint::new(0.2, 0.8));
+        assert_eq!(curve.control_points()[2], GraphPoint::new(0.8, 0.2));
+        assert_eq!(curve.control_points()[3], GraphPoint::new(1.0, 1.0));
+    }
+
+    #[test]
+    fn cubic_bezier_parquet_loader_requires_all_control_point_columns() {
+        let parquet_file = write_cubic_bezier_parquet(&[
+            ("cp0_x", vec![0.0]),
+            ("cp0_y", vec![0.0]),
+            ("cp1_x", vec![0.2]),
+            ("cp1_y", vec![0.8]),
+            ("cp2_x", vec![0.8]),
+            ("cp2_y", vec![0.2]),
+            ("cp3_x", vec![1.0]),
+        ]);
+
+        let err = match load_cubic_bezier_parquet(parquet_file.path()) {
+            Ok(_) => panic!("missing control-point column should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("cp3_y"));
+    }
+
+    #[test]
+    fn graph_document_can_import_cubic_bezier_parquet_at_load_boundary() {
+        let mut graph = GraphDocument::sample();
+        let bridge = super::RerunQueryBridge {
+            mode: super::RerunQueryBridgeMode::ProductForkViewOwned,
+            view_id: "view(1234)".to_owned(),
+            space_origin: "/".to_owned(),
+            timeline: "frame".to_owned(),
+            latest_at: 42,
+            matching_entity_count: 1,
+            visualized_entity_count: 1,
+            visible_data_result_count: 1,
+        };
+        let parquet_file = write_cubic_bezier_parquet(&[
+            ("cp0_x", vec![0.0]),
+            ("cp0_y", vec![0.0]),
+            ("cp1_x", vec![0.2]),
+            ("cp1_y", vec![0.8]),
+            ("cp2_x", vec![0.8]),
+            ("cp2_y", vec![0.2]),
+            ("cp3_x", vec![1.0]),
+            ("cp3_y", vec![1.0]),
+        ]);
+
+        let imported = graph
+            .import_cubic_bezier_parquet(&bridge, parquet_file.path())
+            .unwrap();
+
+        assert_eq!(imported, 1);
+        assert_eq!(graph.source.mode, super::GraphSourceMode::RecordingQuery);
+        assert_eq!(graph.cubic_bezier_count(), 1);
+        assert_eq!(graph.visible_output_count(), 1);
+    }
+
+    #[test]
+    fn graph_document_can_import_cubic_bezier_parquet_path_without_query_bridge() {
+        let mut graph = GraphDocument::sample();
+        let parquet_file = write_cubic_bezier_parquet(&[
+            ("cp0_x", vec![0.0]),
+            ("cp0_y", vec![0.0]),
+            ("cp1_x", vec![0.2]),
+            ("cp1_y", vec![0.8]),
+            ("cp2_x", vec![0.8]),
+            ("cp2_y", vec![0.2]),
+            ("cp3_x", vec![1.0]),
+            ("cp3_y", vec![1.0]),
+        ]);
+
+        let imported = graph
+            .import_cubic_bezier_parquet_path(parquet_file.path())
+            .unwrap();
+
+        assert_eq!(imported, 1);
+        assert_eq!(graph.source.mode, super::GraphSourceMode::RecordingQuery);
+        assert_eq!(graph.source.matching_entity_count, 1);
+        assert_eq!(graph.visible_output_count(), 1);
+    }
+
+    #[test]
+    fn checked_in_sample_parquet_loads_native_cubic_beziers() {
+        let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data/houdini_cubic_sample.parquet");
+
+        let records = load_cubic_bezier_parquet(sample_path).unwrap();
+
+        assert_eq!(records.len(), 4);
+        assert!(
+            records
+                .iter()
+                .all(|record| matches!(record.geometry, Geometry::CubicBezier(_)))
+        );
+    }
+
+    fn write_cubic_bezier_parquet(columns: &[(&str, Vec<f64>)]) -> tempfile::NamedTempFile {
+        let parquet_file = tempfile::NamedTempFile::new().unwrap();
+        let schema = Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|(name, _values)| Field::new(*name, DataType::Float64, false))
+                .collect::<Vec<_>>(),
+        ));
+        let arrays = columns
+            .iter()
+            .map(|(_name, values)| Arc::new(Float64Array::from(values.clone())) as _)
+            .collect::<Vec<_>>();
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let file = parquet_file.reopen().unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        parquet_file
     }
 }
