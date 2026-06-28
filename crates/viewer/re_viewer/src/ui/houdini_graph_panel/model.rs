@@ -23,29 +23,45 @@ impl GraphDocument {
                 GraphNode {
                     name: "Source",
                     kind: NodeKind::Source,
-                    weight: 1.0,
-                    parameter: "Read",
+                    parameter: NodeParameter::scalar(
+                        "Read",
+                        1.0,
+                        0.0..=1.0,
+                        "Source readiness placeholder for the spike graph.",
+                    ),
                     info: "Loads polygon and cubic Bezier records.",
                 },
                 GraphNode {
                     name: "Filter",
                     kind: NodeKind::Filter,
-                    weight: 0.55,
-                    parameter: "Minimum score",
+                    parameter: NodeParameter::scalar(
+                        "Minimum score",
+                        0.55,
+                        0.0..=1.0,
+                        "Controls the minimum sample score emitted by the filter.",
+                    ),
                     info: "Filters features by sample score.",
                 },
                 GraphNode {
                     name: "Style",
                     kind: NodeKind::Style,
-                    weight: 0.75,
-                    parameter: "Stroke scale",
+                    parameter: NodeParameter::scalar(
+                        "Stroke scale",
+                        0.75,
+                        0.0..=1.0,
+                        "Controls output stroke scale without mutating native geometry.",
+                    ),
                     info: "Assigns visual parameters before viewer output.",
                 },
                 GraphNode {
                     name: "Rerun Output",
                     kind: NodeKind::Output,
-                    weight: 1.0,
-                    parameter: "Export",
+                    parameter: NodeParameter::scalar(
+                        "Adaptive segments",
+                        1.0,
+                        0.0..=1.0,
+                        "Controls only the prepared export polyline. The native cubic remains four points.",
+                    ),
                     info: "Prepares adaptive viewer geometry only at the output edge.",
                 },
             ],
@@ -140,23 +156,23 @@ impl GraphDocument {
     pub fn filter_minimum_score(&self) -> f32 {
         self.nodes
             .iter()
-            .find(|node| node.name == "Filter")
-            .map_or(0.0, |node| node.weight)
+            .find(|node| node.kind == NodeKind::Filter)
+            .map_or(0.0, |node| node.parameter.value)
     }
 
     pub fn style_scale(&self) -> f32 {
         self.nodes
             .iter()
-            .find(|node| node.name == "Style")
-            .map_or(0.5, |node| node.weight)
+            .find(|node| node.kind == NodeKind::Style)
+            .map_or(0.5, |node| node.parameter.value)
     }
 
     pub fn export_segments(&self) -> usize {
         let segment_factor = self
             .nodes
             .iter()
-            .find(|node| node.name == "Rerun Output")
-            .map_or(0.5, |node| node.weight);
+            .find(|node| node.kind == NodeKind::Output)
+            .map_or(0.5, |node| node.parameter.value);
 
         (2.0 + segment_factor * 14.0).round() as usize
     }
@@ -260,8 +276,7 @@ impl GraphDocument {
                 role: node.kind.role(),
                 input_count: stages[0].input_count,
                 output_count: stages[0].output_count,
-                parameter_name: node.parameter,
-                parameter_value: node.weight,
+                parameter: node.parameter.clone(),
                 summary: "Source geometry lives in the graph model before any viewer adaptation.",
             },
             NodeKind::Filter => NodeInfo {
@@ -269,8 +284,7 @@ impl GraphDocument {
                 role: node.kind.role(),
                 input_count: stages[1].input_count,
                 output_count: stages[1].output_count,
-                parameter_name: node.parameter,
-                parameter_value: node.weight,
+                parameter: node.parameter.clone(),
                 summary: "Filter removes geometry below the minimum sample score.",
             },
             NodeKind::Style => NodeInfo {
@@ -278,8 +292,7 @@ impl GraphDocument {
                 role: node.kind.role(),
                 input_count: stages[2].input_count,
                 output_count: stages[2].output_count,
-                parameter_name: node.parameter,
-                parameter_value: node.weight,
+                parameter: node.parameter.clone(),
                 summary: "Style changes viewer presentation without mutating graph geometry.",
             },
             NodeKind::Output => NodeInfo {
@@ -287,8 +300,7 @@ impl GraphDocument {
                 role: node.kind.role(),
                 input_count: stages[3].input_count,
                 output_count: stages[3].output_count,
-                parameter_name: node.parameter,
-                parameter_value: node.weight,
+                parameter: node.parameter.clone(),
                 summary: "Output prepares boundary data while preserving native graph geometry.",
             },
         })
@@ -330,9 +342,47 @@ impl GraphDocument {
 pub(crate) struct GraphNode {
     pub name: &'static str,
     pub kind: NodeKind,
-    pub weight: f32,
-    pub parameter: &'static str,
+    pub parameter: NodeParameter,
     pub info: &'static str,
+}
+
+#[derive(Clone)]
+pub(crate) struct NodeParameter {
+    pub name: &'static str,
+    pub kind: NodeParameterKind,
+    pub value: f32,
+    pub range: std::ops::RangeInclusive<f32>,
+    pub help: &'static str,
+}
+
+impl NodeParameter {
+    pub fn scalar(
+        name: &'static str,
+        value: f32,
+        range: std::ops::RangeInclusive<f32>,
+        help: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            kind: NodeParameterKind::Scalar,
+            value,
+            range,
+            help,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NodeParameterKind {
+    Scalar,
+}
+
+impl NodeParameterKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scalar => "Scalar",
+        }
+    }
 }
 
 pub(crate) struct GraphLayout {
@@ -384,8 +434,7 @@ pub(crate) struct NodeInfo {
     pub role: &'static str,
     pub input_count: usize,
     pub output_count: usize,
-    pub parameter_name: &'static str,
-    pub parameter_value: f32,
+    pub parameter: NodeParameter,
     pub summary: &'static str,
 }
 
@@ -487,7 +536,9 @@ pub(crate) enum ExportGeometry {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExportGeometry, Geometry, GraphDocument, LayerKind, ViewerGeometry};
+    use super::{
+        ExportGeometry, Geometry, GraphDocument, LayerKind, NodeParameterKind, ViewerGeometry,
+    };
 
     #[test]
     fn sample_curve_is_native_cubic_with_four_points() {
@@ -527,7 +578,8 @@ mod tests {
             .iter_mut()
             .find(|node| node.name == "Rerun Output")
             .expect("sample graph should include output node")
-            .weight = 0.43;
+            .parameter
+            .value = 0.43;
         let output = graph.adaptive_export_output();
 
         assert!(output.items.iter().any(|geometry| match geometry {
@@ -549,7 +601,8 @@ mod tests {
             .iter_mut()
             .find(|node| node.name == "Rerun Output")
             .expect("sample graph should include output node")
-            .weight = 0.0;
+            .parameter
+            .value = 0.0;
         assert_eq!(graph.export_segments(), 2);
 
         graph
@@ -557,7 +610,8 @@ mod tests {
             .iter_mut()
             .find(|node| node.name == "Rerun Output")
             .expect("sample graph should include output node")
-            .weight = 1.0;
+            .parameter
+            .value = 1.0;
         assert_eq!(graph.export_segments(), 16);
         assert_eq!(
             graph.cubic_control_point_count(),
@@ -581,8 +635,9 @@ mod tests {
         assert_eq!(filter.input_count, 4);
         assert_eq!(filter.output_count, 2);
         assert_eq!(filter.role, "Cull");
-        assert_eq!(filter.parameter_name, "Minimum score");
-        assert_eq!(filter.parameter_value, 0.55);
+        assert_eq!(filter.parameter.name, "Minimum score");
+        assert_eq!(filter.parameter.kind, NodeParameterKind::Scalar);
+        assert_eq!(filter.parameter.value, 0.55);
 
         let output = graph
             .selected_node_info(3)
@@ -642,7 +697,8 @@ mod tests {
             .iter_mut()
             .find(|node| node.name == "Filter")
             .expect("sample graph should include filter node")
-            .weight = 0.9;
+            .parameter
+            .value = 0.9;
         assert_eq!(graph.visible_output_count(), 0);
     }
 }

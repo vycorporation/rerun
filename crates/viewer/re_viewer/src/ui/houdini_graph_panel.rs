@@ -53,12 +53,11 @@ impl HoudiniGraphPanel {
             ui.strong("Parameters");
             if let Some(node) = graph.nodes.get_mut(self.selected_node) {
                 ui.label(node.info);
-                let response = ui.add(Slider::new(&mut node.weight, 0.0..=1.0).text(node.parameter));
-                if node.name == "Rerun Output" {
-                    response.on_hover_text(
-                        "Controls only the prepared export polyline. The native cubic remains four points.",
-                    );
-                }
+                ui.add(
+                    Slider::new(&mut node.parameter.value, node.parameter.range.clone())
+                        .text(node.parameter.name),
+                )
+                .on_hover_text(node.parameter.help);
             }
 
             ui.add_space(8.0);
@@ -180,7 +179,7 @@ impl HoudiniGraphPanel {
             painter.text(
                 node_rect.center_bottom() - egui::vec2(0.0, 8.0),
                 Align2::CENTER_BOTTOM,
-                format!("{:.2}", node.weight),
+                format!("{:.2}", node.parameter.value),
                 FontId::monospace(11.0),
                 ui.visuals().weak_text_color(),
             );
@@ -214,8 +213,12 @@ impl HoudiniGraphPanel {
                     ui.weak("Parameter");
                     ui.label(format!(
                         "{} = {:.2}",
-                        info.parameter_name, info.parameter_value
+                        info.parameter.name, info.parameter.value
                     ));
+                    ui.end_row();
+
+                    ui.weak("Type");
+                    ui.label(info.parameter.kind.as_str());
                     ui.end_row();
                 });
             ui.label(info.summary);
