@@ -364,8 +364,22 @@ impl HoudiniGraphPanel {
                     ui.weak("Type");
                     ui.label(info.parameter.kind.as_str());
                     ui.end_row();
+
+                    if let Some(rule) = info.parameter.as_attribute_rule() {
+                        ui.weak("Rule");
+                        ui.label(format!(
+                            "{} {} {:.2}",
+                            rule.attribute_name,
+                            rule.comparison.as_str(),
+                            rule.value.as_f32().unwrap_or(info.parameter.value)
+                        ));
+                        ui.end_row();
+                    }
                 });
             ui.label(info.summary);
+            for warning in &info.warnings {
+                ui.colored_label(ui.visuals().warn_fg_color, warning);
+            }
             if let Some(source_error) = &info.source_error {
                 ui.colored_label(
                     ui.visuals().error_fg_color,

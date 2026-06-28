@@ -92,8 +92,10 @@ impl GraphDocument {
                     name: "Filter",
                     kind: NodeKind::Filter,
                     layout_position: GraphPoint::new(0.33, 0.5),
-                    parameter: NodeParameter::scalar(
+                    parameter: NodeParameter::attribute_rule(
                         "Minimum score",
+                        "score",
+                        FilterComparison::GreaterOrEqual,
                         0.55,
                         0.0..=1.0,
                         "Controls the minimum sample score emitted by the filter.",
@@ -182,10 +184,16 @@ impl GraphDocument {
     }
 
     pub fn filter_minimum_score(&self) -> f32 {
+        self.filter_rule()
+            .and_then(|rule| rule.value.as_f32())
+            .unwrap_or(0.0)
+    }
+
+    pub fn filter_rule(&self) -> Option<AttributeFilterRule> {
         self.nodes
             .iter()
             .find(|node| node.kind == NodeKind::Filter)
-            .map_or(0.0, |node| node.parameter.value)
+            .and_then(|node| node.parameter.as_attribute_rule())
     }
 
     pub fn style_scale(&self) -> f32 {
@@ -218,7 +226,10 @@ impl GraphDocument {
             Geometry::CubicBezier(_) => self.layer_visible(LayerKind::Curves),
         };
 
-        layer_visible && geometry.score() >= self.filter_minimum_score()
+        layer_visible
+            && self.filter_rule().map_or(true, |rule| {
+                rule.matches_geometry(geometry).unwrap_or(false)
+            })
     }
 
     pub fn visible_output_count(&self) -> usize {
@@ -305,6 +316,7 @@ impl GraphDocument {
                 summary: "Source geometry lives in the graph model before any viewer adaptation.",
                 source_metadata: Some(self.source.metadata.clone()),
                 source_error: self.source.import_error.clone(),
+                warnings: Vec::new(),
             },
             NodeKind::Filter => NodeInfo {
                 kind: node.kind,
@@ -312,9 +324,10 @@ impl GraphDocument {
                 input_count: stages[1].input_count,
                 output_count: stages[1].output_count,
                 parameter: node.parameter.clone(),
-                summary: "Filter removes geometry below the minimum sample score.",
+                summary: "Filter removes geometry that does not satisfy its typed attribute rule.",
                 source_metadata: None,
                 source_error: None,
+                warnings: self.filter_rule_warning().into_iter().collect(),
             },
             NodeKind::Style => NodeInfo {
                 kind: node.kind,
@@ -325,6 +338,7 @@ impl GraphDocument {
                 summary: "Style changes viewer presentation without mutating graph geometry.",
                 source_metadata: None,
                 source_error: None,
+                warnings: Vec::new(),
             },
             NodeKind::Output => NodeInfo {
                 kind: node.kind,
@@ -335,6 +349,7 @@ impl GraphDocument {
                 summary: "Output prepares boundary data while preserving native graph geometry.",
                 source_metadata: None,
                 source_error: None,
+                warnings: Vec::new(),
             },
         })
     }
@@ -545,6 +560,14 @@ impl GraphDocument {
             GraphSourceMode::DemoFallback => &self.geometry,
             GraphSourceMode::RecordingQuery => &self.recording_geometry,
         }
+    }
+
+    fn filter_rule_warning(&self) -> Option<String> {
+        let rule = self.filter_rule()?;
+        self.active_geometry()
+            .first()
+            .and_then(|geometry| rule.matches_geometry(geometry).err())
+            .map(|err| err.to_string())
     }
 }
 
@@ -970,6 +993,7 @@ impl HoudiniGraphSidecar {
                     kind: node.kind,
                     layout_position: node.layout_position,
                     parameter_value: node.parameter.value,
+                    parameter_rule: node.parameter.rule_spec.clone(),
                 })
                 .collect(),
             layers: graph
@@ -1015,6 +1039,9 @@ impl HoudiniGraphSidecar {
                 node.parameter.value = node_snapshot
                     .parameter_value
                     .clamp(*node.parameter.range.start(), *node.parameter.range.end());
+                if let Some(parameter_rule) = node_snapshot.parameter_rule {
+                    node.parameter.rule_spec = Some(parameter_rule);
+                }
             }
         }
 
@@ -1050,6 +1077,8 @@ struct NodeSidecar {
     kind: NodeKind,
     layout_position: GraphPoint,
     parameter_value: f32,
+    #[serde(default)]
+    parameter_rule: Option<AttributeFilterRuleSpec>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -1073,6 +1102,7 @@ pub(crate) struct NodeParameter {
     pub value: f32,
     pub range: std::ops::RangeInclusive<f32>,
     pub help: &'static str,
+    pub rule_spec: Option<AttributeFilterRuleSpec>,
 }
 
 impl NodeParameter {
@@ -1088,19 +1118,113 @@ impl NodeParameter {
             value,
             range,
             help,
+            rule_spec: None,
         }
+    }
+
+    pub fn attribute_rule(
+        name: &'static str,
+        attribute_name: &'static str,
+        comparison: FilterComparison,
+        value: f32,
+        range: std::ops::RangeInclusive<f32>,
+        help: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            kind: NodeParameterKind::AttributeRule,
+            value,
+            range,
+            help,
+            rule_spec: Some(AttributeFilterRuleSpec {
+                attribute_name: attribute_name.to_owned(),
+                comparison,
+            }),
+        }
+    }
+
+    pub fn as_attribute_rule(&self) -> Option<AttributeFilterRule> {
+        let rule_spec = self.rule_spec.clone()?;
+        Some(AttributeFilterRule {
+            attribute_name: rule_spec.attribute_name,
+            comparison: rule_spec.comparison,
+            value: AttributeValue::Float32(self.value),
+        })
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NodeParameterKind {
     Scalar,
+    AttributeRule,
 }
 
 impl NodeParameterKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Scalar => "Scalar",
+            Self::AttributeRule => "Attribute rule",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct AttributeFilterRuleSpec {
+    pub attribute_name: String,
+    pub comparison: FilterComparison,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AttributeFilterRule {
+    pub attribute_name: String,
+    pub comparison: FilterComparison,
+    pub value: AttributeValue,
+}
+
+impl AttributeFilterRule {
+    fn matches_geometry(&self, geometry: &Geometry) -> anyhow::Result<bool> {
+        let actual = match self.attribute_name.as_str() {
+            "score" => geometry.score(),
+            attribute_name => {
+                anyhow::bail!("Unknown filter attribute: {attribute_name}");
+            }
+        };
+        self.comparison
+            .matches(actual, self.value.as_f32().unwrap_or(actual))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum FilterComparison {
+    GreaterOrEqual,
+    LessOrEqual,
+}
+
+impl FilterComparison {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GreaterOrEqual => ">=",
+            Self::LessOrEqual => "<=",
+        }
+    }
+
+    fn matches(self, actual: f32, expected: f32) -> anyhow::Result<bool> {
+        Ok(match self {
+            Self::GreaterOrEqual => actual >= expected,
+            Self::LessOrEqual => actual <= expected,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum AttributeValue {
+    Float32(f32),
+}
+
+impl AttributeValue {
+    pub fn as_f32(&self) -> Option<f32> {
+        match self {
+            Self::Float32(value) => Some(*value),
         }
     }
 }
@@ -1158,6 +1282,7 @@ pub(crate) struct NodeInfo {
     pub summary: &'static str,
     pub source_metadata: Option<SourceMetadata>,
     pub source_error: Option<String>,
+    pub warnings: Vec<String>,
 }
 
 pub(crate) struct PipelineStage {
@@ -1500,13 +1625,50 @@ mod tests {
         assert_eq!(filter.output_count, 2);
         assert_eq!(filter.role, "Cull");
         assert_eq!(filter.parameter.name, "Minimum score");
-        assert_eq!(filter.parameter.kind, NodeParameterKind::Scalar);
+        assert_eq!(filter.parameter.kind, NodeParameterKind::AttributeRule);
         assert_eq!(filter.parameter.value, 0.55);
+        assert!(filter.warnings.is_empty());
 
         let output = graph
             .selected_node_info(3)
             .expect("sample graph should include output node");
         assert_eq!(output.output_count, 2);
+    }
+
+    #[test]
+    fn filter_node_models_score_threshold_as_typed_attribute_rule() {
+        let graph = GraphDocument::sample();
+        let rule = graph
+            .filter_rule()
+            .expect("sample graph should include filter rule");
+
+        assert_eq!(rule.attribute_name, "score");
+        assert_eq!(rule.comparison, super::FilterComparison::GreaterOrEqual);
+        assert_eq!(rule.value.as_f32(), Some(0.55));
+        assert_eq!(graph.visible_output_count(), 2);
+    }
+
+    #[test]
+    fn invalid_filter_attribute_reports_warning_and_emits_no_output() {
+        let mut graph = GraphDocument::sample();
+        let filter = graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == super::NodeKind::Filter)
+            .expect("sample graph should include filter node");
+        filter
+            .parameter
+            .rule_spec
+            .as_mut()
+            .expect("filter node should have rule spec")
+            .attribute_name = "missing_attribute".to_owned();
+
+        assert_eq!(graph.visible_output_count(), 0);
+        let info = graph
+            .selected_node_info(1)
+            .expect("sample graph should include filter node");
+        assert_eq!(info.warnings.len(), 1);
+        assert!(info.warnings[0].contains("Unknown filter attribute"));
     }
 
     #[test]
@@ -1891,6 +2053,16 @@ mod tests {
             .parameter
             .value = 0.25;
         graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == super::NodeKind::Filter)
+            .expect("sample graph should include filter node")
+            .parameter
+            .rule_spec
+            .as_mut()
+            .expect("filter node should have rule spec")
+            .comparison = super::FilterComparison::LessOrEqual;
+        graph
             .layers
             .iter_mut()
             .find(|layer| layer.kind == LayerKind::Curves)
@@ -1925,6 +2097,13 @@ mod tests {
             GraphPoint::new(0.25, 0.75)
         );
         assert_eq!(restored.filter_minimum_score(), 0.25);
+        assert_eq!(
+            restored
+                .filter_rule()
+                .expect("restored graph should include filter rule")
+                .comparison,
+            super::FilterComparison::LessOrEqual
+        );
     }
 
     #[test]
