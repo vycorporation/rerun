@@ -2,9 +2,12 @@ use std::time::Instant;
 
 use egui::epaint::CubicBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind};
+use re_renderer::view_builder::{OrthographicCameraMode, Projection, TargetConfiguration};
+use re_renderer::{LineDrawableBuilder, Size, ViewBuilder};
 use re_sdk_types::ViewClassIdentifier;
 use re_ui::{Help, icons};
 use re_viewer_context::external::re_log_types::EntityPath;
+use re_viewer_context::gpu_bridge;
 use re_viewer_context::{
     IdentifiedViewSystem, IndicatedEntities, Item, PerVisualizerType, RecommendedVisualizers,
     SystemCommand, SystemCommandSender as _, SystemExecutionOutput, ViewClass,
@@ -48,14 +51,14 @@ struct HoudiniFrameStats {
 enum HoudiniPreviewMode {
     #[default]
     DetailedNativeCubic,
-    FastAdaptivePolyline,
+    RendererNativeLines,
 }
 
 impl HoudiniPreviewMode {
     fn as_str(self) -> &'static str {
         match self {
             Self::DetailedNativeCubic => "detailed native cubic",
-            Self::FastAdaptivePolyline => "fast adaptive viewer preview",
+            Self::RendererNativeLines => "renderer-native line preview",
         }
     }
 }
@@ -267,6 +270,7 @@ impl ViewClass for HoudiniGraphView {
             }
 
             state.last_frame_stats = Some(draw_houdini_output_view(
+                ctx,
                 ui,
                 rect,
                 &graph,
@@ -318,6 +322,7 @@ fn query_bridge_from_view_query(
 }
 
 fn draw_houdini_output_view(
+    ctx: &ViewerContext<'_>,
     ui: &mut egui::Ui,
     rect: Rect,
     graph: &GraphDocument,
@@ -350,6 +355,7 @@ fn draw_houdini_output_view(
     }
 
     let draw_summary = draw_scene_items(
+        ctx,
         ui,
         &scene,
         view_transform,
@@ -451,6 +457,7 @@ struct HoudiniDrawSummary {
 }
 
 fn draw_scene_items(
+    ctx: &ViewerContext<'_>,
     ui: &mut egui::Ui,
     scene: &RerunSceneOutput,
     view_transform: HoudiniViewTransform,
@@ -461,8 +468,12 @@ fn draw_scene_items(
         HoudiniPreviewMode::DetailedNativeCubic => {
             draw_detailed_scene_items(ui, scene, view_transform, selected_item_index)
         }
-        HoudiniPreviewMode::FastAdaptivePolyline => {
-            draw_fast_scene_items(ui, scene, view_transform, selected_item_index)
+        HoudiniPreviewMode::RendererNativeLines => {
+            draw_renderer_native_scene_items(ctx, ui, scene, view_transform, selected_item_index)
+                .unwrap_or_else(|err| {
+                    re_log::warn_once!("Failed to draw Houdini renderer-native preview: {err}");
+                    draw_fast_scene_items(ui, scene, view_transform, selected_item_index)
+                })
         }
     }
 }
@@ -566,11 +577,102 @@ fn draw_fast_scene_items(
     }
 }
 
-fn preview_mode_for_scene(scene: &RerunSceneOutput) -> HoudiniPreviewMode {
-    const FAST_PREVIEW_NATIVE_CUBIC_THRESHOLD: usize = 5_000;
+fn draw_renderer_native_scene_items(
+    ctx: &ViewerContext<'_>,
+    ui: &mut egui::Ui,
+    scene: &RerunSceneOutput,
+    view_transform: HoudiniViewTransform,
+    selected_item_index: Option<usize>,
+) -> anyhow::Result<HoudiniDrawSummary> {
+    let preview_segments_per_cubic = renderer_preview_segments_per_cubic(scene);
+    let preview_stride = renderer_preview_item_stride(scene);
+    let selected_item = selected_item_index.unwrap_or(usize::MAX);
+    let resolution_in_pixel = viewport_resolution_in_pixels(view_transform.viewport, ui);
+    if resolution_in_pixel[0] == 0 || resolution_in_pixel[1] == 0 {
+        return Ok(HoudiniDrawSummary {
+            enqueued_shape_count: 0,
+            preview_drawn_item_count: 0,
+            preview_segments_per_cubic,
+        });
+    }
 
-    if scene.native_cubic_bezier_count() >= FAST_PREVIEW_NATIVE_CUBIC_THRESHOLD {
-        HoudiniPreviewMode::FastAdaptivePolyline
+    let mut line_builder = LineDrawableBuilder::new(ctx.render_ctx());
+    line_builder.enable_alpha_blending();
+    line_builder.reserve_strips(scene.items.len().div_ceil(preview_stride))?;
+
+    let mut preview_drawn_item_count = 0;
+    {
+        let mut batch = line_builder.batch("houdini_graph_renderer_preview");
+        for (item_index, geometry) in scene.items.iter().enumerate() {
+            if item_index != selected_item && item_index % preview_stride != 0 {
+                continue;
+            }
+
+            let selected = selected_item_index == Some(item_index);
+            match geometry {
+                RerunSceneItem::Polygon { points, style, .. } => {
+                    let closed_points = renderer_polygon_points(points, view_transform);
+                    batch
+                        .add_strip_2d(closed_points.into_iter())
+                        .color(style_color(*style, 0.9))
+                        .radius(renderer_line_radius(*style, selected));
+                    preview_drawn_item_count += 1;
+                }
+                RerunSceneItem::NativeCubicBezier { curve, style, .. } => {
+                    let points =
+                        renderer_cubic_points(*curve, view_transform, preview_segments_per_cubic);
+                    batch
+                        .add_strip_2d(points.into_iter())
+                        .color(style_color(*style, 0.9))
+                        .radius(renderer_line_radius(*style, selected));
+                    preview_drawn_item_count += 1;
+                }
+            }
+        }
+    }
+
+    let enqueued_shape_count = preview_drawn_item_count;
+    let target_config = TargetConfiguration {
+        name: "Houdini Graph renderer preview".into(),
+        render_mode: ctx.render_mode(),
+        resolution_in_pixel,
+        view_from_world: Default::default(),
+        projection_from_view: Projection::Orthographic {
+            camera_mode: OrthographicCameraMode::TopLeftCornerAndExtendZ,
+            vertical_world_size: view_transform.viewport.height(),
+            far_plane_distance: 1000.0,
+        },
+        viewport_transformation: re_renderer::RectTransform::IDENTITY,
+        pixels_per_point: ui.pixels_per_point(),
+        blend_with_background: re_renderer::BlendWithBackground::Premultiplied,
+        picking_config: None,
+        outline_config: None,
+    };
+    let mut view_builder = ViewBuilder::new(ctx.render_ctx(), target_config)?;
+    view_builder.queue_draw(ctx.render_ctx(), line_builder.into_draw_data()?);
+    ui.painter().add(gpu_bridge::new_renderer_callback(
+        view_builder,
+        view_transform.viewport,
+        re_renderer::Rgba::TRANSPARENT,
+    ));
+
+    Ok(HoudiniDrawSummary {
+        enqueued_shape_count,
+        preview_drawn_item_count,
+        preview_segments_per_cubic,
+    })
+}
+
+fn preview_mode_for_scene(scene: &RerunSceneOutput) -> HoudiniPreviewMode {
+    const RENDERER_NATIVE_NATIVE_CUBIC_THRESHOLD: usize = 5_000;
+    const RENDERER_NATIVE_POLYGON_THRESHOLD: usize = 10_000;
+    const RENDERER_NATIVE_TOTAL_ITEM_THRESHOLD: usize = 50_000;
+
+    if scene.native_cubic_bezier_count() >= RENDERER_NATIVE_NATIVE_CUBIC_THRESHOLD
+        || scene.polygon_count() >= RENDERER_NATIVE_POLYGON_THRESHOLD
+        || scene.items.len() >= RENDERER_NATIVE_TOTAL_ITEM_THRESHOLD
+    {
+        HoudiniPreviewMode::RendererNativeLines
     } else {
         HoudiniPreviewMode::DetailedNativeCubic
     }
@@ -592,6 +694,68 @@ fn fast_preview_item_stride(scene: &RerunSceneOutput) -> usize {
         .len()
         .div_ceil(TARGET_FAST_PREVIEW_SHAPES)
         .max(1)
+}
+
+fn renderer_preview_segments_per_cubic(scene: &RerunSceneOutput) -> usize {
+    match scene.native_cubic_bezier_count() {
+        0..=9_999 => 8,
+        10_000..=49_999 => 6,
+        _ => 4,
+    }
+}
+
+fn renderer_preview_item_stride(scene: &RerunSceneOutput) -> usize {
+    const TARGET_RENDERER_PREVIEW_STRIPS: usize = 50_000;
+
+    scene
+        .items
+        .len()
+        .div_ceil(TARGET_RENDERER_PREVIEW_STRIPS)
+        .max(1)
+}
+
+fn viewport_resolution_in_pixels(viewport: Rect, ui: &egui::Ui) -> [u32; 2] {
+    let pixels_per_point = ui.pixels_per_point();
+    [
+        (viewport.width() * pixels_per_point).round().max(0.0) as u32,
+        (viewport.height() * pixels_per_point).round().max(0.0) as u32,
+    ]
+}
+
+fn renderer_line_radius(style: GraphStyle, selected: bool) -> Size {
+    Size::new_ui_points(1.0 + 2.0 * style.stroke_scale + selected_stroke_boost(selected))
+}
+
+fn renderer_polygon_points(
+    points: &[GraphPoint],
+    view_transform: HoudiniViewTransform,
+) -> Vec<glam::Vec2> {
+    let mut renderer_points = points
+        .iter()
+        .map(|point| renderer_point(view_transform.map_point(*point), view_transform))
+        .collect::<Vec<_>>();
+    if let Some(first) = renderer_points.first().copied() {
+        renderer_points.push(first);
+    }
+    renderer_points
+}
+
+fn renderer_cubic_points(
+    curve: CubicBezier,
+    view_transform: HoudiniViewTransform,
+    segments: usize,
+) -> Vec<glam::Vec2> {
+    sampled_cubic_view_points(curve, view_transform, segments)
+        .into_iter()
+        .map(|point| renderer_point(point, view_transform))
+        .collect()
+}
+
+fn renderer_point(point: Pos2, view_transform: HoudiniViewTransform) -> glam::Vec2 {
+    glam::vec2(
+        point.x - view_transform.viewport.left(),
+        point.y - view_transform.viewport.top(),
+    )
 }
 
 fn draw_native_cubic(
@@ -930,8 +1094,8 @@ impl GraphBounds {
 #[cfg(test)]
 mod tests {
     use super::{
-        GraphBounds, HoudiniPreviewMode, HoudiniViewTransform, fast_preview_item_stride,
-        fast_preview_segments_per_cubic, hit_test_scene, preview_mode_for_scene,
+        GraphBounds, HoudiniPreviewMode, HoudiniViewTransform, hit_test_scene,
+        preview_mode_for_scene, renderer_preview_item_stride, renderer_preview_segments_per_cubic,
     };
     use crate::ui::houdini_graph_panel::model::{
         CubicBezier, GraphPoint, GraphStyle, LayerKind, RerunSceneItem, RerunSceneOutput,
@@ -967,6 +1131,34 @@ mod tests {
                         layer_name: "Curves".to_owned(),
                         layer_order: 0,
                         score: curve.score,
+                        style: GraphStyle::default(),
+                    }
+                })
+                .collect(),
+            debug_items: vec![],
+            stroke_scale: 1.0,
+            style: GraphStyle::default(),
+            export_segments: 8,
+            query_bridge: None,
+        }
+    }
+
+    fn polygon_scene(count: usize) -> RerunSceneOutput {
+        RerunSceneOutput {
+            items: (0..count)
+                .map(|index| {
+                    let offset = index as f32 * 0.001;
+                    RerunSceneItem::Polygon {
+                        points: vec![
+                            point(offset, 0.0),
+                            point(offset + 1.0, 0.0),
+                            point(offset + 1.0, 1.0),
+                            point(offset, 1.0),
+                        ],
+                        layer: LayerKind::Polygons,
+                        layer_name: "Polygons".to_owned(),
+                        layer_order: 0,
+                        score: 0.9,
                         style: GraphStyle::default(),
                     }
                 })
@@ -1126,30 +1318,42 @@ mod tests {
     }
 
     #[test]
-    fn preview_mode_switches_to_fast_path_for_large_native_curve_scenes() {
+    fn preview_mode_switches_to_renderer_native_path_for_large_native_curve_scenes() {
         assert_eq!(
             preview_mode_for_scene(&native_cubic_scene(4_999)),
             HoudiniPreviewMode::DetailedNativeCubic
         );
         assert_eq!(
             preview_mode_for_scene(&native_cubic_scene(5_000)),
-            HoudiniPreviewMode::FastAdaptivePolyline
+            HoudiniPreviewMode::RendererNativeLines
         );
     }
 
     #[test]
-    fn fast_preview_lod_reduces_viewer_segments_as_curve_counts_grow() {
+    fn preview_mode_switches_to_renderer_native_path_for_large_polygon_scenes() {
         assert_eq!(
-            fast_preview_segments_per_cubic(&native_cubic_scene(5_000)),
+            preview_mode_for_scene(&polygon_scene(9_999)),
+            HoudiniPreviewMode::DetailedNativeCubic
+        );
+        assert_eq!(
+            preview_mode_for_scene(&polygon_scene(10_000)),
+            HoudiniPreviewMode::RendererNativeLines
+        );
+    }
+
+    #[test]
+    fn renderer_preview_lod_reduces_viewer_segments_as_curve_counts_grow() {
+        assert_eq!(
+            renderer_preview_segments_per_cubic(&native_cubic_scene(5_000)),
+            8
+        );
+        assert_eq!(
+            renderer_preview_segments_per_cubic(&native_cubic_scene(10_000)),
             6
         );
         assert_eq!(
-            fast_preview_segments_per_cubic(&native_cubic_scene(10_000)),
+            renderer_preview_segments_per_cubic(&native_cubic_scene(50_000)),
             4
-        );
-        assert_eq!(
-            fast_preview_segments_per_cubic(&native_cubic_scene(50_000)),
-            2
         );
 
         let scene = native_cubic_scene(10_000);
@@ -1160,9 +1364,13 @@ mod tests {
     }
 
     #[test]
-    fn fast_preview_stride_caps_large_scene_shape_counts() {
-        assert_eq!(fast_preview_item_stride(&native_cubic_scene(2_500)), 1);
-        assert_eq!(fast_preview_item_stride(&native_cubic_scene(10_000)), 4);
-        assert_eq!(fast_preview_item_stride(&native_cubic_scene(20_000)), 8);
+    fn renderer_preview_stride_allows_larger_renderer_native_batches() {
+        assert_eq!(renderer_preview_item_stride(&native_cubic_scene(2_500)), 1);
+        assert_eq!(renderer_preview_item_stride(&native_cubic_scene(10_000)), 1);
+        assert_eq!(renderer_preview_item_stride(&native_cubic_scene(50_000)), 1);
+        assert_eq!(
+            renderer_preview_item_stride(&native_cubic_scene(100_000)),
+            2
+        );
     }
 }
