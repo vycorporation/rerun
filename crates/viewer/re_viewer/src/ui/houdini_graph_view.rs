@@ -10,7 +10,8 @@ use re_viewer_context::{
 };
 
 use crate::ui::houdini_graph_panel::model::{
-    CubicBezier, ExportGeometry, GraphDocument, GraphPoint, LayerKind, ViewerGeometry,
+    CubicBezier, GraphDocument, GraphPoint, LayerKind, RerunSceneDebugItem, RerunSceneItem,
+    RerunSceneOutput,
 };
 use crate::ui::houdini_graph_panel::{lock_houdini_graph, shared_houdini_graph_from_context};
 
@@ -154,6 +155,7 @@ impl ViewClass for HoudiniGraphView {
 }
 
 fn draw_houdini_output_view(ui: &mut egui::Ui, rect: Rect, graph: &GraphDocument) {
+    let scene = graph.rerun_scene_output();
     ui.painter()
         .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
 
@@ -165,16 +167,14 @@ fn draw_houdini_output_view(ui: &mut egui::Ui, rect: Rect, graph: &GraphDocument
         StrokeKind::Inside,
     );
 
-    let output = graph.viewer_output();
     if graph.layer_visible(LayerKind::Debug) {
-        draw_debug_boundary(ui, viewport, graph);
+        draw_debug_boundary(ui, viewport, &scene);
     }
 
-    for geometry in &output.items {
+    for geometry in &scene.items {
         match geometry {
-            ViewerGeometry::Polygon(polygon) => {
-                let points = polygon
-                    .points
+            RerunSceneItem::Polygon { points } => {
+                let points = points
                     .iter()
                     .map(|point| map_view_point(viewport, *point))
                     .collect::<Vec<_>>();
@@ -182,7 +182,7 @@ fn draw_houdini_output_view(ui: &mut egui::Ui, rect: Rect, graph: &GraphDocument
                     points.clone(),
                     Color32::from_rgba_unmultiplied(38, 125, 255, 50),
                     Stroke::new(
-                        1.0 + 3.0 * output.stroke_scale,
+                        1.0 + 3.0 * scene.stroke_scale,
                         Color32::from_rgb(91, 169, 255),
                     ),
                 ));
@@ -191,8 +191,8 @@ fn draw_houdini_output_view(ui: &mut egui::Ui, rect: Rect, graph: &GraphDocument
                         .circle_filled(point, 3.5, Color32::from_rgb(131, 192, 255));
                 }
             }
-            ViewerGeometry::CubicBezier(curve) => {
-                draw_native_cubic(ui, viewport, *curve, output.stroke_scale);
+            RerunSceneItem::NativeCubicBezier(curve) => {
+                draw_native_cubic(ui, viewport, *curve, scene.stroke_scale);
             }
         }
     }
@@ -209,8 +209,8 @@ fn draw_houdini_output_view(ui: &mut egui::Ui, rect: Rect, graph: &GraphDocument
         Align2::LEFT_TOP,
         format!(
             "{} emitted, {} export segments per cubic",
-            graph.visible_output_count(),
-            graph.export_segments()
+            scene.items.len(),
+            scene.export_segments
         ),
         FontId::monospace(11.0),
         ui.visuals().weak_text_color(),
@@ -234,36 +234,34 @@ fn draw_native_cubic(ui: &mut egui::Ui, viewport: Rect, curve: CubicBezier, stro
     }
 }
 
-fn draw_debug_boundary(ui: &mut egui::Ui, viewport: Rect, graph: &GraphDocument) {
+fn draw_debug_boundary(ui: &mut egui::Ui, viewport: Rect, scene: &RerunSceneOutput) {
     let painter = ui.painter();
     let control_stroke = Stroke::new(1.0, Color32::from_rgb(150, 150, 150));
     let export_stroke = Stroke::new(1.0, Color32::from_rgb(115, 210, 155));
 
-    for geometry in &graph.adaptive_export_output().items {
-        if let ExportGeometry::Polyline(points) = geometry {
-            for pair in points.windows(2) {
-                painter.line_segment(
-                    [
-                        map_view_point(viewport, pair[0]),
-                        map_view_point(viewport, pair[1]),
-                    ],
-                    export_stroke,
-                );
+    for geometry in &scene.debug_items {
+        match geometry {
+            RerunSceneDebugItem::PreparedExportPolyline(points) => {
+                for pair in points.windows(2) {
+                    painter.line_segment(
+                        [
+                            map_view_point(viewport, pair[0]),
+                            map_view_point(viewport, pair[1]),
+                        ],
+                        export_stroke,
+                    );
+                }
             }
-        }
-    }
-
-    for geometry in &graph.viewer_output().items {
-        if let ViewerGeometry::CubicBezier(curve) = geometry {
-            let control_points = curve.control_points();
-            for pair in control_points.windows(2) {
-                painter.line_segment(
-                    [
-                        map_view_point(viewport, pair[0]),
-                        map_view_point(viewport, pair[1]),
-                    ],
-                    control_stroke,
-                );
+            RerunSceneDebugItem::NativeCubicControlPolygon(control_points) => {
+                for pair in control_points.windows(2) {
+                    painter.line_segment(
+                        [
+                            map_view_point(viewport, pair[0]),
+                            map_view_point(viewport, pair[1]),
+                        ],
+                        control_stroke,
+                    );
+                }
             }
         }
     }

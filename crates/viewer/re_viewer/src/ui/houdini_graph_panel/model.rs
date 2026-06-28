@@ -345,6 +345,44 @@ impl GraphDocument {
                 .collect(),
         }
     }
+
+    pub fn rerun_scene_output(&self) -> RerunSceneOutput {
+        let viewer_output = self.viewer_output();
+        let adaptive_export_output = self.adaptive_export_output();
+
+        RerunSceneOutput {
+            stroke_scale: viewer_output.stroke_scale,
+            export_segments: self.export_segments(),
+            items: viewer_output
+                .items
+                .into_iter()
+                .map(|geometry| match geometry {
+                    ViewerGeometry::Polygon(polygon) => RerunSceneItem::Polygon {
+                        points: polygon.points,
+                    },
+                    ViewerGeometry::CubicBezier(curve) => RerunSceneItem::NativeCubicBezier(curve),
+                })
+                .collect(),
+            debug_items: adaptive_export_output
+                .items
+                .into_iter()
+                .filter_map(|geometry| match geometry {
+                    ExportGeometry::Polygon(_) => None,
+                    ExportGeometry::Polyline(points) => {
+                        Some(RerunSceneDebugItem::PreparedExportPolyline(points))
+                    }
+                })
+                .chain(self.viewer_output().items.into_iter().filter_map(
+                    |geometry| match geometry {
+                        ViewerGeometry::Polygon(_) => None,
+                        ViewerGeometry::CubicBezier(curve) => Some(
+                            RerunSceneDebugItem::NativeCubicControlPolygon(curve.control_points()),
+                        ),
+                    },
+                ))
+                .collect(),
+        }
+    }
 }
 
 pub(crate) struct GraphNode {
@@ -543,11 +581,28 @@ pub(crate) enum ExportGeometry {
     Polyline(Vec<GraphPoint>),
 }
 
+pub(crate) struct RerunSceneOutput {
+    pub items: Vec<RerunSceneItem>,
+    pub debug_items: Vec<RerunSceneDebugItem>,
+    pub stroke_scale: f32,
+    pub export_segments: usize,
+}
+
+pub(crate) enum RerunSceneItem {
+    Polygon { points: Vec<GraphPoint> },
+    NativeCubicBezier(CubicBezier),
+}
+
+pub(crate) enum RerunSceneDebugItem {
+    NativeCubicControlPolygon([GraphPoint; 4]),
+    PreparedExportPolyline(Vec<GraphPoint>),
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ExportGeometry, Geometry, GraphDocument, GraphPoint, LayerKind, NodeParameterKind,
-        ViewerGeometry,
+        RerunSceneDebugItem, RerunSceneItem, ViewerGeometry,
     };
 
     #[test]
@@ -578,6 +633,25 @@ mod tests {
                 .iter()
                 .any(|geometry| matches!(geometry, ViewerGeometry::CubicBezier(_)))
         );
+    }
+
+    #[test]
+    fn rerun_scene_output_keeps_native_cubic_and_marks_boundary_debug() {
+        let graph = GraphDocument::sample();
+        let scene = graph.rerun_scene_output();
+
+        assert!(
+            scene
+                .items
+                .iter()
+                .any(|item| matches!(item, RerunSceneItem::NativeCubicBezier(_)))
+        );
+        assert!(scene.debug_items.iter().any(|item| {
+            matches!(item, RerunSceneDebugItem::PreparedExportPolyline(points) if points.len() == graph.export_segments() + 1)
+        }));
+        assert!(scene.debug_items.iter().any(|item| {
+            matches!(item, RerunSceneDebugItem::NativeCubicControlPolygon(points) if points.len() == 4)
+        }));
     }
 
     #[test]
