@@ -13,6 +13,9 @@ use self::model::{
     GraphDocument, GraphPoint, GraphStyle, LayerKind, NodeStatus, SourceMetadata,
 };
 
+const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
+const ATTRIBUTE_TABLE_PREVIEW_ROWS: usize = 200;
+
 pub(crate) type SharedHoudiniGraph = Arc<Mutex<GraphDocument>>;
 
 pub(crate) fn new_shared_houdini_graph() -> SharedHoudiniGraph {
@@ -765,12 +768,29 @@ impl HoudiniGraphPanel {
             ui.weak(status);
         }
 
-        let rows = graph.attribute_table_rows(&query);
+        let visible_output_count = graph.visible_output_count();
+        let use_preview = visible_output_count > LARGE_ATTRIBUTE_TABLE_ROW_LIMIT;
+        let rows = if use_preview {
+            graph.attribute_table_preview_rows(&query, ATTRIBUTE_TABLE_PREVIEW_ROWS)
+        } else {
+            graph.attribute_table_rows(&query)
+        };
 
-        ui.weak(format!(
-            "{} visible read-only records; table filters do not change graph output",
-            rows.len()
-        ));
+        if use_preview {
+            ui.weak(format!(
+                "Large table preview: showing first {} of about {} visible records; commit filters still update the graph",
+                rows.len(),
+                visible_output_count
+            ));
+            if self.table_sort != AttributeTableSort::RecordIndex || self.table_sort_descending {
+                ui.weak("Large previews are record-order only; use graph filters to narrow before sorting.");
+            }
+        } else {
+            ui.weak(format!(
+                "{} visible read-only records; table filters do not change graph output",
+                rows.len()
+            ));
+        }
         egui::ScrollArea::vertical()
             .id_salt("houdini_graph_attribute_table")
             .max_height(160.0)

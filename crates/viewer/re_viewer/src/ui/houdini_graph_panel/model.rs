@@ -302,7 +302,10 @@ impl GraphDocument {
     }
 
     pub fn visible_output_count(&self) -> usize {
-        self.viewer_output().items.len()
+        self.active_geometry()
+            .iter()
+            .filter(|geometry| self.emits(geometry))
+            .count()
     }
 
     pub fn attribute_table_rows(&self, query: &AttributeTableQuery) -> Vec<AttributeTableRow> {
@@ -342,6 +345,43 @@ impl GraphDocument {
             rows.reverse();
         }
         rows
+    }
+
+    pub fn attribute_table_preview_rows(
+        &self,
+        query: &AttributeTableQuery,
+        limit: usize,
+    ) -> Vec<AttributeTableRow> {
+        let source_path = self
+            .source
+            .source_path
+            .clone()
+            .or_else(|| self.source.metadata.source_path.clone());
+        let provenance = self.source.metadata.provenance;
+        let search = query.search.trim().to_ascii_lowercase();
+
+        self.active_geometry()
+            .iter()
+            .enumerate()
+            .filter(|(_, geometry)| self.emits(geometry))
+            .map(|(record_index, geometry)| AttributeTableRow {
+                record_index,
+                geometry_kind: geometry.kind(),
+                score: geometry.score(),
+                layer: geometry.layer(),
+                point_count: geometry.control_or_vertex_count(),
+                source_path: source_path.clone(),
+                provenance,
+                is_native_cubic_bezier: matches!(geometry, Geometry::CubicBezier(_)),
+            })
+            .filter(|row| {
+                query
+                    .minimum_score
+                    .is_none_or(|minimum_score| row.score >= minimum_score)
+            })
+            .filter(|row| search.is_empty() || row.matches_search(&search))
+            .take(limit)
+            .collect()
     }
 
     pub fn commit_attribute_table_query_as_filter(&mut self, query: &AttributeTableQuery) -> bool {
@@ -2979,6 +3019,20 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item.geometry, ViewerGeometry::CubicBezier(_)))
         );
+    }
+
+    #[test]
+    fn attribute_table_preview_rows_caps_large_outputs() {
+        let mut graph = GraphDocument::sample();
+        graph.load_synthetic_render_benchmark(10_000, 0);
+
+        let rows = graph.attribute_table_preview_rows(&AttributeTableQuery::default(), 200);
+
+        assert_eq!(rows.len(), 200);
+        assert_eq!(rows.first().map(|row| row.record_index), Some(0));
+        assert_eq!(rows.last().map(|row| row.record_index), Some(199));
+        assert!(rows.iter().all(|row| row.is_native_cubic_bezier));
+        assert_eq!(graph.visible_output_count(), 10_000);
     }
 
     #[test]
