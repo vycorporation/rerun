@@ -30,6 +30,7 @@ use crate::navigation::Navigation;
 use crate::open_url_description::ViewerOpenUrlDescription;
 use crate::ui::settings_screen_ui;
 use crate::ui::{CloudState, LoginState};
+use crate::ui::{SharedHoudiniGraph, install_shared_houdini_graph, new_shared_houdini_graph};
 use crate::{StartupOptions, history};
 
 const WATERMARK: bool = false; // Nice for recording media material
@@ -68,6 +69,8 @@ pub struct AppState {
     pub(crate) recording_panel: re_recording_panel::RecordingPanel,
     #[serde(skip)]
     houdini_graph_panel: crate::ui::HoudiniGraphPanel,
+    #[serde(skip)]
+    houdini_graph: SharedHoudiniGraph,
 
     #[serde(skip)]
     welcome_screen: crate::ui::WelcomeScreen,
@@ -147,6 +150,7 @@ impl Default for AppState {
             blueprint_time_panel: re_time_panel::TimePanel::new_blueprint_panel(),
             recording_panel: Default::default(),
             houdini_graph_panel: Default::default(),
+            houdini_graph: new_shared_houdini_graph(),
             blueprint_tree: Default::default(),
             welcome_screen: Default::default(),
             datastore_ui: Default::default(),
@@ -453,6 +457,7 @@ impl AppState {
                     blueprint_time_ctrl: blueprint_time_control,
                     blueprint_query: &blueprint_query,
                 };
+                install_shared_houdini_graph(ui.ctx(), &self.houdini_graph);
 
                 // enable the heuristics if we must this frame
                 if store_context.should_enable_heuristics {
@@ -549,7 +554,11 @@ impl AppState {
                     Some((&viewport_ui, &ctx)),
                 );
 
-                Self::houdini_graph_panel_ui(ui, &mut self.houdini_graph_panel);
+                Self::houdini_graph_panel_ui(
+                    ui,
+                    &mut self.houdini_graph_panel,
+                    &self.houdini_graph,
+                );
 
                 egui::CentralPanel::default()
                     .frame(viewport_frame)
@@ -977,7 +986,11 @@ impl AppState {
         }
     }
 
-    fn houdini_graph_panel_ui(ui: &mut Ui, houdini_graph_panel: &mut crate::ui::HoudiniGraphPanel) {
+    fn houdini_graph_panel_ui(
+        ui: &mut Ui,
+        houdini_graph_panel: &mut crate::ui::HoudiniGraphPanel,
+        houdini_graph: &SharedHoudiniGraph,
+    ) {
         egui::Panel::bottom("houdini_graph_panel")
             .resizable(true)
             .show_separator_line(true)
@@ -991,7 +1004,7 @@ impl AppState {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        houdini_graph_panel.show(ui);
+                        houdini_graph_panel.show(ui, houdini_graph);
                     });
             });
     }

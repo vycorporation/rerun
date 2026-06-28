@@ -12,7 +12,7 @@ use re_viewer_context::{
 use crate::ui::houdini_graph_panel::model::{
     CubicBezier, ExportGeometry, GraphDocument, GraphPoint, LayerKind, ViewerGeometry,
 };
-use crate::ui::houdini_graph_panel::shared_houdini_graph;
+use crate::ui::houdini_graph_panel::{lock_houdini_graph, shared_houdini_graph_from_context};
 
 #[derive(Default)]
 pub(crate) struct HoudiniGraphView;
@@ -95,17 +95,21 @@ impl ViewClass for HoudiniGraphView {
         _view_id: re_viewer_context::ViewId,
     ) -> Result<(), ViewSystemExecutionError> {
         state.downcast_ref::<HoudiniGraphViewState>()?;
-        let graph = shared_houdini_graph();
-        ui.label("Product-fork spike view. The graph model is not Rerun viewer state.");
-        ui.label(format!(
-            "{} polygons, {} native cubic Bezier curves",
-            graph.polygon_count(),
-            graph.cubic_bezier_count()
-        ));
-        ui.label(format!(
-            "{} adaptive export segments at the current output boundary",
-            graph.export_segments()
-        ));
+        if let Some(shared_graph) = shared_houdini_graph_from_context(ui.ctx()) {
+            let graph = lock_houdini_graph(&shared_graph);
+            ui.label("Product-fork spike view. The graph model is not Rerun viewer state.");
+            ui.label(format!(
+                "{} polygons, {} native cubic Bezier curves",
+                graph.polygon_count(),
+                graph.cubic_bezier_count()
+            ));
+            ui.label(format!(
+                "{} adaptive export segments at the current output boundary",
+                graph.export_segments()
+            ));
+        } else {
+            ui.weak("Houdini graph state is not installed for this frame.");
+        }
         Ok(())
     }
 
@@ -131,8 +135,20 @@ impl ViewClass for HoudiniGraphView {
                 .send_system(SystemCommand::set_selection(Item::View(query.view_id)));
         }
 
-        let graph = shared_houdini_graph();
-        draw_houdini_output_view(ui, rect, &graph);
+        if let Some(shared_graph) = shared_houdini_graph_from_context(ui.ctx()) {
+            let graph = lock_houdini_graph(&shared_graph);
+            draw_houdini_output_view(ui, rect, &graph);
+        } else {
+            ui.painter()
+                .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "Houdini graph state is not installed for this frame.",
+                FontId::proportional(13.0),
+                ui.visuals().weak_text_color(),
+            );
+        }
         Ok(())
     }
 }

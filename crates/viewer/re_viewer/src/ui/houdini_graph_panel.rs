@@ -1,4 +1,4 @@
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use egui::{
     Align2, Color32, FontId, Pos2, Rect, Response, Sense, Slider, Stroke, StrokeKind, Ui, Vec2,
@@ -9,13 +9,30 @@ pub(crate) mod model;
 
 use self::model::{ExportGeometry, GraphDocument, GraphPoint};
 
-static SHARED_HOUDINI_GRAPH: LazyLock<Mutex<GraphDocument>> =
-    LazyLock::new(|| Mutex::new(GraphDocument::sample()));
+pub(crate) type SharedHoudiniGraph = Arc<Mutex<GraphDocument>>;
 
-pub(crate) fn shared_houdini_graph() -> MutexGuard<'static, GraphDocument> {
-    SHARED_HOUDINI_GRAPH
+pub(crate) fn new_shared_houdini_graph() -> SharedHoudiniGraph {
+    Arc::new(Mutex::new(GraphDocument::sample()))
+}
+
+pub(crate) fn install_shared_houdini_graph(egui_ctx: &egui::Context, graph: &SharedHoudiniGraph) {
+    egui_ctx.data_mut(|data| data.insert_temp(shared_houdini_graph_id(), graph.clone()));
+}
+
+pub(crate) fn shared_houdini_graph_from_context(
+    egui_ctx: &egui::Context,
+) -> Option<SharedHoudiniGraph> {
+    egui_ctx.data(|data| data.get_temp(shared_houdini_graph_id()))
+}
+
+pub(crate) fn lock_houdini_graph(graph: &SharedHoudiniGraph) -> MutexGuard<'_, GraphDocument> {
+    graph
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn shared_houdini_graph_id() -> egui::Id {
+    egui::Id::new("houdini_graph_state")
 }
 
 pub(crate) struct HoudiniGraphPanel {
@@ -29,8 +46,9 @@ impl Default for HoudiniGraphPanel {
 }
 
 impl HoudiniGraphPanel {
-    pub(crate) fn show(&mut self, ui: &mut Ui) {
-        let mut graph = shared_houdini_graph();
+    pub(crate) fn show(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
+        install_shared_houdini_graph(ui.ctx(), shared_graph);
+        let mut graph = lock_houdini_graph(shared_graph);
         egui::Frame {
             inner_margin: egui::Margin::same(8),
             ..Default::default()
