@@ -41,6 +41,11 @@ fn populate_view_class_registry_with_builtin(
         app_options,
         fallback_registry,
     )?;
+    view_class_registry.add_class::<crate::ui::HoudiniGraphView>(
+        reflection,
+        app_options,
+        fallback_registry,
+    )?;
     #[cfg(feature = "map_view")]
     view_class_registry.add_class::<re_view_map::MapView>(
         reflection,

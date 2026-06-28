@@ -4,7 +4,7 @@ use egui::{
 };
 use re_ui::UiExt as _;
 
-mod model;
+pub(crate) mod model;
 
 use self::model::{ExportGeometry, GraphDocument, GraphPoint, LayerKind, ViewerGeometry};
 
