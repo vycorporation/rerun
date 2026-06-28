@@ -103,6 +103,12 @@ impl HoudiniGraphPanel {
                 })
                 .sum::<usize>();
             ui.label(format!(
+                "Source: {} ({} matching entities, {} visible query results)",
+                graph.source.as_str(),
+                graph.source.matching_entity_count,
+                graph.source.visible_data_result_count
+            ));
+            ui.label(format!(
                 "{} source polygons, {} source cubic Bezier curves",
                 graph.polygon_count(),
                 graph.cubic_bezier_count()

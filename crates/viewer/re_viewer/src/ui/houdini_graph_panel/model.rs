@@ -18,6 +18,7 @@ impl GraphPoint {
 }
 
 pub(crate) struct GraphDocument {
+    pub source: GraphSource,
     pub nodes: Vec<GraphNode>,
     pub layers: Vec<Layer>,
     pub geometry: Vec<Geometry>,
@@ -26,6 +27,7 @@ pub(crate) struct GraphDocument {
 impl GraphDocument {
     pub fn sample() -> Self {
         Self {
+            source: GraphSource::demo_fallback(),
             nodes: vec![
                 GraphNode {
                     name: "Source",
@@ -131,21 +133,21 @@ impl GraphDocument {
     }
 
     pub fn polygon_count(&self) -> usize {
-        self.geometry
+        self.active_geometry()
             .iter()
             .filter(|geometry| matches!(geometry, Geometry::Polygon(_)))
             .count()
     }
 
     pub fn cubic_bezier_count(&self) -> usize {
-        self.geometry
+        self.active_geometry()
             .iter()
             .filter(|geometry| matches!(geometry, Geometry::CubicBezier(_)))
             .count()
     }
 
     pub fn polygon_vertex_count(&self) -> usize {
-        self.geometry
+        self.active_geometry()
             .iter()
             .map(|geometry| match geometry {
                 Geometry::Polygon(polygon) => polygon.points.len(),
@@ -155,7 +157,7 @@ impl GraphDocument {
     }
 
     pub fn cubic_control_point_count(&self) -> usize {
-        self.geometry
+        self.active_geometry()
             .iter()
             .map(|geometry| match geometry {
                 Geometry::Polygon(_) => 0,
@@ -209,9 +211,9 @@ impl GraphDocument {
     }
 
     pub fn pipeline_stages(&self) -> Vec<PipelineStage> {
-        let source_count = self.geometry.len();
+        let source_count = self.active_geometry().len();
         let filtered_count = self
-            .geometry
+            .active_geometry()
             .iter()
             .filter(|geometry| geometry.score() >= self.filter_minimum_score())
             .count();
@@ -318,7 +320,7 @@ impl GraphDocument {
         ViewerOutput {
             stroke_scale: self.style_scale(),
             items: self
-                .geometry
+                .active_geometry()
                 .iter()
                 .filter(|geometry| self.emits(geometry))
                 .map(|geometry| match geometry {
@@ -333,7 +335,7 @@ impl GraphDocument {
         let curve_segments = self.export_segments().max(1);
         ExportOutput {
             items: self
-                .geometry
+                .active_geometry()
                 .iter()
                 .filter(|geometry| self.emits(geometry))
                 .map(|geometry| match geometry {
@@ -392,6 +394,73 @@ impl GraphDocument {
                 .collect(),
         }
     }
+
+    pub fn update_source_from_query_bridge(&mut self, query_bridge: &RerunQueryBridge) {
+        self.source = GraphSource::from_query_bridge(query_bridge);
+        if let Some(source_node) = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == NodeKind::Source)
+        {
+            source_node.parameter.value = if self.source.mode == GraphSourceMode::DemoFallback {
+                1.0
+            } else {
+                0.0
+            };
+        }
+    }
+
+    fn active_geometry(&self) -> &[Geometry] {
+        match self.source.mode {
+            GraphSourceMode::DemoFallback => &self.geometry,
+            GraphSourceMode::RecordingQuery => &[],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GraphSource {
+    pub mode: GraphSourceMode,
+    pub matching_entity_count: usize,
+    pub visible_data_result_count: usize,
+}
+
+impl GraphSource {
+    fn demo_fallback() -> Self {
+        Self {
+            mode: GraphSourceMode::DemoFallback,
+            matching_entity_count: 0,
+            visible_data_result_count: 0,
+        }
+    }
+
+    fn from_query_bridge(query_bridge: &RerunQueryBridge) -> Self {
+        let has_recording_input =
+            query_bridge.matching_entity_count > 0 || query_bridge.visible_data_result_count > 0;
+
+        Self {
+            mode: if has_recording_input {
+                GraphSourceMode::RecordingQuery
+            } else {
+                GraphSourceMode::DemoFallback
+            },
+            matching_entity_count: query_bridge.matching_entity_count,
+            visible_data_result_count: query_bridge.visible_data_result_count,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self.mode {
+            GraphSourceMode::DemoFallback => "demo fallback",
+            GraphSourceMode::RecordingQuery => "recording query",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GraphSourceMode {
+    DemoFallback,
+    RecordingQuery,
 }
 
 pub(crate) struct GraphNode {
@@ -858,5 +927,47 @@ mod tests {
             .parameter
             .value = 0.9;
         assert_eq!(graph.visible_output_count(), 0);
+    }
+
+    #[test]
+    fn recording_query_source_disables_demo_geometry_until_native_geometry_is_imported() {
+        let mut graph = GraphDocument::sample();
+        let bridge = super::RerunQueryBridge {
+            mode: super::RerunQueryBridgeMode::ProductForkViewOwned,
+            view_id: "view(1234)".to_owned(),
+            space_origin: "/".to_owned(),
+            timeline: "frame".to_owned(),
+            latest_at: 42,
+            matching_entity_count: 5,
+            visualized_entity_count: 5,
+            visible_data_result_count: 5,
+        };
+
+        graph.update_source_from_query_bridge(&bridge);
+
+        assert_eq!(graph.source.mode, super::GraphSourceMode::RecordingQuery);
+        assert_eq!(graph.visible_output_count(), 0);
+        assert_eq!(graph.polygon_count(), 0);
+        assert_eq!(graph.cubic_bezier_count(), 0);
+    }
+
+    #[test]
+    fn empty_query_keeps_demo_geometry_fallback() {
+        let mut graph = GraphDocument::sample();
+        let bridge = super::RerunQueryBridge {
+            mode: super::RerunQueryBridgeMode::ProductForkViewOwned,
+            view_id: "view(1234)".to_owned(),
+            space_origin: "/".to_owned(),
+            timeline: "frame".to_owned(),
+            latest_at: 42,
+            matching_entity_count: 0,
+            visualized_entity_count: 0,
+            visible_data_result_count: 0,
+        };
+
+        graph.update_source_from_query_bridge(&bridge);
+
+        assert_eq!(graph.source.mode, super::GraphSourceMode::DemoFallback);
+        assert_eq!(graph.visible_output_count(), 2);
     }
 }

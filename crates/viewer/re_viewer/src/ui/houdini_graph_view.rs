@@ -4,9 +4,12 @@ use re_sdk_types::ViewClassIdentifier;
 use re_ui::{Help, icons};
 use re_viewer_context::external::re_log_types::EntityPath;
 use re_viewer_context::{
-    Item, SystemCommand, SystemCommandSender as _, SystemExecutionOutput, ViewClass,
-    ViewClassLayoutPriority, ViewClassRegistryError, ViewQuery, ViewSpawnHeuristics, ViewState,
-    ViewStateExt as _, ViewSystemExecutionError, ViewSystemRegistrator, ViewerContext,
+    IdentifiedViewSystem, IndicatedEntities, Item, PerVisualizerType, RecommendedVisualizers,
+    SystemCommand, SystemCommandSender as _, SystemExecutionOutput, ViewClass,
+    ViewClassLayoutPriority, ViewClassRegistryError, ViewContext, ViewContextCollection, ViewQuery,
+    ViewSpawnHeuristics, ViewState, ViewStateExt as _, ViewSystemExecutionError,
+    ViewSystemIdentifier, ViewSystemRegistrator, ViewerContext, VisualizableReason,
+    VisualizerExecutionOutput, VisualizerQueryInfo, VisualizerSystem,
 };
 
 use crate::ui::houdini_graph_panel::model::{
@@ -32,6 +35,36 @@ impl ViewState for HoudiniGraphViewState {
 
     fn heap_size_bytes(&self) -> u64 {
         0
+    }
+}
+
+#[derive(Default)]
+struct HoudiniGraphSourceVisualizer;
+
+impl IdentifiedViewSystem for HoudiniGraphSourceVisualizer {
+    fn identifier() -> ViewSystemIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewSystemIdentifier,
+            "HoudiniGraphSource"
+        )
+    }
+}
+
+impl VisualizerSystem for HoudiniGraphSourceVisualizer {
+    fn visualizer_query_info(
+        &self,
+        _app_options: &re_viewer_context::AppOptions,
+    ) -> VisualizerQueryInfo {
+        VisualizerQueryInfo::empty()
+    }
+
+    fn execute(
+        &self,
+        _ctx: &ViewContext<'_>,
+        _query: &ViewQuery<'_>,
+        _context_systems: &ViewContextCollection,
+    ) -> Result<VisualizerExecutionOutput, ViewSystemExecutionError> {
+        Ok(VisualizerExecutionOutput::default())
     }
 }
 
@@ -62,9 +95,9 @@ impl ViewClass for HoudiniGraphView {
 
     fn on_register(
         &self,
-        _system_registry: &mut ViewSystemRegistrator<'_>,
+        system_registry: &mut ViewSystemRegistrator<'_>,
     ) -> Result<(), ViewClassRegistryError> {
-        Ok(())
+        system_registry.register_visualizer::<HoudiniGraphSourceVisualizer>()
     }
 
     fn new_state(&self) -> Box<dyn ViewState> {
@@ -85,6 +118,22 @@ impl ViewClass for HoudiniGraphView {
         _include_entity: &dyn Fn(&EntityPath) -> bool,
     ) -> ViewSpawnHeuristics {
         ViewSpawnHeuristics::root().with_max_views_spawned(1)
+    }
+
+    fn recommended_visualizers_for_entity(
+        &self,
+        _entity_path: &EntityPath,
+        visualizers_with_reason: &[(ViewSystemIdentifier, &VisualizableReason)],
+        _indicated_entities_per_visualizer: &PerVisualizerType<&IndicatedEntities>,
+    ) -> RecommendedVisualizers {
+        if visualizers_with_reason
+            .iter()
+            .any(|(visualizer, _reason)| *visualizer == HoudiniGraphSourceVisualizer::identifier())
+        {
+            RecommendedVisualizers::default(HoudiniGraphSourceVisualizer::identifier())
+        } else {
+            RecommendedVisualizers::empty()
+        }
     }
 
     fn selection_ui(
@@ -137,8 +186,9 @@ impl ViewClass for HoudiniGraphView {
         }
 
         if let Some(shared_graph) = shared_houdini_graph_from_context(ui.ctx()) {
-            let graph = lock_houdini_graph(&shared_graph);
             let query_bridge = query_bridge_from_view_query(ctx, query);
+            let mut graph = lock_houdini_graph(&shared_graph);
+            graph.update_source_from_query_bridge(&query_bridge);
             draw_houdini_output_view(ui, rect, &graph, query_bridge);
         } else {
             ui.painter()
