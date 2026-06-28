@@ -91,7 +91,7 @@ impl ViewClass for HoudiniGraphView {
         _ctx: &ViewerContext<'_>,
         _include_entity: &dyn Fn(&EntityPath) -> bool,
     ) -> ViewSpawnHeuristics {
-        ViewSpawnHeuristics::empty()
+        ViewSpawnHeuristics::root().with_max_views_spawned(1)
     }
 
     fn selection_ui(
