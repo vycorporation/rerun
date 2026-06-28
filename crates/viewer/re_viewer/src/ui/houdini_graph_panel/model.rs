@@ -279,6 +279,31 @@ impl GraphDocument {
         rows
     }
 
+    pub fn commit_attribute_table_query_as_filter(&mut self, query: &AttributeTableQuery) -> bool {
+        let Some(minimum_score) = query.minimum_score else {
+            return false;
+        };
+
+        let Some(filter_node) = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == NodeKind::Filter)
+        else {
+            return false;
+        };
+
+        filter_node.parameter.value = minimum_score.clamp(
+            *filter_node.parameter.range.start(),
+            *filter_node.parameter.range.end(),
+        );
+        filter_node.parameter.kind = NodeParameterKind::AttributeRule;
+        filter_node.parameter.rule_spec = Some(AttributeFilterRuleSpec {
+            attribute_name: "score".to_owned(),
+            comparison: FilterComparison::GreaterOrEqual,
+        });
+        true
+    }
+
     pub fn pipeline_stages(&self) -> Vec<PipelineStage> {
         let source_count = self.active_geometry().len();
         let filtered_count = self
@@ -2162,6 +2187,72 @@ mod tests {
                 .iter()
                 .any(|geometry| matches!(geometry, ViewerGeometry::CubicBezier(_)))
         );
+    }
+
+    #[test]
+    fn attribute_table_filter_stays_transient_until_committed() {
+        let graph = GraphDocument::sample();
+        let rows = graph.attribute_table_rows(&AttributeTableQuery {
+            search: String::new(),
+            minimum_score: Some(0.8),
+            sort: AttributeTableSort::RecordIndex,
+            sort_descending: false,
+        });
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(graph.visible_output_count(), 2);
+        assert_eq!(
+            graph
+                .filter_rule()
+                .expect("sample graph should include filter rule")
+                .value
+                .as_f32(),
+            Some(0.55)
+        );
+    }
+
+    #[test]
+    fn committed_attribute_table_filter_updates_graph_filter_node() {
+        let mut graph = GraphDocument::sample();
+        let committed = graph.commit_attribute_table_query_as_filter(&AttributeTableQuery {
+            search: String::new(),
+            minimum_score: Some(0.8),
+            sort: AttributeTableSort::RecordIndex,
+            sort_descending: false,
+        });
+
+        assert!(committed);
+        let rule = graph
+            .filter_rule()
+            .expect("committed table filter should become graph filter rule");
+        assert_eq!(rule.attribute_name, "score");
+        assert_eq!(rule.comparison, super::FilterComparison::GreaterOrEqual);
+        assert_eq!(rule.value.as_f32(), Some(0.8));
+        assert_eq!(graph.visible_output_count(), 1);
+    }
+
+    #[test]
+    fn committed_attribute_table_filter_round_trips_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        assert!(
+            graph.commit_attribute_table_query_as_filter(&AttributeTableQuery {
+                search: String::new(),
+                minimum_score: Some(0.8),
+                sort: AttributeTableSort::RecordIndex,
+                sort_descending: false,
+            },)
+        );
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        let rule = restored
+            .filter_rule()
+            .expect("restored graph should include committed table filter");
+        assert_eq!(rule.attribute_name, "score");
+        assert_eq!(rule.value.as_f32(), Some(0.8));
+        assert_eq!(restored.visible_output_count(), 1);
     }
 
     #[test]

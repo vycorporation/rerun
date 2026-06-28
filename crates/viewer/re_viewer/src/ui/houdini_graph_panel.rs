@@ -49,6 +49,7 @@ pub(crate) struct HoudiniGraphPanel {
     table_minimum_score: f32,
     table_sort: AttributeTableSort,
     table_sort_descending: bool,
+    table_commit_status: Option<String>,
 }
 
 impl Default for HoudiniGraphPanel {
@@ -64,6 +65,7 @@ impl Default for HoudiniGraphPanel {
             table_minimum_score: 0.0,
             table_sort: AttributeTableSort::RecordIndex,
             table_sort_descending: false,
+            table_commit_status: None,
         }
     }
 }
@@ -111,7 +113,7 @@ impl HoudiniGraphPanel {
 
             ui.add_space(8.0);
             ui.strong("Attribute Table");
-            self.attribute_table_ui(ui, &graph);
+            self.attribute_table_ui(ui, &mut graph);
 
             ui.add_space(8.0);
             ui.strong("Graph Model");
@@ -493,7 +495,7 @@ impl HoudiniGraphPanel {
             });
     }
 
-    fn attribute_table_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) {
+    fn attribute_table_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         ui.horizontal(|ui| {
             ui.label("Search");
             ui.add(
@@ -547,6 +549,27 @@ impl HoudiniGraphPanel {
             sort: self.table_sort,
             sort_descending: self.table_sort_descending,
         };
+
+        ui.horizontal(|ui| {
+            let commit_enabled = query.minimum_score.is_some();
+            ui.add_enabled_ui(commit_enabled, |ui| {
+                if ui.button("Commit min score to Filter").clicked()
+                    && graph.commit_attribute_table_query_as_filter(&query)
+                {
+                    self.table_commit_status = Some(format!(
+                        "Committed score >= {:.2} to Filter node",
+                        query.minimum_score.unwrap_or_default()
+                    ));
+                }
+            });
+            if !commit_enabled {
+                ui.weak("Enable Min score to commit a graph-backed filter");
+            }
+        });
+        if let Some(status) = &self.table_commit_status {
+            ui.weak(status);
+        }
+
         let rows = graph.attribute_table_rows(&query);
 
         ui.weak(format!(
