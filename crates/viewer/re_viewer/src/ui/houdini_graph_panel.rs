@@ -4,6 +4,10 @@ use egui::{
 };
 use re_ui::UiExt as _;
 
+mod model;
+
+use self::model::{ExportGeometry, GraphDocument, GraphPoint, ViewerGeometry};
+
 pub(crate) struct HoudiniGraphPanel {
     graph: GraphDocument,
     selected_node: usize,
@@ -50,6 +54,16 @@ impl HoudiniGraphPanel {
 
             ui.add_space(8.0);
             ui.strong("Graph Model");
+            let export_output = self.graph.adaptive_export_output(8);
+            let export_polyline_points = export_output
+                .items
+                .iter()
+                .map(|geometry| match geometry {
+                    ExportGeometry::Polygon(points) | ExportGeometry::Polyline(points) => {
+                        points.len()
+                    }
+                })
+                .sum::<usize>();
             ui.label(format!(
                 "{} source polygons, {} source cubic Bezier curves",
                 self.graph.polygon_count(),
@@ -63,6 +77,10 @@ impl HoudiniGraphPanel {
             ui.label(format!(
                 "{} visible output items after layer and filter controls",
                 self.graph.visible_output_count()
+            ));
+            ui.label(format!(
+                "{} prepared export points at output boundary",
+                export_polyline_points
             ));
         });
     }
@@ -152,15 +170,11 @@ impl HoudiniGraphPanel {
         painter.rect_stroke(rect, 4.0, border, StrokeKind::Inside);
 
         let viewport = rect.shrink2(egui::vec2(16.0, 14.0));
-        let style_scale = self.graph.style_scale();
+        let output = self.graph.viewer_output();
 
-        for geometry in &self.graph.geometry {
-            if !self.graph.emits(geometry) {
-                continue;
-            }
-
+        for geometry in &output.items {
             match geometry {
-                Geometry::Polygon(polygon) => {
+                ViewerGeometry::Polygon(polygon) => {
                     let points = polygon
                         .points
                         .iter()
@@ -169,25 +183,25 @@ impl HoudiniGraphPanel {
                     painter.add(egui::Shape::convex_polygon(
                         points.clone(),
                         Color32::from_rgba_unmultiplied(38, 125, 255, 45),
-                        Stroke::new(1.0 + 3.0 * style_scale, Color32::from_rgb(91, 169, 255)),
+                        Stroke::new(
+                            1.0 + 3.0 * output.stroke_scale,
+                            Color32::from_rgb(91, 169, 255),
+                        ),
                     ));
                     for point in points {
                         painter.circle_filled(point, 3.0, Color32::from_rgb(131, 192, 255));
                     }
                 }
-                Geometry::CubicBezier(curve) => {
-                    let points = [
-                        map_preview_point(viewport, curve.start),
-                        map_preview_point(viewport, curve.control_1),
-                        map_preview_point(viewport, curve.control_2),
-                        map_preview_point(viewport, curve.end),
-                    ];
+                ViewerGeometry::CubicBezier(curve) => {
+                    let points = curve
+                        .control_points()
+                        .map(|point| map_preview_point(viewport, point));
                     painter.add(CubicBezierShape {
                         points,
                         closed: false,
                         fill: Color32::TRANSPARENT,
                         stroke: Stroke::new(
-                            1.0 + 4.0 * style_scale,
+                            1.0 + 4.0 * output.stroke_scale,
                             Color32::from_rgb(239, 188, 84),
                         )
                         .into(),
@@ -211,199 +225,9 @@ impl HoudiniGraphPanel {
     }
 }
 
-struct GraphDocument {
-    nodes: Vec<GraphNode>,
-    layers: Vec<Layer>,
-    geometry: Vec<Geometry>,
-}
-
-impl GraphDocument {
-    fn sample() -> Self {
-        Self {
-            nodes: vec![
-                GraphNode {
-                    name: "Source",
-                    weight: 1.0,
-                    parameter: "Read",
-                    info: "Loads polygon and cubic Bezier records.",
-                },
-                GraphNode {
-                    name: "Filter",
-                    weight: 0.55,
-                    parameter: "Minimum score",
-                    info: "Filters features by sample score.",
-                },
-                GraphNode {
-                    name: "Style",
-                    weight: 0.75,
-                    parameter: "Stroke scale",
-                    info: "Assigns visual parameters before viewer output.",
-                },
-                GraphNode {
-                    name: "Rerun Output",
-                    weight: 1.0,
-                    parameter: "Export",
-                    info: "Prepares adaptive viewer geometry only at the output edge.",
-                },
-            ],
-            layers: vec![
-                Layer {
-                    name: "Polygons",
-                    kind: LayerKind::Polygons,
-                    visible: true,
-                },
-                Layer {
-                    name: "Curves",
-                    kind: LayerKind::Curves,
-                    visible: true,
-                },
-                Layer {
-                    name: "Debug Output",
-                    kind: LayerKind::Debug,
-                    visible: false,
-                },
-            ],
-            geometry: vec![
-                Geometry::Polygon(Polygon {
-                    points: vec![(0.0, 0.0), (1.0, 0.1), (0.8, 1.0), (0.0, 0.8)],
-                    score: 0.62,
-                }),
-                Geometry::CubicBezier(CubicBezier {
-                    start: (0.0, 0.0),
-                    control_1: (0.25, 1.0),
-                    control_2: (0.75, -0.4),
-                    end: (1.0, 0.6),
-                    score: 0.82,
-                }),
-            ],
-        }
-    }
-
-    fn polygon_count(&self) -> usize {
-        self.geometry
-            .iter()
-            .filter(|geometry| matches!(geometry, Geometry::Polygon(_)))
-            .count()
-    }
-
-    fn cubic_bezier_count(&self) -> usize {
-        self.geometry
-            .iter()
-            .filter(|geometry| matches!(geometry, Geometry::CubicBezier(_)))
-            .count()
-    }
-
-    fn polygon_vertex_count(&self) -> usize {
-        self.geometry
-            .iter()
-            .map(|geometry| match geometry {
-                Geometry::Polygon(polygon) => polygon.points.len(),
-                Geometry::CubicBezier(_) => 0,
-            })
-            .sum()
-    }
-
-    fn cubic_control_point_count(&self) -> usize {
-        self.geometry
-            .iter()
-            .map(|geometry| match geometry {
-                Geometry::Polygon(_) => 0,
-                Geometry::CubicBezier(curve) => {
-                    let points = [curve.start, curve.control_1, curve.control_2, curve.end];
-                    points.len()
-                }
-            })
-            .sum()
-    }
-
-    fn filter_minimum_score(&self) -> f32 {
-        self.nodes
-            .iter()
-            .find(|node| node.name == "Filter")
-            .map_or(0.0, |node| node.weight)
-    }
-
-    fn style_scale(&self) -> f32 {
-        self.nodes
-            .iter()
-            .find(|node| node.name == "Style")
-            .map_or(0.5, |node| node.weight)
-    }
-
-    fn layer_visible(&self, kind: LayerKind) -> bool {
-        self.layers
-            .iter()
-            .find(|layer| layer.kind == kind)
-            .is_some_and(|layer| layer.visible)
-    }
-
-    fn emits(&self, geometry: &Geometry) -> bool {
-        let layer_visible = match geometry {
-            Geometry::Polygon(_) => self.layer_visible(LayerKind::Polygons),
-            Geometry::CubicBezier(_) => self.layer_visible(LayerKind::Curves),
-        };
-
-        layer_visible && geometry.score() >= self.filter_minimum_score()
-    }
-
-    fn visible_output_count(&self) -> usize {
-        self.geometry
-            .iter()
-            .filter(|geometry| self.emits(geometry))
-            .count()
-    }
-}
-
-struct GraphNode {
-    name: &'static str,
-    weight: f32,
-    parameter: &'static str,
-    info: &'static str,
-}
-
-struct Layer {
-    name: &'static str,
-    kind: LayerKind,
-    visible: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LayerKind {
-    Polygons,
-    Curves,
-    Debug,
-}
-
-enum Geometry {
-    Polygon(Polygon),
-    CubicBezier(CubicBezier),
-}
-
-impl Geometry {
-    fn score(&self) -> f32 {
-        match self {
-            Self::Polygon(polygon) => polygon.score,
-            Self::CubicBezier(curve) => curve.score,
-        }
-    }
-}
-
-struct Polygon {
-    points: Vec<(f32, f32)>,
-    score: f32,
-}
-
-struct CubicBezier {
-    start: (f32, f32),
-    control_1: (f32, f32),
-    control_2: (f32, f32),
-    end: (f32, f32),
-    score: f32,
-}
-
-fn map_preview_point(rect: Rect, point: (f32, f32)) -> Pos2 {
-    let x = rect.left() + point.0 * rect.width();
-    let y = rect.bottom() - point.1 * rect.height();
+fn map_preview_point(rect: Rect, point: GraphPoint) -> Pos2 {
+    let x = rect.left() + point.x * rect.width();
+    let y = rect.bottom() - point.y * rect.height();
     Pos2::new(x, y)
 }
 
