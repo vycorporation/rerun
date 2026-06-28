@@ -6,7 +6,7 @@ use re_ui::UiExt as _;
 
 mod model;
 
-use self::model::{ExportGeometry, GraphDocument, GraphPoint, ViewerGeometry};
+use self::model::{ExportGeometry, GraphDocument, GraphPoint, LayerKind, ViewerGeometry};
 
 pub(crate) struct HoudiniGraphPanel {
     graph: GraphDocument,
@@ -45,7 +45,12 @@ impl HoudiniGraphPanel {
             ui.strong("Parameters");
             if let Some(node) = self.graph.nodes.get_mut(self.selected_node) {
                 ui.label(node.info);
-                ui.add(Slider::new(&mut node.weight, 0.0..=1.0).text(node.parameter));
+                let response = ui.add(Slider::new(&mut node.weight, 0.0..=1.0).text(node.parameter));
+                if node.name == "Rerun Output" {
+                    response.on_hover_text(
+                        "Controls only the prepared export polyline. The native cubic remains four points.",
+                    );
+                }
             }
 
             ui.add_space(8.0);
@@ -54,7 +59,7 @@ impl HoudiniGraphPanel {
 
             ui.add_space(8.0);
             ui.strong("Graph Model");
-            let export_output = self.graph.adaptive_export_output(8);
+            let export_output = self.graph.adaptive_export_output();
             let export_polyline_points = export_output
                 .items
                 .iter()
@@ -81,6 +86,10 @@ impl HoudiniGraphPanel {
             ui.label(format!(
                 "{} prepared export points at output boundary",
                 export_polyline_points
+            ));
+            ui.label(format!(
+                "{} adaptive segments per emitted cubic at boundary",
+                self.graph.export_segments()
             ));
         });
     }
@@ -171,6 +180,11 @@ impl HoudiniGraphPanel {
 
         let viewport = rect.shrink2(egui::vec2(16.0, 14.0));
         let output = self.graph.viewer_output();
+        let debug_visible = self.graph.layer_visible(LayerKind::Debug);
+
+        if debug_visible {
+            self.debug_output_preview_ui(ui, viewport);
+        }
 
         for geometry in &output.items {
             match geometry {
@@ -222,6 +236,49 @@ impl HoudiniGraphPanel {
         );
 
         response
+    }
+
+    fn debug_output_preview_ui(&self, ui: &mut Ui, viewport: Rect) {
+        let painter = ui.painter();
+        let control_stroke = Stroke::new(1.0, Color32::from_rgb(150, 150, 150));
+        let export_stroke = Stroke::new(1.0, Color32::from_rgb(115, 210, 155));
+        let export_output = self.graph.adaptive_export_output();
+
+        for geometry in &export_output.items {
+            if let ExportGeometry::Polyline(points) = geometry {
+                for pair in points.windows(2) {
+                    painter.line_segment(
+                        [
+                            map_preview_point(viewport, pair[0]),
+                            map_preview_point(viewport, pair[1]),
+                        ],
+                        export_stroke,
+                    );
+                }
+                for point in points {
+                    painter.circle_filled(
+                        map_preview_point(viewport, *point),
+                        1.5,
+                        Color32::from_rgb(115, 210, 155),
+                    );
+                }
+            }
+        }
+
+        for geometry in &self.graph.viewer_output().items {
+            if let ViewerGeometry::CubicBezier(curve) = geometry {
+                let control_points = curve.control_points();
+                for pair in control_points.windows(2) {
+                    painter.line_segment(
+                        [
+                            map_preview_point(viewport, pair[0]),
+                            map_preview_point(viewport, pair[1]),
+                        ],
+                        control_stroke,
+                    );
+                }
+            }
+        }
     }
 }
 

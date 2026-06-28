@@ -131,6 +131,16 @@ impl GraphDocument {
             .map_or(0.5, |node| node.weight)
     }
 
+    pub fn export_segments(&self) -> usize {
+        let segment_factor = self
+            .nodes
+            .iter()
+            .find(|node| node.name == "Rerun Output")
+            .map_or(0.5, |node| node.weight);
+
+        (2.0 + segment_factor * 14.0).round() as usize
+    }
+
     pub fn layer_visible(&self, kind: LayerKind) -> bool {
         self.layers
             .iter()
@@ -166,8 +176,8 @@ impl GraphDocument {
         }
     }
 
-    pub fn adaptive_export_output(&self, curve_segments: usize) -> ExportOutput {
-        let curve_segments = curve_segments.max(1);
+    pub fn adaptive_export_output(&self) -> ExportOutput {
+        let curve_segments = self.export_segments().max(1);
         ExportOutput {
             items: self
                 .geometry
@@ -316,13 +326,41 @@ mod tests {
 
     #[test]
     fn adaptive_export_is_only_a_boundary_representation() {
-        let graph = GraphDocument::sample();
-        let output = graph.adaptive_export_output(8);
+        let mut graph = GraphDocument::sample();
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == "Rerun Output")
+            .expect("sample graph should include output node")
+            .weight = 0.43;
+        let output = graph.adaptive_export_output();
 
         assert!(output.items.iter().any(|geometry| match geometry {
             ExportGeometry::Polyline(points) => points.len() == 9,
             ExportGeometry::Polygon(_) => false,
         }));
+        assert_eq!(graph.cubic_control_point_count(), 4);
+    }
+
+    #[test]
+    fn output_node_controls_export_segments_not_native_curve() {
+        let mut graph = GraphDocument::sample();
+
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == "Rerun Output")
+            .expect("sample graph should include output node")
+            .weight = 0.0;
+        assert_eq!(graph.export_segments(), 2);
+
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == "Rerun Output")
+            .expect("sample graph should include output node")
+            .weight = 1.0;
+        assert_eq!(graph.export_segments(), 16);
         assert_eq!(graph.cubic_control_point_count(), 4);
     }
 
