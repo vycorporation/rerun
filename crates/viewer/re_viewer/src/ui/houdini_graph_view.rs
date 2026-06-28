@@ -235,10 +235,12 @@ fn draw_houdini_output_view(
     query_bridge: RerunQueryBridge,
 ) {
     let scene = graph.rerun_scene_output_with_query_bridge(Some(query_bridge));
+    let view_transform =
+        HoudiniViewTransform::from_scene(&scene, rect.shrink2(egui::vec2(24.0, 22.0)));
     ui.painter()
         .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
 
-    let viewport = rect.shrink2(egui::vec2(24.0, 22.0));
+    let viewport = view_transform.viewport;
     ui.painter().rect_stroke(
         viewport,
         4.0,
@@ -247,7 +249,7 @@ fn draw_houdini_output_view(
     );
 
     if graph.layer_visible(LayerKind::Debug) {
-        draw_debug_boundary(ui, viewport, &scene);
+        draw_debug_boundary(ui, view_transform, &scene);
     }
 
     for geometry in &scene.items {
@@ -255,7 +257,7 @@ fn draw_houdini_output_view(
             RerunSceneItem::Polygon { points } => {
                 let points = points
                     .iter()
-                    .map(|point| map_view_point(viewport, *point))
+                    .map(|point| view_transform.map_point(*point))
                     .collect::<Vec<_>>();
                 ui.painter().add(egui::Shape::convex_polygon(
                     points.clone(),
@@ -271,7 +273,7 @@ fn draw_houdini_output_view(
                 }
             }
             RerunSceneItem::NativeCubicBezier(curve) => {
-                draw_native_cubic(ui, viewport, *curve, scene.stroke_scale);
+                draw_native_cubic(ui, view_transform, *curve, scene.stroke_scale);
             }
         }
     }
@@ -311,11 +313,16 @@ fn draw_houdini_output_view(
     }
 }
 
-fn draw_native_cubic(ui: &mut egui::Ui, viewport: Rect, curve: CubicBezier, stroke_scale: f32) {
+fn draw_native_cubic(
+    ui: &mut egui::Ui,
+    view_transform: HoudiniViewTransform,
+    curve: CubicBezier,
+    stroke_scale: f32,
+) {
     let painter = ui.painter();
     let points = curve
         .control_points()
-        .map(|point| map_view_point(viewport, point));
+        .map(|point| view_transform.map_point(point));
     painter.add(CubicBezierShape {
         points,
         closed: false,
@@ -328,7 +335,11 @@ fn draw_native_cubic(ui: &mut egui::Ui, viewport: Rect, curve: CubicBezier, stro
     }
 }
 
-fn draw_debug_boundary(ui: &mut egui::Ui, viewport: Rect, scene: &RerunSceneOutput) {
+fn draw_debug_boundary(
+    ui: &mut egui::Ui,
+    view_transform: HoudiniViewTransform,
+    scene: &RerunSceneOutput,
+) {
     let painter = ui.painter();
     let control_stroke = Stroke::new(1.0, Color32::from_rgb(150, 150, 150));
     let export_stroke = Stroke::new(1.0, Color32::from_rgb(115, 210, 155));
@@ -339,8 +350,8 @@ fn draw_debug_boundary(ui: &mut egui::Ui, viewport: Rect, scene: &RerunSceneOutp
                 for pair in points.windows(2) {
                     painter.line_segment(
                         [
-                            map_view_point(viewport, pair[0]),
-                            map_view_point(viewport, pair[1]),
+                            view_transform.map_point(pair[0]),
+                            view_transform.map_point(pair[1]),
                         ],
                         export_stroke,
                     );
@@ -350,8 +361,8 @@ fn draw_debug_boundary(ui: &mut egui::Ui, viewport: Rect, scene: &RerunSceneOutp
                 for pair in control_points.windows(2) {
                     painter.line_segment(
                         [
-                            map_view_point(viewport, pair[0]),
-                            map_view_point(viewport, pair[1]),
+                            view_transform.map_point(pair[0]),
+                            view_transform.map_point(pair[1]),
                         ],
                         control_stroke,
                     );
@@ -361,8 +372,217 @@ fn draw_debug_boundary(ui: &mut egui::Ui, viewport: Rect, scene: &RerunSceneOutp
     }
 }
 
-fn map_view_point(rect: Rect, point: GraphPoint) -> Pos2 {
-    let x = rect.left() + point.x * rect.width();
-    let y = rect.bottom() - point.y * rect.height();
-    Pos2::new(x, y)
+#[derive(Clone, Copy)]
+struct HoudiniViewTransform {
+    viewport: Rect,
+    content_rect: Rect,
+    bounds: GraphBounds,
+}
+
+impl HoudiniViewTransform {
+    fn from_scene(scene: &RerunSceneOutput, viewport: Rect) -> Self {
+        let bounds = GraphBounds::from_scene(scene).unwrap_or_else(GraphBounds::unit);
+        Self {
+            viewport,
+            content_rect: fitted_content_rect(viewport, bounds),
+            bounds,
+        }
+    }
+
+    fn map_point(self, point: GraphPoint) -> Pos2 {
+        let width = self.bounds.width();
+        let height = self.bounds.height();
+        let x = self.content_rect.left()
+            + ((point.x - self.bounds.min.x) / width) * self.content_rect.width();
+        let y = self.content_rect.bottom()
+            - ((point.y - self.bounds.min.y) / height) * self.content_rect.height();
+        Pos2::new(x, y)
+    }
+}
+
+fn fitted_content_rect(viewport: Rect, bounds: GraphBounds) -> Rect {
+    let data_aspect = bounds.width() / bounds.height();
+    let viewport_aspect = viewport.width() / viewport.height();
+
+    if data_aspect > viewport_aspect {
+        let height = viewport.width() / data_aspect;
+        Rect::from_center_size(viewport.center(), egui::vec2(viewport.width(), height))
+    } else {
+        let width = viewport.height() * data_aspect;
+        Rect::from_center_size(viewport.center(), egui::vec2(width, viewport.height()))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GraphBounds {
+    min: GraphPoint,
+    max: GraphPoint,
+}
+
+impl GraphBounds {
+    const MIN_SPAN: f32 = 1.0e-3;
+    const PADDING_FRACTION: f32 = 0.08;
+
+    fn unit() -> Self {
+        Self {
+            min: GraphPoint { x: 0.0, y: 0.0 },
+            max: GraphPoint { x: 1.0, y: 1.0 },
+        }
+    }
+
+    fn from_scene(scene: &RerunSceneOutput) -> Option<Self> {
+        let mut bounds = None;
+        for item in &scene.items {
+            match item {
+                RerunSceneItem::Polygon { points } => {
+                    for point in points {
+                        Self::include_point(&mut bounds, *point);
+                    }
+                }
+                RerunSceneItem::NativeCubicBezier(curve) => {
+                    for point in curve.control_points() {
+                        Self::include_point(&mut bounds, point);
+                    }
+                }
+            }
+        }
+        bounds.map(Self::expanded_for_view)
+    }
+
+    fn include_point(bounds: &mut Option<Self>, point: GraphPoint) {
+        if let Some(bounds) = bounds {
+            bounds.min.x = bounds.min.x.min(point.x);
+            bounds.min.y = bounds.min.y.min(point.y);
+            bounds.max.x = bounds.max.x.max(point.x);
+            bounds.max.y = bounds.max.y.max(point.y);
+        } else {
+            *bounds = Some(Self {
+                min: point,
+                max: point,
+            });
+        }
+    }
+
+    fn expanded_for_view(self) -> Self {
+        let center = GraphPoint {
+            x: (self.min.x + self.max.x) * 0.5,
+            y: (self.min.y + self.max.y) * 0.5,
+        };
+        let fallback_span = self.width().max(self.height()).max(1.0);
+        let width = self
+            .width()
+            .max(Self::MIN_SPAN)
+            .max(if self.width() <= Self::MIN_SPAN {
+                fallback_span
+            } else {
+                0.0
+            });
+        let height = self
+            .height()
+            .max(Self::MIN_SPAN)
+            .max(if self.height() <= Self::MIN_SPAN {
+                fallback_span
+            } else {
+                0.0
+            });
+        let x_padding = width * Self::PADDING_FRACTION;
+        let y_padding = height * Self::PADDING_FRACTION;
+
+        Self {
+            min: GraphPoint {
+                x: center.x - width * 0.5 - x_padding,
+                y: center.y - height * 0.5 - y_padding,
+            },
+            max: GraphPoint {
+                x: center.x + width * 0.5 + x_padding,
+                y: center.y + height * 0.5 + y_padding,
+            },
+        }
+    }
+
+    fn width(self) -> f32 {
+        self.max.x - self.min.x
+    }
+
+    fn height(self) -> f32 {
+        self.max.y - self.min.y
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GraphBounds, HoudiniViewTransform};
+    use crate::ui::houdini_graph_panel::model::{
+        CubicBezier, GraphPoint, RerunSceneItem, RerunSceneOutput,
+    };
+
+    fn test_viewport() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0))
+    }
+
+    fn point(x: f32, y: f32) -> GraphPoint {
+        GraphPoint { x, y }
+    }
+
+    #[test]
+    fn view_transform_fits_arbitrary_cubic_coordinates_without_mutating_them() {
+        let curve = CubicBezier {
+            start: point(100.0, -50.0),
+            control_1: point(125.0, 150.0),
+            control_2: point(200.0, -25.0),
+            end: point(250.0, 100.0),
+            score: 1.0,
+        };
+        let scene = RerunSceneOutput {
+            items: vec![RerunSceneItem::NativeCubicBezier(curve)],
+            debug_items: vec![],
+            stroke_scale: 1.0,
+            export_segments: 8,
+            query_bridge: None,
+        };
+
+        let transform = HoudiniViewTransform::from_scene(&scene, test_viewport());
+
+        for point in curve.control_points() {
+            assert!(test_viewport().contains(transform.map_point(point)));
+        }
+        assert_eq!(curve.start, point(100.0, -50.0));
+    }
+
+    #[test]
+    fn view_bounds_expand_flat_geometry() {
+        let scene = RerunSceneOutput {
+            items: vec![RerunSceneItem::Polygon {
+                points: vec![point(2.0, 5.0), point(4.0, 5.0)],
+            }],
+            debug_items: vec![],
+            stroke_scale: 1.0,
+            export_segments: 8,
+            query_bridge: None,
+        };
+
+        let bounds = GraphBounds::from_scene(&scene).expect("flat geometry still has bounds");
+
+        assert!(bounds.width() > 2.0);
+        assert!(bounds.height() > 0.0);
+    }
+
+    #[test]
+    fn view_transform_preserves_geometry_aspect_ratio() {
+        let scene = RerunSceneOutput {
+            items: vec![RerunSceneItem::Polygon {
+                points: vec![point(0.0, 0.0), point(10.0, 10.0)],
+            }],
+            debug_items: vec![],
+            stroke_scale: 1.0,
+            export_segments: 8,
+            query_bridge: None,
+        };
+
+        let transform = HoudiniViewTransform::from_scene(&scene, test_viewport());
+        let min = transform.map_point(point(0.0, 0.0));
+        let max = transform.map_point(point(10.0, 10.0));
+
+        assert!(((max.x - min.x).abs() - (max.y - min.y).abs()).abs() < 0.01);
+    }
 }
