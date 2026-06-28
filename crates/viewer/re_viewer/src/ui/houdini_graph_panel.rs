@@ -7,7 +7,7 @@ use re_ui::UiExt as _;
 
 pub(crate) mod model;
 
-use self::model::{ExportGeometry, GraphDocument, GraphPoint};
+use self::model::{ExportGeometry, GeometryBounds, GraphDocument, GraphPoint, SourceMetadata};
 
 pub(crate) type SharedHoudiniGraph = Arc<Mutex<GraphDocument>>;
 
@@ -117,8 +117,18 @@ impl HoudiniGraphPanel {
                 graph.source.matching_entity_count,
                 graph.source.visible_data_result_count
             ));
+            ui.label(format!(
+                "Provenance: {}",
+                graph.source.metadata.provenance.as_str()
+            ));
             if let Some(source_path) = &graph.source.source_path {
                 ui.label(format!("Source path: {source_path}"));
+            }
+            if let Some(import_error) = &graph.source.import_error {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Source error: {import_error}"),
+                );
             }
             ui.label(format!(
                 "{} source polygons, {} source cubic Bezier curves",
@@ -142,6 +152,7 @@ impl HoudiniGraphPanel {
                 "{} adaptive segments per emitted cubic at boundary",
                 graph.export_segments()
             ));
+            self.source_metadata_ui(ui, &graph.source.metadata, "graph_model");
         });
     }
 
@@ -355,7 +366,46 @@ impl HoudiniGraphPanel {
                     ui.end_row();
                 });
             ui.label(info.summary);
+            if let Some(source_error) = &info.source_error {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Source error: {source_error}"),
+                );
+            }
+            if let Some(source_metadata) = &info.source_metadata {
+                self.source_metadata_ui(ui, source_metadata, "node_info");
+            }
         }
+    }
+
+    fn source_metadata_ui(&self, ui: &mut Ui, metadata: &SourceMetadata, id_suffix: &'static str) {
+        egui::Grid::new(("houdini_graph_source_metadata", id_suffix))
+            .num_columns(2)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                ui.weak("Records");
+                ui.label(metadata.record_count.to_string());
+                ui.end_row();
+
+                ui.weak("Geometry");
+                ui.label(format!(
+                    "{} polygons, {} cubic Beziers",
+                    metadata.polygon_count, metadata.cubic_bezier_count
+                ));
+                ui.end_row();
+
+                ui.weak("Bounds");
+                ui.label(format_bounds(metadata.bounds.as_ref()));
+                ui.end_row();
+
+                ui.weak("Attributes");
+                ui.label(format_list(&metadata.attribute_names));
+                ui.end_row();
+
+                ui.weak("Control columns");
+                ui.label(format_list(&metadata.recognized_control_point_columns));
+                ui.end_row();
+            });
     }
 
     fn pipeline_trace_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
@@ -383,6 +433,26 @@ impl HoudiniGraphPanel {
 
 fn sample_parquet_path() -> &'static std::path::Path {
     std::path::Path::new("crates/viewer/re_viewer/data/houdini_cubic_sample.parquet")
+}
+
+fn format_bounds(bounds: Option<&GeometryBounds>) -> String {
+    bounds.map_or_else(
+        || "none".to_owned(),
+        |bounds| {
+            format!(
+                "({:.2}, {:.2}) - ({:.2}, {:.2})",
+                bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y
+            )
+        },
+    )
+}
+
+fn format_list(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_owned()
+    } else {
+        values.join(", ")
+    }
 }
 
 fn map_node_layout_point(rect: Rect, point: GraphPoint, node_size: Vec2) -> Pos2 {

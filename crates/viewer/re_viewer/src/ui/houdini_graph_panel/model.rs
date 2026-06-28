@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use arrow::array::{Float32Array, Float64Array, RecordBatch};
+use arrow::datatypes::SchemaRef;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -32,8 +33,48 @@ pub(crate) struct GraphDocument {
 
 impl GraphDocument {
     pub fn sample() -> Self {
+        let geometry = vec![
+            Geometry::Polygon(Polygon {
+                points: vec![
+                    GraphPoint::new(0.0, 0.0),
+                    GraphPoint::new(1.0, 0.1),
+                    GraphPoint::new(0.8, 1.0),
+                    GraphPoint::new(0.0, 0.8),
+                ],
+                score: 0.62,
+            }),
+            Geometry::Polygon(Polygon {
+                points: vec![
+                    GraphPoint::new(0.08, 0.25),
+                    GraphPoint::new(0.36, 0.18),
+                    GraphPoint::new(0.42, 0.44),
+                    GraphPoint::new(0.2, 0.56),
+                ],
+                score: 0.48,
+            }),
+            Geometry::CubicBezier(CubicBezier {
+                start: GraphPoint::new(0.0, 0.0),
+                control_1: GraphPoint::new(0.25, 1.0),
+                control_2: GraphPoint::new(0.75, -0.4),
+                end: GraphPoint::new(1.0, 0.6),
+                score: 0.82,
+            }),
+            Geometry::CubicBezier(CubicBezier {
+                start: GraphPoint::new(0.18, 0.12),
+                control_1: GraphPoint::new(0.35, 0.9),
+                control_2: GraphPoint::new(0.68, 0.05),
+                end: GraphPoint::new(0.92, 0.88),
+                score: 0.35,
+            }),
+        ];
+
         Self {
-            source: GraphSource::demo_fallback(),
+            source: GraphSource::demo_fallback(SourceMetadata::from_geometry(
+                SourceProvenance::DemoFallback,
+                None,
+                &geometry,
+                Vec::new(),
+            )),
             nodes: vec![
                 GraphNode {
                     name: "Source",
@@ -101,40 +142,7 @@ impl GraphDocument {
                     visible: false,
                 },
             ],
-            geometry: vec![
-                Geometry::Polygon(Polygon {
-                    points: vec![
-                        GraphPoint::new(0.0, 0.0),
-                        GraphPoint::new(1.0, 0.1),
-                        GraphPoint::new(0.8, 1.0),
-                        GraphPoint::new(0.0, 0.8),
-                    ],
-                    score: 0.62,
-                }),
-                Geometry::Polygon(Polygon {
-                    points: vec![
-                        GraphPoint::new(0.08, 0.25),
-                        GraphPoint::new(0.36, 0.18),
-                        GraphPoint::new(0.42, 0.44),
-                        GraphPoint::new(0.2, 0.56),
-                    ],
-                    score: 0.48,
-                }),
-                Geometry::CubicBezier(CubicBezier {
-                    start: GraphPoint::new(0.0, 0.0),
-                    control_1: GraphPoint::new(0.25, 1.0),
-                    control_2: GraphPoint::new(0.75, -0.4),
-                    end: GraphPoint::new(1.0, 0.6),
-                    score: 0.82,
-                }),
-                Geometry::CubicBezier(CubicBezier {
-                    start: GraphPoint::new(0.18, 0.12),
-                    control_1: GraphPoint::new(0.35, 0.9),
-                    control_2: GraphPoint::new(0.68, 0.05),
-                    end: GraphPoint::new(0.92, 0.88),
-                    score: 0.35,
-                }),
-            ],
+            geometry,
             recording_geometry: Vec::new(),
         }
     }
@@ -295,6 +303,8 @@ impl GraphDocument {
                 output_count: stages[0].output_count,
                 parameter: node.parameter.clone(),
                 summary: "Source geometry lives in the graph model before any viewer adaptation.",
+                source_metadata: Some(self.source.metadata.clone()),
+                source_error: self.source.import_error.clone(),
             },
             NodeKind::Filter => NodeInfo {
                 kind: node.kind,
@@ -303,6 +313,8 @@ impl GraphDocument {
                 output_count: stages[1].output_count,
                 parameter: node.parameter.clone(),
                 summary: "Filter removes geometry below the minimum sample score.",
+                source_metadata: None,
+                source_error: None,
             },
             NodeKind::Style => NodeInfo {
                 kind: node.kind,
@@ -311,6 +323,8 @@ impl GraphDocument {
                 output_count: stages[2].output_count,
                 parameter: node.parameter.clone(),
                 summary: "Style changes viewer presentation without mutating graph geometry.",
+                source_metadata: None,
+                source_error: None,
             },
             NodeKind::Output => NodeInfo {
                 kind: node.kind,
@@ -319,6 +333,8 @@ impl GraphDocument {
                 output_count: stages[3].output_count,
                 parameter: node.parameter.clone(),
                 summary: "Output prepares boundary data while preserving native graph geometry.",
+                source_metadata: None,
+                source_error: None,
             },
         })
     }
@@ -409,7 +425,15 @@ impl GraphDocument {
     }
 
     pub fn update_source_from_query_bridge(&mut self, query_bridge: &RerunQueryBridge) {
+        if self.source.metadata.provenance == SourceProvenance::ParquetImport {
+            return;
+        }
+
+        let previous_metadata = self.source.metadata.clone();
         self.source = GraphSource::from_query_bridge(query_bridge);
+        if self.source.mode == GraphSourceMode::DemoFallback {
+            self.source.metadata = previous_metadata;
+        }
         self.update_source_node_readiness();
     }
 
@@ -418,12 +442,27 @@ impl GraphDocument {
         path: impl AsRef<Path>,
     ) -> anyhow::Result<usize> {
         let path = path.as_ref();
-        let records = load_cubic_bezier_parquet(path)?;
-        let count = records.len();
-        self.source = GraphSource::recording_import(count, Some(path.display().to_string()));
-        self.recording_geometry = records.into_iter().map(|record| record.geometry).collect();
-        self.update_source_node_readiness();
-        Ok(count)
+        match load_cubic_bezier_parquet_with_metadata(path) {
+            Ok(load) => {
+                let count = load.records.len();
+                self.source = GraphSource::recording_import(
+                    count,
+                    Some(path.display().to_string()),
+                    load.metadata,
+                );
+                self.recording_geometry = load
+                    .records
+                    .into_iter()
+                    .map(|record| record.geometry)
+                    .collect();
+                self.update_source_node_readiness();
+                Ok(count)
+            }
+            Err(err) => {
+                self.source = self.source.clone().with_import_error(path, &err);
+                Err(err)
+            }
+        }
     }
 
     pub fn save_sidecar_json(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
@@ -470,6 +509,12 @@ impl GraphDocument {
         self.update_source_from_query_bridge(query_bridge);
         self.source.mode = GraphSourceMode::RecordingQuery;
         self.recording_geometry = records.into_iter().map(|record| record.geometry).collect();
+        self.source.metadata = SourceMetadata::from_geometry(
+            SourceProvenance::RecordingQuery,
+            None,
+            &self.recording_geometry,
+            Vec::new(),
+        );
         self.update_source_node_readiness();
     }
 
@@ -479,10 +524,20 @@ impl GraphDocument {
         query_bridge: &RerunQueryBridge,
         path: impl AsRef<Path>,
     ) -> anyhow::Result<usize> {
-        let records = load_cubic_bezier_parquet(path)?;
-        let count = records.len();
-        self.import_recording_geometry(query_bridge, records);
-        Ok(count)
+        let path = path.as_ref();
+        match load_cubic_bezier_parquet_with_metadata(path) {
+            Ok(load) => {
+                let count = load.records.len();
+                self.import_recording_geometry(query_bridge, load.records);
+                self.source.metadata = load.metadata;
+                self.source.source_path = Some(path.display().to_string());
+                Ok(count)
+            }
+            Err(err) => {
+                self.source = self.source.clone().with_import_error(path, &err);
+                Err(err)
+            }
+        }
     }
 
     fn active_geometry(&self) -> &[Geometry] {
@@ -542,22 +597,51 @@ impl HoudiniCubicBezierParquetSchema {
 pub(crate) fn load_cubic_bezier_parquet(
     path: impl AsRef<Path>,
 ) -> anyhow::Result<Vec<HoudiniGeometryRecord>> {
+    Ok(load_cubic_bezier_parquet_with_metadata(path)?.records)
+}
+
+pub(crate) fn load_cubic_bezier_parquet_with_metadata(
+    path: impl AsRef<Path>,
+) -> anyhow::Result<HoudiniParquetLoad> {
     let path = path.as_ref();
     let file = std::fs::File::open(path)?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
 
     let mut records = Vec::new();
+    let mut recognized_control_point_columns = None;
     for batch in reader {
-        append_cubic_bezier_batch(batch?, &mut records)?;
+        append_cubic_bezier_batch(batch?, &mut records, &mut recognized_control_point_columns)?;
     }
 
-    Ok(records)
+    let geometry = records
+        .iter()
+        .map(|record| record.geometry.clone())
+        .collect::<Vec<_>>();
+    let metadata = SourceMetadata::from_geometry(
+        SourceProvenance::ParquetImport,
+        Some(path.display().to_string()),
+        &geometry,
+        recognized_control_point_columns.unwrap_or_default(),
+    );
+
+    Ok(HoudiniParquetLoad { records, metadata })
+}
+
+pub(crate) struct HoudiniParquetLoad {
+    pub records: Vec<HoudiniGeometryRecord>,
+    pub metadata: SourceMetadata,
 }
 
 fn append_cubic_bezier_batch(
     batch: RecordBatch,
     records: &mut Vec<HoudiniGeometryRecord>,
+    recognized_control_point_columns: &mut Option<Vec<String>>,
 ) -> anyhow::Result<()> {
+    if recognized_control_point_columns.is_none() {
+        *recognized_control_point_columns =
+            Some(recognized_control_point_columns_for_schema(batch.schema())?);
+    }
+
     let columns = HoudiniCubicBezierParquetSchema::CONTROL_POINT_ALIASES
         .iter()
         .map(|aliases| numeric_column(&batch, aliases))
@@ -578,6 +662,24 @@ fn append_cubic_bezier_batch(
     }
 
     Ok(())
+}
+
+fn recognized_control_point_columns_for_schema(schema: SchemaRef) -> anyhow::Result<Vec<String>> {
+    HoudiniCubicBezierParquetSchema::CONTROL_POINT_ALIASES
+        .iter()
+        .map(|aliases| {
+            aliases
+                .iter()
+                .find(|name| schema.index_of(name).is_ok())
+                .map(|name| (*name).to_owned())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Missing Houdini cubic Bezier parquet column: {}",
+                        aliases[0]
+                    )
+                })
+        })
+        .collect()
 }
 
 fn numeric_column<'a>(
@@ -641,27 +743,138 @@ impl HoudiniGeometryRecord {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum HoudiniGeometryKind {
     Polygon,
     CubicBezier,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SourceMetadata {
+    pub provenance: SourceProvenance,
+    pub source_path: Option<String>,
+    pub record_count: usize,
+    pub polygon_count: usize,
+    pub cubic_bezier_count: usize,
+    pub bounds: Option<GeometryBounds>,
+    pub attribute_names: Vec<String>,
+    pub recognized_control_point_columns: Vec<String>,
+}
+
+impl Default for SourceMetadata {
+    fn default() -> Self {
+        Self {
+            provenance: SourceProvenance::DemoFallback,
+            source_path: None,
+            record_count: 0,
+            polygon_count: 0,
+            cubic_bezier_count: 0,
+            bounds: None,
+            attribute_names: Vec::new(),
+            recognized_control_point_columns: Vec::new(),
+        }
+    }
+}
+
+impl SourceMetadata {
+    fn from_geometry(
+        provenance: SourceProvenance,
+        source_path: Option<String>,
+        geometry: &[Geometry],
+        recognized_control_point_columns: Vec<String>,
+    ) -> Self {
+        let mut bounds = None;
+        let mut polygon_count = 0;
+        let mut cubic_bezier_count = 0;
+
+        for item in geometry {
+            match item {
+                Geometry::Polygon(polygon) => {
+                    polygon_count += 1;
+                    for point in &polygon.points {
+                        GeometryBounds::include_point(&mut bounds, *point);
+                    }
+                }
+                Geometry::CubicBezier(curve) => {
+                    cubic_bezier_count += 1;
+                    for point in curve.control_points() {
+                        GeometryBounds::include_point(&mut bounds, point);
+                    }
+                }
+            }
+        }
+
+        Self {
+            provenance,
+            source_path,
+            record_count: geometry.len(),
+            polygon_count,
+            cubic_bezier_count,
+            bounds,
+            attribute_names: vec!["score".to_owned()],
+            recognized_control_point_columns,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SourceProvenance {
+    DemoFallback,
+    ParquetImport,
+    RecordingQuery,
+}
+
+impl SourceProvenance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DemoFallback => "demo fallback",
+            Self::ParquetImport => "parquet import",
+            Self::RecordingQuery => "recording query",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct GeometryBounds {
+    pub min: GraphPoint,
+    pub max: GraphPoint,
+}
+
+impl GeometryBounds {
+    fn include_point(bounds: &mut Option<Self>, point: GraphPoint) {
+        if let Some(bounds) = bounds {
+            bounds.min.x = bounds.min.x.min(point.x);
+            bounds.min.y = bounds.min.y.min(point.y);
+            bounds.max.x = bounds.max.x.max(point.x);
+            bounds.max.y = bounds.max.y.max(point.y);
+        } else {
+            *bounds = Some(Self {
+                min: point,
+                max: point,
+            });
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct GraphSource {
     pub mode: GraphSourceMode,
     pub matching_entity_count: usize,
     pub visible_data_result_count: usize,
     pub source_path: Option<String>,
+    pub metadata: SourceMetadata,
+    pub import_error: Option<String>,
 }
 
 impl GraphSource {
-    fn demo_fallback() -> Self {
+    fn demo_fallback(metadata: SourceMetadata) -> Self {
         Self {
             mode: GraphSourceMode::DemoFallback,
             matching_entity_count: 0,
             visible_data_result_count: 0,
-            source_path: None,
+            source_path: metadata.source_path.clone(),
+            metadata,
+            import_error: None,
         }
     }
 
@@ -678,6 +891,16 @@ impl GraphSource {
             matching_entity_count: query_bridge.matching_entity_count,
             visible_data_result_count: query_bridge.visible_data_result_count,
             source_path: None,
+            metadata: SourceMetadata {
+                provenance: if has_recording_input {
+                    SourceProvenance::RecordingQuery
+                } else {
+                    SourceProvenance::DemoFallback
+                },
+                record_count: query_bridge.visible_data_result_count,
+                ..Default::default()
+            },
+            import_error: None,
         }
     }
 
@@ -688,13 +911,25 @@ impl GraphSource {
         }
     }
 
-    fn recording_import(imported_geometry_count: usize, source_path: Option<String>) -> Self {
+    fn recording_import(
+        imported_geometry_count: usize,
+        source_path: Option<String>,
+        metadata: SourceMetadata,
+    ) -> Self {
         Self {
             mode: GraphSourceMode::RecordingQuery,
             matching_entity_count: imported_geometry_count,
             visible_data_result_count: imported_geometry_count,
             source_path,
+            metadata,
+            import_error: None,
         }
+    }
+
+    fn with_import_error(mut self, source_path: &Path, err: &anyhow::Error) -> Self {
+        self.source_path = Some(source_path.display().to_string());
+        self.import_error = Some(format!("{err}"));
+        self
     }
 }
 
@@ -725,6 +960,8 @@ impl HoudiniGraphSidecar {
                 matching_entity_count: graph.source.matching_entity_count,
                 visible_data_result_count: graph.source.visible_data_result_count,
                 source_path: graph.source.source_path.clone(),
+                metadata: graph.source.metadata.clone(),
+                import_error: graph.source.import_error.clone(),
             },
             nodes: graph
                 .nodes
@@ -762,6 +999,8 @@ impl HoudiniGraphSidecar {
             matching_entity_count: self.source.matching_entity_count,
             visible_data_result_count: self.source.visible_data_result_count,
             source_path: self.source.source_path,
+            metadata: self.source.metadata,
+            import_error: self.source.import_error,
         };
         graph.geometry = self.demo_geometry;
         graph.recording_geometry = self.recording_geometry;
@@ -800,6 +1039,10 @@ struct GraphSourceSidecar {
     matching_entity_count: usize,
     visible_data_result_count: usize,
     source_path: Option<String>,
+    #[serde(default)]
+    metadata: SourceMetadata,
+    #[serde(default)]
+    import_error: Option<String>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -913,6 +1156,8 @@ pub(crate) struct NodeInfo {
     pub output_count: usize,
     pub parameter: NodeParameter,
     pub summary: &'static str,
+    pub source_metadata: Option<SourceMetadata>,
+    pub source_error: Option<String>,
 }
 
 pub(crate) struct PipelineStage {
@@ -1096,7 +1341,8 @@ mod tests {
     use super::{
         ExportGeometry, Geometry, GraphDocument, GraphPoint, HoudiniCubicBezierParquetSchema,
         HoudiniGeometryRecord, HoudiniGeometrySchema, LayerKind, NodeParameterKind,
-        RerunSceneDebugItem, RerunSceneItem, ViewerGeometry, load_cubic_bezier_parquet,
+        RerunSceneDebugItem, RerunSceneItem, SourceProvenance, ViewerGeometry,
+        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -1238,6 +1484,14 @@ mod tests {
             .expect("sample graph should include source node");
         assert_eq!(source.input_count, 0);
         assert_eq!(source.output_count, 4);
+        let source_metadata = source
+            .source_metadata
+            .expect("source node should report source metadata");
+        assert_eq!(source_metadata.provenance, SourceProvenance::DemoFallback);
+        assert_eq!(source_metadata.record_count, 4);
+        assert_eq!(source_metadata.polygon_count, 2);
+        assert_eq!(source_metadata.cubic_bezier_count, 2);
+        assert!(source_metadata.bounds.is_some());
 
         let filter = graph
             .selected_node_info(1)
@@ -1502,6 +1756,13 @@ mod tests {
 
         assert_eq!(imported, 1);
         assert_eq!(graph.source.mode, super::GraphSourceMode::RecordingQuery);
+        assert_eq!(
+            graph.source.metadata.provenance,
+            SourceProvenance::ParquetImport
+        );
+        assert_eq!(graph.source.metadata.record_count, 1);
+        assert_eq!(graph.source.metadata.cubic_bezier_count, 1);
+        assert!(graph.source.metadata.bounds.is_some());
         assert_eq!(graph.cubic_bezier_count(), 1);
         assert_eq!(graph.visible_output_count(), 1);
     }
@@ -1527,6 +1788,13 @@ mod tests {
         assert_eq!(imported, 1);
         assert_eq!(graph.source.mode, super::GraphSourceMode::RecordingQuery);
         assert_eq!(graph.source.matching_entity_count, 1);
+        assert_eq!(
+            graph.source.metadata.provenance,
+            SourceProvenance::ParquetImport
+        );
+        assert_eq!(graph.source.metadata.record_count, 1);
+        assert_eq!(graph.source.metadata.cubic_bezier_count, 1);
+        assert!(graph.source.metadata.bounds.is_some());
         assert_eq!(graph.visible_output_count(), 1);
     }
 
@@ -1542,6 +1810,67 @@ mod tests {
             records
                 .iter()
                 .all(|record| matches!(record.geometry, Geometry::CubicBezier(_)))
+        );
+    }
+
+    #[test]
+    fn checked_in_sample_parquet_reports_source_metadata() {
+        let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data/houdini_cubic_sample.parquet");
+
+        let load = load_cubic_bezier_parquet_with_metadata(&sample_path).unwrap();
+
+        assert_eq!(load.records.len(), 4);
+        assert_eq!(load.metadata.provenance, SourceProvenance::ParquetImport);
+        assert_eq!(
+            load.metadata.source_path,
+            Some(sample_path.display().to_string())
+        );
+        assert_eq!(load.metadata.record_count, 4);
+        assert_eq!(load.metadata.polygon_count, 0);
+        assert_eq!(load.metadata.cubic_bezier_count, 4);
+        assert_eq!(
+            load.metadata.recognized_control_point_columns,
+            HoudiniCubicBezierParquetSchema::CONTROL_POINT_COLUMNS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(load.metadata.attribute_names, vec!["score".to_owned()]);
+        assert!(load.metadata.bounds.is_some());
+    }
+
+    #[test]
+    fn malformed_parquet_import_records_source_error_without_replacing_geometry() {
+        let mut graph = GraphDocument::sample();
+        let previous_cubic_count = graph.cubic_bezier_count();
+        let parquet_file = write_cubic_bezier_parquet(&[
+            ("cp0_x", vec![0.0]),
+            ("cp0_y", vec![0.0]),
+            ("cp1_x", vec![0.2]),
+            ("cp1_y", vec![0.8]),
+            ("cp2_x", vec![0.8]),
+            ("cp2_y", vec![0.2]),
+            ("cp3_x", vec![1.0]),
+        ]);
+
+        let err = graph
+            .import_cubic_bezier_parquet_path(parquet_file.path())
+            .expect_err("missing control-point column should fail import");
+
+        assert!(
+            err.to_string()
+                .contains("Missing Houdini cubic Bezier parquet column")
+        );
+        assert_eq!(graph.cubic_bezier_count(), previous_cubic_count);
+        assert_eq!(
+            graph.source.metadata.provenance,
+            SourceProvenance::DemoFallback
+        );
+        assert!(graph.source.import_error.is_some());
+        assert_eq!(
+            graph.source.source_path,
+            Some(parquet_file.path().display().to_string())
         );
     }
 
@@ -1577,6 +1906,12 @@ mod tests {
             restored.source.source_path,
             Some(sample_path.display().to_string())
         );
+        assert_eq!(
+            restored.source.metadata.provenance,
+            SourceProvenance::ParquetImport
+        );
+        assert_eq!(restored.source.metadata.record_count, 4);
+        assert_eq!(restored.source.metadata.cubic_bezier_count, 4);
         assert_eq!(restored.cubic_bezier_count(), 4);
         assert!(!restored.layer_visible(LayerKind::Curves));
         assert_eq!(
