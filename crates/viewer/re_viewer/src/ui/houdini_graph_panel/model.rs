@@ -377,8 +377,14 @@ impl GraphDocument {
                 .map(|geometry| match geometry {
                     ViewerGeometry::Polygon(polygon) => RerunSceneItem::Polygon {
                         points: polygon.points,
+                        layer: LayerKind::Polygons,
+                        score: polygon.score,
                     },
-                    ViewerGeometry::CubicBezier(curve) => RerunSceneItem::NativeCubicBezier(curve),
+                    ViewerGeometry::CubicBezier(curve) => RerunSceneItem::NativeCubicBezier {
+                        curve,
+                        layer: LayerKind::Curves,
+                        score: curve.score,
+                    },
                 })
                 .collect(),
             debug_items: adaptive_export_output
@@ -1040,8 +1046,44 @@ impl RerunQueryBridgeMode {
 }
 
 pub(crate) enum RerunSceneItem {
-    Polygon { points: Vec<GraphPoint> },
-    NativeCubicBezier(CubicBezier),
+    Polygon {
+        points: Vec<GraphPoint>,
+        layer: LayerKind,
+        score: f32,
+    },
+    NativeCubicBezier {
+        curve: CubicBezier,
+        layer: LayerKind,
+        score: f32,
+    },
+}
+
+impl RerunSceneItem {
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Polygon { .. } => "Polygon",
+            Self::NativeCubicBezier { .. } => "Native cubic Bezier",
+        }
+    }
+
+    pub fn layer(&self) -> LayerKind {
+        match self {
+            Self::Polygon { layer, .. } | Self::NativeCubicBezier { layer, .. } => *layer,
+        }
+    }
+
+    pub fn score(&self) -> f32 {
+        match self {
+            Self::Polygon { score, .. } | Self::NativeCubicBezier { score, .. } => *score,
+        }
+    }
+
+    pub fn control_or_vertex_count(&self) -> usize {
+        match self {
+            Self::Polygon { points, .. } => points.len(),
+            Self::NativeCubicBezier { curve, .. } => curve.control_points().len(),
+        }
+    }
 }
 
 pub(crate) enum RerunSceneDebugItem {
@@ -1102,7 +1144,7 @@ mod tests {
             scene
                 .items
                 .iter()
-                .any(|item| matches!(item, RerunSceneItem::NativeCubicBezier(_)))
+                .any(|item| matches!(item, RerunSceneItem::NativeCubicBezier { .. }))
         );
         assert!(scene.debug_items.iter().any(|item| {
             matches!(item, RerunSceneDebugItem::PreparedExportPolyline(points) if points.len() == graph.export_segments() + 1)
@@ -1134,7 +1176,7 @@ mod tests {
             scene
                 .items
                 .iter()
-                .any(|item| matches!(item, RerunSceneItem::NativeCubicBezier(_)))
+                .any(|item| matches!(item, RerunSceneItem::NativeCubicBezier { .. }))
         );
     }
 
