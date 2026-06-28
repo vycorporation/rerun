@@ -38,7 +38,7 @@ fn shared_houdini_graph_id() -> egui::Id {
 pub(crate) struct HoudiniGraphPanel {
     selected_node: usize,
     dragging_node: Option<usize>,
-    parquet_path: String,
+    last_parquet_path: Option<String>,
     parquet_status: Option<String>,
 }
 
@@ -47,7 +47,7 @@ impl Default for HoudiniGraphPanel {
         Self {
             selected_node: 1,
             dragging_node: None,
-            parquet_path: "crates/viewer/re_viewer/data/houdini_cubic_sample.parquet".to_owned(),
+            last_parquet_path: None,
             parquet_status: None,
         }
     }
@@ -141,26 +141,43 @@ impl HoudiniGraphPanel {
 
     fn parquet_import_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.parquet_path);
-            if ui.button("Load Parquet").clicked() {
-                let path = self.parquet_path.trim();
-                if path.is_empty() {
-                    self.parquet_status = Some("No parquet path set".to_owned());
-                } else {
-                    match graph.import_cubic_bezier_parquet_path(path) {
-                        Ok(imported) => {
-                            self.parquet_status =
-                                Some(format!("Imported {imported} native cubic Bezier curves"));
-                        }
-                        Err(err) => {
-                            self.parquet_status = Some(format!("Parquet import failed: {err}"));
-                        }
-                    }
-                }
+            if ui.button("Load Sample").clicked() {
+                self.import_parquet_path(graph, sample_parquet_path());
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if ui.button("Import Parquet...").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Parquet", &["parquet"])
+                    .pick_file()
+            {
+                self.import_parquet_path(graph, path);
             }
         });
+        if let Some(path) = &self.last_parquet_path {
+            ui.weak(path);
+        }
         if let Some(status) = &self.parquet_status {
             ui.weak(status);
+        }
+    }
+
+    fn import_parquet_path(
+        &mut self,
+        graph: &mut GraphDocument,
+        path: impl AsRef<std::path::Path>,
+    ) {
+        let path = path.as_ref();
+        match graph.import_cubic_bezier_parquet_path(path) {
+            Ok(imported) => {
+                self.last_parquet_path = Some(path.display().to_string());
+                self.parquet_status =
+                    Some(format!("Imported {imported} native cubic Bezier curves"));
+            }
+            Err(err) => {
+                self.last_parquet_path = Some(path.display().to_string());
+                self.parquet_status = Some(format!("Parquet import failed: {err}"));
+            }
         }
     }
 
@@ -314,6 +331,10 @@ impl HoudiniGraphPanel {
                 }
             });
     }
+}
+
+fn sample_parquet_path() -> &'static std::path::Path {
+    std::path::Path::new("crates/viewer/re_viewer/data/houdini_cubic_sample.parquet")
 }
 
 fn map_node_layout_point(rect: Rect, point: GraphPoint, node_size: Vec2) -> Pos2 {
