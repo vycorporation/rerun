@@ -40,6 +40,7 @@ pub(crate) struct HoudiniGraphPanel {
     dragging_node: Option<usize>,
     last_parquet_path: Option<String>,
     parquet_status: Option<String>,
+    graph_document_status: Option<String>,
 }
 
 impl Default for HoudiniGraphPanel {
@@ -49,6 +50,7 @@ impl Default for HoudiniGraphPanel {
             dragging_node: None,
             last_parquet_path: None,
             parquet_status: None,
+            graph_document_status: None,
         }
     }
 }
@@ -97,6 +99,7 @@ impl HoudiniGraphPanel {
             ui.add_space(8.0);
             ui.strong("Graph Model");
             self.parquet_import_ui(ui, &mut graph);
+            self.graph_document_ui(ui, &mut graph);
             ui.add_space(6.0);
             let export_output = graph.adaptive_export_output();
             let export_polyline_points = export_output
@@ -114,6 +117,9 @@ impl HoudiniGraphPanel {
                 graph.source.matching_entity_count,
                 graph.source.visible_data_result_count
             ));
+            if let Some(source_path) = &graph.source.source_path {
+                ui.label(format!("Source path: {source_path}"));
+            }
             ui.label(format!(
                 "{} source polygons, {} source cubic Bezier curves",
                 graph.polygon_count(),
@@ -158,6 +164,48 @@ impl HoudiniGraphPanel {
             ui.weak(path);
         }
         if let Some(status) = &self.parquet_status {
+            ui.weak(status);
+        }
+    }
+
+    fn graph_document_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.horizontal(|ui| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if ui.button("Save Graph...").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Houdini Graph", &["json"])
+                    .set_file_name("houdini-graph.json")
+                    .save_file()
+            {
+                match graph.save_sidecar_json(&path) {
+                    Ok(()) => {
+                        self.graph_document_status =
+                            Some(format!("Saved graph document: {}", path.display()));
+                    }
+                    Err(err) => {
+                        self.graph_document_status = Some(format!("Graph save failed: {err}"));
+                    }
+                }
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if ui.button("Load Graph...").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Houdini Graph", &["json"])
+                    .pick_file()
+            {
+                match graph.load_sidecar_json(&path) {
+                    Ok(()) => {
+                        self.graph_document_status =
+                            Some(format!("Loaded graph document: {}", path.display()));
+                    }
+                    Err(err) => {
+                        self.graph_document_status = Some(format!("Graph load failed: {err}"));
+                    }
+                }
+            }
+        });
+        if let Some(status) = &self.graph_document_status {
             ui.weak(status);
         }
     }

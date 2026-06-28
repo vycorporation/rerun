@@ -3,7 +3,7 @@ use std::path::Path;
 use arrow::array::{Float32Array, Float64Array, RecordBatch};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct GraphPoint {
     pub x: f32,
     pub y: f32,
@@ -411,12 +411,34 @@ impl GraphDocument {
         &mut self,
         path: impl AsRef<Path>,
     ) -> anyhow::Result<usize> {
+        let path = path.as_ref();
         let records = load_cubic_bezier_parquet(path)?;
         let count = records.len();
-        self.source = GraphSource::recording_import(count);
+        self.source = GraphSource::recording_import(count, Some(path.display().to_string()));
         self.recording_geometry = records.into_iter().map(|record| record.geometry).collect();
         self.update_source_node_readiness();
         Ok(count)
+    }
+
+    pub fn save_sidecar_json(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        std::fs::write(path, self.to_sidecar_json()?)?;
+        Ok(())
+    }
+
+    pub fn load_sidecar_json(&mut self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        let json = std::fs::read_to_string(path)?;
+        self.apply_sidecar_json(&json)
+    }
+
+    pub fn to_sidecar_json(&self) -> anyhow::Result<String> {
+        Ok(serde_json::to_string_pretty(
+            &HoudiniGraphSidecar::from_document(self),
+        )?)
+    }
+
+    pub fn apply_sidecar_json(&mut self, json: &str) -> anyhow::Result<()> {
+        let sidecar = serde_json::from_str::<HoudiniGraphSidecar>(json)?;
+        sidecar.apply_to_document(self)
     }
 
     fn update_source_node_readiness(&mut self) {
@@ -624,6 +646,7 @@ pub(crate) struct GraphSource {
     pub mode: GraphSourceMode,
     pub matching_entity_count: usize,
     pub visible_data_result_count: usize,
+    pub source_path: Option<String>,
 }
 
 impl GraphSource {
@@ -632,6 +655,7 @@ impl GraphSource {
             mode: GraphSourceMode::DemoFallback,
             matching_entity_count: 0,
             visible_data_result_count: 0,
+            source_path: None,
         }
     }
 
@@ -647,6 +671,7 @@ impl GraphSource {
             },
             matching_entity_count: query_bridge.matching_entity_count,
             visible_data_result_count: query_bridge.visible_data_result_count,
+            source_path: None,
         }
     }
 
@@ -657,19 +682,131 @@ impl GraphSource {
         }
     }
 
-    fn recording_import(imported_geometry_count: usize) -> Self {
+    fn recording_import(imported_geometry_count: usize, source_path: Option<String>) -> Self {
         Self {
             mode: GraphSourceMode::RecordingQuery,
             matching_entity_count: imported_geometry_count,
             visible_data_result_count: imported_geometry_count,
+            source_path,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum GraphSourceMode {
     DemoFallback,
     RecordingQuery,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct HoudiniGraphSidecar {
+    version: u32,
+    source: GraphSourceSidecar,
+    nodes: Vec<NodeSidecar>,
+    layers: Vec<LayerSidecar>,
+    demo_geometry: Vec<Geometry>,
+    recording_geometry: Vec<Geometry>,
+}
+
+impl HoudiniGraphSidecar {
+    const VERSION: u32 = 1;
+
+    fn from_document(graph: &GraphDocument) -> Self {
+        Self {
+            version: Self::VERSION,
+            source: GraphSourceSidecar {
+                mode: graph.source.mode,
+                matching_entity_count: graph.source.matching_entity_count,
+                visible_data_result_count: graph.source.visible_data_result_count,
+                source_path: graph.source.source_path.clone(),
+            },
+            nodes: graph
+                .nodes
+                .iter()
+                .map(|node| NodeSidecar {
+                    kind: node.kind,
+                    layout_position: node.layout_position,
+                    parameter_value: node.parameter.value,
+                })
+                .collect(),
+            layers: graph
+                .layers
+                .iter()
+                .map(|layer| LayerSidecar {
+                    kind: layer.kind,
+                    visible: layer.visible,
+                })
+                .collect(),
+            demo_geometry: graph.geometry.clone(),
+            recording_geometry: graph.recording_geometry.clone(),
+        }
+    }
+
+    fn apply_to_document(self, graph: &mut GraphDocument) -> anyhow::Result<()> {
+        if self.version != Self::VERSION {
+            anyhow::bail!(
+                "unsupported Houdini graph sidecar version {}; expected {}",
+                self.version,
+                Self::VERSION
+            );
+        }
+
+        graph.source = GraphSource {
+            mode: self.source.mode,
+            matching_entity_count: self.source.matching_entity_count,
+            visible_data_result_count: self.source.visible_data_result_count,
+            source_path: self.source.source_path,
+        };
+        graph.geometry = self.demo_geometry;
+        graph.recording_geometry = self.recording_geometry;
+
+        for node_snapshot in self.nodes {
+            if let Some(node) = graph
+                .nodes
+                .iter_mut()
+                .find(|node| node.kind == node_snapshot.kind)
+            {
+                node.layout_position = node_snapshot.layout_position.clamped_to_unit();
+                node.parameter.value = node_snapshot
+                    .parameter_value
+                    .clamp(*node.parameter.range.start(), *node.parameter.range.end());
+            }
+        }
+
+        for layer_snapshot in self.layers {
+            if let Some(layer) = graph
+                .layers
+                .iter_mut()
+                .find(|layer| layer.kind == layer_snapshot.kind)
+            {
+                layer.visible = layer_snapshot.visible;
+            }
+        }
+
+        graph.update_source_node_readiness();
+        Ok(())
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct GraphSourceSidecar {
+    mode: GraphSourceMode,
+    matching_entity_count: usize,
+    visible_data_result_count: usize,
+    source_path: Option<String>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct NodeSidecar {
+    kind: NodeKind,
+    layout_position: GraphPoint,
+    parameter_value: f32,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct LayerSidecar {
+    kind: LayerKind,
+    visible: bool,
 }
 
 pub(crate) struct GraphNode {
@@ -735,7 +872,7 @@ pub(crate) struct GraphEdge {
     pub to_node: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum NodeKind {
     Source,
     Filter,
@@ -785,14 +922,14 @@ pub(crate) struct Layer {
     pub visible: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum LayerKind {
     Polygons,
     Curves,
     Debug,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) enum Geometry {
     Polygon(Polygon),
     CubicBezier(CubicBezier),
@@ -807,13 +944,13 @@ impl Geometry {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct Polygon {
     pub points: Vec<GraphPoint>,
     pub score: f32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
 pub(crate) struct CubicBezier {
     pub start: GraphPoint,
     pub control_1: GraphPoint,
@@ -1364,6 +1501,78 @@ mod tests {
                 .iter()
                 .all(|record| matches!(record.geometry, Geometry::CubicBezier(_)))
         );
+    }
+
+    #[test]
+    fn sidecar_json_round_trips_source_layers_nodes_and_native_geometry() {
+        let mut graph = GraphDocument::sample();
+        let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data/houdini_cubic_sample.parquet");
+        graph
+            .import_cubic_bezier_parquet_path(&sample_path)
+            .unwrap();
+        graph.set_node_layout_position(1, GraphPoint::new(0.25, 0.75));
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == super::NodeKind::Filter)
+            .expect("sample graph should include filter node")
+            .parameter
+            .value = 0.25;
+        graph
+            .layers
+            .iter_mut()
+            .find(|layer| layer.kind == LayerKind::Curves)
+            .expect("sample graph should include curve layer")
+            .visible = false;
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(restored.source.mode, super::GraphSourceMode::RecordingQuery);
+        assert_eq!(
+            restored.source.source_path,
+            Some(sample_path.display().to_string())
+        );
+        assert_eq!(restored.cubic_bezier_count(), 4);
+        assert!(!restored.layer_visible(LayerKind::Curves));
+        assert_eq!(
+            restored
+                .graph_layout()
+                .nodes
+                .iter()
+                .find(|node| node.node_index == 1)
+                .expect("filter node layout should exist")
+                .position,
+            GraphPoint::new(0.25, 0.75)
+        );
+        assert_eq!(restored.filter_minimum_score(), 0.25);
+    }
+
+    #[test]
+    fn sidecar_json_does_not_persist_adaptive_export_polyline() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == super::NodeKind::Output)
+            .expect("sample graph should include output node")
+            .parameter
+            .value = 1.0;
+        assert!(
+            graph
+                .adaptive_export_output()
+                .items
+                .iter()
+                .any(|geometry| matches!(geometry, ExportGeometry::Polyline(_)))
+        );
+
+        let json = graph.to_sidecar_json().unwrap();
+
+        assert!(!json.contains("Polyline"));
+        assert!(!json.contains("PreparedExportPolyline"));
+        assert!(json.contains("CubicBezier"));
     }
 
     fn write_cubic_bezier_parquet(columns: &[(&str, Vec<f64>)]) -> tempfile::NamedTempFile {
