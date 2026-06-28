@@ -1,4 +1,6 @@
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 
 use arrow::array::{Float32Array, Float64Array, RecordBatch};
 use arrow::datatypes::SchemaRef;
@@ -726,6 +728,107 @@ impl GraphDocument {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_rerun_recording(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> anyhow::Result<DurableRecordingResult> {
+        use re_sdk::RecordingStreamBuilder;
+        use re_sdk_types::{
+            archetypes::{LineStrips2D, Points2D, TextDocument},
+            components::{LineStrip2D, Position2D, Radius},
+        };
+
+        let path = path.as_ref();
+        let scene = self.rerun_scene_output_with_query_bridge(None);
+        let rec = RecordingStreamBuilder::new("houdini_graph_output").save(path)?;
+
+        rec.log_static(
+            "houdini_graph/metadata",
+            &TextDocument::new(scene.recording_metadata_markdown(self)),
+        )?;
+
+        for (index, item) in scene.items.iter().enumerate() {
+            let entity_base = format!(
+                "houdini_graph/output/{:03}_{}_{}",
+                index,
+                item.kind_slug(),
+                sanitize_entity_path_part(item.layer_name())
+            );
+            let color = recording_color(item.style());
+            let radius = Radius::new_ui_points((item.style().stroke_scale * 3.0).max(1.0));
+
+            match item {
+                RerunSceneItem::Polygon {
+                    points,
+                    layer_order,
+                    ..
+                } => {
+                    let mut strip_points = points
+                        .iter()
+                        .copied()
+                        .map(recording_position)
+                        .collect::<Vec<_>>();
+                    if let Some(first) = strip_points.first().copied() {
+                        strip_points.push(first);
+                    }
+                    rec.log(
+                        format!("{entity_base}/geometry"),
+                        &LineStrips2D::new([LineStrip2D::from_iter(
+                            strip_points.into_iter().map(|point| [point.x(), point.y()]),
+                        )])
+                        .with_colors([color])
+                        .with_radii([radius])
+                        .with_labels([item.recording_label(index)])
+                        .with_draw_order(*layer_order as f32),
+                    )?;
+                }
+                RerunSceneItem::NativeCubicBezier {
+                    curve, layer_order, ..
+                } => {
+                    let control_points = curve
+                        .control_points()
+                        .into_iter()
+                        .map(recording_position)
+                        .collect::<Vec<Position2D>>();
+                    rec.log(
+                        format!("{entity_base}/native_control_points"),
+                        &Points2D::new(control_points.clone())
+                            .with_colors([color])
+                            .with_radii([Radius::new_ui_points(4.0)])
+                            .with_labels(["P0", "P1", "P2", "P3"])
+                            .with_draw_order((*layer_order as f32) + 10.0),
+                    )?;
+                    rec.log(
+                        format!("{entity_base}/control_polygon_preview"),
+                        &LineStrips2D::new([LineStrip2D::from_iter(
+                            control_points.iter().map(|point| [point.x(), point.y()]),
+                        )])
+                        .with_colors([color])
+                        .with_radii([radius])
+                        .with_labels([item.recording_label(index)])
+                        .with_draw_order(*layer_order as f32),
+                    )?;
+                }
+            }
+
+            rec.log_static(
+                format!("{entity_base}/metadata"),
+                &TextDocument::new(item.recording_metadata_markdown(index)),
+            )?;
+        }
+
+        rec.flush_blocking()?;
+
+        Ok(DurableRecordingResult {
+            path: path.to_path_buf(),
+            item_count: scene.items.len(),
+            polygon_count: scene.polygon_count(),
+            native_cubic_bezier_count: scene.native_cubic_bezier_count(),
+            limitation_note: CUBIC_RECORDING_LIMITATION.to_owned(),
+        })
+    }
+
     pub fn update_source_from_query_bridge(&mut self, query_bridge: &RerunQueryBridge) {
         if self.source.metadata.provenance == SourceProvenance::ParquetImport {
             return;
@@ -900,6 +1003,9 @@ impl GraphDocument {
         warnings
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+const CUBIC_RECORDING_LIMITATION: &str = "Rerun recordings preserve cubic Bezier semantics as graph-owned control-point metadata. The current replay path visualizes cubic curves as native control points plus a control-polygon preview; dense polyline tessellation remains an adaptive boundary/export representation only.";
 
 #[allow(dead_code)]
 pub(crate) struct HoudiniGeometrySchema;
@@ -2010,6 +2116,69 @@ pub(crate) struct RerunSceneOutput {
     pub query_bridge: Option<RerunQueryBridge>,
 }
 
+impl RerunSceneOutput {
+    pub fn polygon_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| matches!(item, RerunSceneItem::Polygon { .. }))
+            .count()
+    }
+
+    pub fn native_cubic_bezier_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| matches!(item, RerunSceneItem::NativeCubicBezier { .. }))
+            .count()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn recording_metadata_markdown(&self, graph: &GraphDocument) -> String {
+        let source_path = graph
+            .source
+            .source_path
+            .as_deref()
+            .or(graph.source.metadata.source_path.as_deref())
+            .unwrap_or("none");
+        let mut markdown = format!(
+            "# Houdini Graph Recording\n\n\
+             Source path: `{source_path}`\n\n\
+             Source provenance: `{}`\n\n\
+             Output items: `{}`\n\n\
+             Polygons: `{}`\n\n\
+             Native cubic Beziers: `{}`\n\n\
+             Limitation: {}\n\n\
+             | index | kind | layer | score | style |\n\
+             | --- | --- | --- | ---: | --- |\n",
+            graph.source.metadata.provenance.as_str(),
+            self.items.len(),
+            self.polygon_count(),
+            self.native_cubic_bezier_count(),
+            CUBIC_RECORDING_LIMITATION
+        );
+
+        for (index, item) in self.items.iter().enumerate() {
+            markdown.push_str(&format!(
+                "| {index} | {} | {} | {:.3} | {} |\n",
+                item.kind_name(),
+                item.layer_name(),
+                item.score(),
+                item.style().recording_summary()
+            ));
+        }
+
+        markdown
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct DurableRecordingResult {
+    pub path: PathBuf,
+    pub item_count: usize,
+    pub polygon_count: usize,
+    pub native_cubic_bezier_count: usize,
+    pub limitation_note: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct GraphStyle {
     pub color: GraphColor,
@@ -2023,6 +2192,14 @@ impl GraphStyle {
             stroke_scale,
             ..self
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn recording_summary(self) -> String {
+        format!(
+            "rgb({}, {}, {}), opacity {:.2}, stroke {:.2}",
+            self.color.r, self.color.g, self.color.b, self.opacity, self.stroke_scale
+        )
     }
 }
 
@@ -2139,11 +2316,86 @@ impl RerunSceneItem {
             Self::NativeCubicBezier { curve, .. } => curve.control_points().len(),
         }
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn kind_slug(&self) -> &'static str {
+        match self {
+            Self::Polygon { .. } => "polygon",
+            Self::NativeCubicBezier { .. } => "native_cubic_bezier",
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn recording_label(&self, index: usize) -> String {
+        format!(
+            "#{index} {} {} score {:.3}",
+            self.kind_name(),
+            self.layer_name(),
+            self.score()
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn recording_metadata_markdown(&self, index: usize) -> String {
+        format!(
+            "# Output item {index}\n\n\
+             Kind: `{}`\n\n\
+             Layer: `{}`\n\n\
+             Layer kind: `{}`\n\n\
+             Layer order: `{}`\n\n\
+             Score: `{:.3}`\n\n\
+             Style: `{}`\n\n\
+             Control or vertex count: `{}`\n",
+            self.kind_name(),
+            self.layer_name(),
+            self.layer().as_str(),
+            self.layer_order(),
+            self.score(),
+            self.style().recording_summary(),
+            self.control_or_vertex_count()
+        )
+    }
 }
 
 pub(crate) enum RerunSceneDebugItem {
     NativeCubicControlPolygon([GraphPoint; 4]),
     PreparedExportPolyline(Vec<GraphPoint>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn recording_position(point: GraphPoint) -> re_sdk_types::components::Position2D {
+    re_sdk_types::components::Position2D::new(point.x, point.y)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn recording_color(style: GraphStyle) -> re_sdk_types::components::Color {
+    let alpha = (style.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    re_sdk_types::components::Color::from_unmultiplied_rgba(
+        style.color.r,
+        style.color.g,
+        style.color.b,
+        alpha,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sanitize_entity_path_part(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if sanitized.is_empty() {
+        "unnamed".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 #[cfg(test)]
@@ -3122,6 +3374,34 @@ mod tests {
         );
         assert_eq!(load.metadata.attribute_names, vec!["score".to_owned()]);
         assert!(load.metadata.bounds.is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn checked_in_sample_parquet_can_write_durable_rerun_recording() {
+        let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data/houdini_cubic_sample.parquet");
+        let recording_dir = tempfile::tempdir().unwrap();
+        let recording_path = recording_dir.path().join("houdini-graph-output.rrd");
+        let mut graph = GraphDocument::sample();
+
+        let imported = graph
+            .import_cubic_bezier_parquet_path(&sample_path)
+            .unwrap();
+        let recording = graph.save_rerun_recording(&recording_path).unwrap();
+
+        assert_eq!(imported, 4);
+        assert_eq!(recording.path, recording_path);
+        assert_eq!(recording.item_count, 4);
+        assert_eq!(recording.polygon_count, 0);
+        assert_eq!(recording.native_cubic_bezier_count, 4);
+        assert!(
+            recording
+                .limitation_note
+                .contains("cubic Bezier semantics as graph-owned control-point metadata")
+        );
+        assert!(recording_path.exists());
+        assert!(std::fs::metadata(&recording_path).unwrap().len() > 0);
     }
 
     #[test]

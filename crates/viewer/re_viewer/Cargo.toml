@@ -89,6 +89,7 @@ re_recording_panel.workspace = true
 re_redap_browser.workspace = true
 re_redap_client.workspace = true
 re_renderer = { workspace = true, default-features = false }
+re_sdk.workspace = true
 re_sdk_types.workspace = true
 re_selection_panel.workspace = true
 re_sorbet.workspace = true

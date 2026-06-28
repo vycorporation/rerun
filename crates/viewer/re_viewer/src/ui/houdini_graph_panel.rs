@@ -44,6 +44,7 @@ pub(crate) struct HoudiniGraphPanel {
     last_parquet_path: Option<String>,
     parquet_status: Option<String>,
     graph_document_status: Option<String>,
+    recording_status: Option<String>,
     table_search: String,
     table_minimum_score_enabled: bool,
     table_minimum_score: f32,
@@ -60,6 +61,7 @@ impl Default for HoudiniGraphPanel {
             last_parquet_path: None,
             parquet_status: None,
             graph_document_status: None,
+            recording_status: None,
             table_search: String::new(),
             table_minimum_score_enabled: false,
             table_minimum_score: 0.0,
@@ -118,6 +120,7 @@ impl HoudiniGraphPanel {
             ui.strong("Graph Model");
             self.parquet_import_ui(ui, &mut graph);
             self.graph_document_ui(ui, &mut graph);
+            self.recording_export_ui(ui, &graph);
             ui.add_space(6.0);
             let export_output = graph.adaptive_export_output();
             let export_polyline_points = export_output
@@ -235,6 +238,45 @@ impl HoudiniGraphPanel {
             }
         });
         if let Some(status) = &self.graph_document_status {
+            ui.weak(status);
+        }
+    }
+
+    fn recording_export_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            ui.horizontal(|ui| {
+                if ui.button("Save Recording...").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Rerun recording", &["rrd"])
+                        .set_file_name("houdini-graph-output.rrd")
+                        .save_file()
+                {
+                    match graph.save_rerun_recording(&path) {
+                        Ok(recording) => {
+                            self.recording_status = Some(format!(
+                                "Saved recording: {} ({} items, {} polygons, {} native cubics). {}",
+                                recording.path.display(),
+                                recording.item_count,
+                                recording.polygon_count,
+                                recording.native_cubic_bezier_count,
+                                recording.limitation_note
+                            ));
+                        }
+                        Err(err) => {
+                            self.recording_status = Some(format!("Recording save failed: {err}"));
+                        }
+                    }
+                }
+            });
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            ui.weak("Recording export is available in the native viewer.");
+        }
+
+        if let Some(status) = &self.recording_status {
             ui.weak(status);
         }
     }

@@ -10654,6 +10654,7 @@ dependencies = [
  "re_redap_browser",
  "re_redap_client",
  "re_renderer",
+ "re_sdk",
  "re_sdk_types",
  "re_selection_panel",
  "re_sorbet",
