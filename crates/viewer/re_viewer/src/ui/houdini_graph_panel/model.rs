@@ -226,26 +226,38 @@ impl GraphDocument {
         Some(match node.kind {
             NodeKind::Source => NodeInfo {
                 kind: node.kind,
+                role: node.kind.role(),
                 input_count: stages[0].input_count,
                 output_count: stages[0].output_count,
+                parameter_name: node.parameter,
+                parameter_value: node.weight,
                 summary: "Source geometry lives in the graph model before any viewer adaptation.",
             },
             NodeKind::Filter => NodeInfo {
                 kind: node.kind,
+                role: node.kind.role(),
                 input_count: stages[1].input_count,
                 output_count: stages[1].output_count,
+                parameter_name: node.parameter,
+                parameter_value: node.weight,
                 summary: "Filter removes geometry below the minimum sample score.",
             },
             NodeKind::Style => NodeInfo {
                 kind: node.kind,
+                role: node.kind.role(),
                 input_count: stages[2].input_count,
                 output_count: stages[2].output_count,
+                parameter_name: node.parameter,
+                parameter_value: node.weight,
                 summary: "Style changes viewer presentation without mutating graph geometry.",
             },
             NodeKind::Output => NodeInfo {
                 kind: node.kind,
+                role: node.kind.role(),
                 input_count: stages[3].input_count,
                 output_count: stages[3].output_count,
+                parameter_name: node.parameter,
+                parameter_value: node.weight,
                 summary: "Output prepares boundary data while preserving native graph geometry.",
             },
         })
@@ -309,12 +321,24 @@ impl NodeKind {
             Self::Output => "Output",
         }
     }
+
+    pub fn role(self) -> &'static str {
+        match self {
+            Self::Source => "Read",
+            Self::Filter => "Cull",
+            Self::Style => "Style",
+            Self::Output => "Publish",
+        }
+    }
 }
 
 pub(crate) struct NodeInfo {
     pub kind: NodeKind,
+    pub role: &'static str,
     pub input_count: usize,
     pub output_count: usize,
+    pub parameter_name: &'static str,
+    pub parameter_value: f32,
     pub summary: &'static str,
 }
 
@@ -509,6 +533,9 @@ mod tests {
             .expect("sample graph should include filter node");
         assert_eq!(filter.input_count, 4);
         assert_eq!(filter.output_count, 2);
+        assert_eq!(filter.role, "Cull");
+        assert_eq!(filter.parameter_name, "Minimum score");
+        assert_eq!(filter.parameter_value, 0.55);
 
         let output = graph
             .selected_node_info(3)

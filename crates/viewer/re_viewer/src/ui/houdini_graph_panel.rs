@@ -186,12 +186,23 @@ impl HoudiniGraphPanel {
                     ui.label(info.kind.as_str());
                     ui.end_row();
 
+                    ui.weak("Role");
+                    ui.label(info.role);
+                    ui.end_row();
+
                     ui.weak("Inputs");
                     ui.label(info.input_count.to_string());
                     ui.end_row();
 
                     ui.weak("Outputs");
                     ui.label(info.output_count.to_string());
+                    ui.end_row();
+
+                    ui.weak("Parameter");
+                    ui.label(format!(
+                        "{} = {:.2}",
+                        info.parameter_name, info.parameter_value
+                    ));
                     ui.end_row();
                 });
             ui.label(info.summary);
