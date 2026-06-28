@@ -650,6 +650,7 @@ impl GraphDocument {
         }
     }
 
+    #[cfg(test)]
     pub fn adaptive_export_output(&self) -> ExportOutput {
         let curve_segments = self.export_segments().max(1);
         ExportOutput {
@@ -667,9 +668,44 @@ impl GraphDocument {
         }
     }
 
+    pub fn prepared_export_point_count(&self) -> usize {
+        let curve_point_count = self.export_segments().max(1) + 1;
+        self.active_geometry()
+            .iter()
+            .filter(|geometry| self.emits(geometry))
+            .map(|geometry| match geometry {
+                Geometry::Polygon(polygon) => polygon.points.len(),
+                Geometry::CubicBezier(_) => curve_point_count,
+            })
+            .sum()
+    }
+
     pub fn render_feasibility_summary(&self) -> RenderFeasibilitySummary {
-        let scene = self.rerun_scene_output_with_query_bridge(None);
-        RenderFeasibilitySummary::from_scene(&scene)
+        let mut summary = RenderFeasibilitySummary {
+            export_segments_per_cubic: self.export_segments(),
+            ..RenderFeasibilitySummary::default()
+        };
+
+        for geometry in self
+            .active_geometry()
+            .iter()
+            .filter(|geometry| self.emits(geometry))
+        {
+            summary.native_viewer_primitive_count += 1;
+            summary.graph_owned_point_count += geometry.control_or_vertex_count();
+            match geometry {
+                Geometry::Polygon(_) => {
+                    summary.polygon_count += 1;
+                }
+                Geometry::CubicBezier(_) => {
+                    summary.native_cubic_bezier_count += 1;
+                    summary.prepared_boundary_debug_point_count +=
+                        summary.export_segments_per_cubic + 1 + 4;
+                }
+            }
+        }
+
+        summary
     }
 
     pub fn load_synthetic_render_benchmark(
@@ -705,55 +741,68 @@ impl GraphDocument {
         &self,
         query_bridge: Option<RerunQueryBridge>,
     ) -> RerunSceneOutput {
+        self.rerun_scene_output_with_debug_items(query_bridge, true)
+    }
+
+    pub fn rerun_scene_output_for_view(
+        &self,
+        query_bridge: Option<RerunQueryBridge>,
+        include_debug_items: bool,
+    ) -> RerunSceneOutput {
+        self.rerun_scene_output_with_debug_items(query_bridge, include_debug_items)
+    }
+
+    fn rerun_scene_output_with_debug_items(
+        &self,
+        query_bridge: Option<RerunQueryBridge>,
+        include_debug_items: bool,
+    ) -> RerunSceneOutput {
         let viewer_output = self.viewer_output();
         let style = viewer_output.style;
-        let adaptive_export_output = self.adaptive_export_output();
+        let export_segments = self.export_segments();
+        let mut items = Vec::with_capacity(viewer_output.items.len());
+        let mut debug_items = Vec::new();
 
-        RerunSceneOutput {
-            stroke_scale: viewer_output.stroke_scale,
-            style,
-            export_segments: self.export_segments(),
-            query_bridge,
-            items: viewer_output
-                .items
-                .into_iter()
-                .map(|item| match item.geometry {
-                    ViewerGeometry::Polygon(polygon) => RerunSceneItem::Polygon {
+        for item in viewer_output.items {
+            match item.geometry {
+                ViewerGeometry::Polygon(polygon) => {
+                    items.push(RerunSceneItem::Polygon {
                         points: polygon.points,
                         layer: item.layer.kind,
                         layer_name: item.layer.name,
                         layer_order: item.layer.order,
                         score: polygon.score,
                         style: item.layer.style,
-                    },
-                    ViewerGeometry::CubicBezier(curve) => RerunSceneItem::NativeCubicBezier {
+                    });
+                }
+                ViewerGeometry::CubicBezier(curve) => {
+                    if include_debug_items {
+                        debug_items.push(RerunSceneDebugItem::PreparedExportPolyline(
+                            curve.adaptive_polyline(export_segments.max(1)),
+                        ));
+                        debug_items.push(RerunSceneDebugItem::NativeCubicControlPolygon(
+                            curve.control_points(),
+                        ));
+                    }
+                    items.push(RerunSceneItem::NativeCubicBezier {
                         curve,
                         layer: item.layer.kind,
                         layer_name: item.layer.name,
                         layer_order: item.layer.order,
                         score: curve.score,
                         style: item.layer.style,
-                    },
-                })
-                .collect(),
-            debug_items: adaptive_export_output
-                .items
-                .into_iter()
-                .filter_map(|geometry| match geometry {
-                    ExportGeometry::Polygon(_) => None,
-                    ExportGeometry::Polyline(points) => {
-                        Some(RerunSceneDebugItem::PreparedExportPolyline(points))
-                    }
-                })
-                .chain(self.viewer_output().items.into_iter().filter_map(
-                    |item| match item.geometry {
-                        ViewerGeometry::Polygon(_) => None,
-                        ViewerGeometry::CubicBezier(curve) => Some(
-                            RerunSceneDebugItem::NativeCubicControlPolygon(curve.control_points()),
-                        ),
-                    },
-                ))
-                .collect(),
+                    });
+                }
+            }
+        }
+
+        RerunSceneOutput {
+            stroke_scale: viewer_output.stroke_scale,
+            style,
+            export_segments,
+            query_bridge,
+            items,
+            debug_items,
         }
     }
 
@@ -2129,10 +2178,12 @@ pub(crate) enum ViewerGeometry {
     CubicBezier(CubicBezier),
 }
 
+#[cfg(test)]
 pub(crate) struct ExportOutput {
     pub items: Vec<ExportGeometry>,
 }
 
+#[cfg(test)]
 pub(crate) enum ExportGeometry {
     Polygon(Vec<GraphPoint>),
     Polyline(Vec<GraphPoint>),
@@ -2215,7 +2266,7 @@ impl RerunSceneOutput {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RenderFeasibilitySummary {
     pub native_viewer_primitive_count: usize,
     pub polygon_count: usize,
@@ -2223,19 +2274,6 @@ pub(crate) struct RenderFeasibilitySummary {
     pub graph_owned_point_count: usize,
     pub prepared_boundary_debug_point_count: usize,
     pub export_segments_per_cubic: usize,
-}
-
-impl RenderFeasibilitySummary {
-    fn from_scene(scene: &RerunSceneOutput) -> Self {
-        Self {
-            native_viewer_primitive_count: scene.items.len(),
-            polygon_count: scene.polygon_count(),
-            native_cubic_bezier_count: scene.native_cubic_bezier_count(),
-            graph_owned_point_count: scene.graph_owned_point_count(),
-            prepared_boundary_debug_point_count: scene.prepared_boundary_debug_point_count(),
-            export_segments_per_cubic: scene.export_segments,
-        }
-    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2588,6 +2626,35 @@ mod tests {
             matches!(item, RerunSceneDebugItem::NativeCubicControlPolygon(points) if points.len() == 4)
         }));
         assert!(scene.query_bridge.is_none());
+    }
+
+    #[test]
+    fn rerun_scene_output_for_view_can_skip_debug_boundary_geometry() {
+        let graph = GraphDocument::sample();
+        let scene = graph.rerun_scene_output_for_view(None, false);
+
+        assert!(
+            scene
+                .items
+                .iter()
+                .any(|item| matches!(item, RerunSceneItem::NativeCubicBezier { .. }))
+        );
+        assert!(scene.debug_items.is_empty());
+    }
+
+    #[test]
+    fn prepared_export_point_count_does_not_require_export_geometry_materialization() {
+        let graph = GraphDocument::sample();
+        let materialized_count = graph
+            .adaptive_export_output()
+            .items
+            .iter()
+            .map(|geometry| match geometry {
+                ExportGeometry::Polygon(points) | ExportGeometry::Polyline(points) => points.len(),
+            })
+            .sum::<usize>();
+
+        assert_eq!(graph.prepared_export_point_count(), materialized_count);
     }
 
     #[test]

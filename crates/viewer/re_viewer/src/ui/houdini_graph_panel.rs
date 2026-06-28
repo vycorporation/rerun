@@ -9,8 +9,8 @@ use re_ui::UiExt as _;
 pub(crate) mod model;
 
 use self::model::{
-    AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState, ExportGeometry,
-    GeometryBounds, GraphDocument, GraphPoint, GraphStyle, LayerKind, NodeStatus, SourceMetadata,
+    AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState, GeometryBounds,
+    GraphDocument, GraphPoint, GraphStyle, LayerKind, NodeStatus, SourceMetadata,
 };
 
 pub(crate) type SharedHoudiniGraph = Arc<Mutex<GraphDocument>>;
@@ -130,16 +130,7 @@ impl HoudiniGraphPanel {
             self.graph_document_ui(ui, &mut graph);
             self.recording_export_ui(ui, &graph);
             ui.add_space(6.0);
-            let export_output = graph.adaptive_export_output();
-            let export_polyline_points = export_output
-                .items
-                .iter()
-                .map(|geometry| match geometry {
-                    ExportGeometry::Polygon(points) | ExportGeometry::Polyline(points) => {
-                        points.len()
-                    }
-                })
-                .sum::<usize>();
+            let export_polyline_points = graph.prepared_export_point_count();
             ui.label(format!(
                 "Source: {} ({} matching entities, {} visible query results)",
                 graph.source.as_str(),

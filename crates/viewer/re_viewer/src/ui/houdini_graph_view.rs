@@ -40,6 +40,7 @@ struct HoudiniFrameStats {
     graph_owned_point_count: usize,
     prepared_boundary_debug_point_count: usize,
     enqueued_shape_count: usize,
+    preview_drawn_item_count: usize,
     preview_segments_per_cubic: usize,
 }
 
@@ -205,9 +206,10 @@ impl ViewClass for HoudiniGraphView {
                     stats.draw_enqueue_micros as f32 / 1_000.0
                 ));
                 ui.label(format!(
-                    "{} mode, {} egui shapes, {} preview segments, {} graph-owned points, {} boundary/debug points",
+                    "{} mode, {} egui shapes, {} drawn items, {} preview segments, {} graph-owned points, {} boundary/debug points",
                     stats.preview_mode.as_str(),
                     stats.enqueued_shape_count,
+                    stats.preview_drawn_item_count,
                     stats.preview_segments_per_cubic,
                     stats.graph_owned_point_count,
                     stats.prepared_boundary_debug_point_count
@@ -217,7 +219,7 @@ impl ViewClass for HoudiniGraphView {
                 .downcast_ref::<HoudiniGraphViewState>()?
                 .selected_item_index
             {
-                let scene = graph.rerun_scene_output_with_query_bridge(None);
+                let scene = graph.rerun_scene_output_for_view(None, false);
                 if let Some(item) = scene.items.get(item_index) {
                     ui.label(selected_item_summary(item));
                 }
@@ -250,7 +252,8 @@ impl ViewClass for HoudiniGraphView {
             let mut graph = lock_houdini_graph(&shared_graph);
             let scene_prepare_start = Instant::now();
             graph.update_source_from_query_bridge(&query_bridge);
-            let scene = graph.rerun_scene_output_with_query_bridge(Some(query_bridge));
+            let include_debug_items = graph.layer_visible(LayerKind::Debug);
+            let scene = graph.rerun_scene_output_for_view(Some(query_bridge), include_debug_items);
             let scene_prepare_micros = scene_prepare_start.elapsed().as_micros();
             let view_transform =
                 HoudiniViewTransform::from_scene(&scene, rect.shrink2(egui::vec2(24.0, 22.0)));
@@ -416,9 +419,10 @@ fn draw_houdini_output_view(
         rect.left_top() + egui::vec2(14.0, stats_line_y + 18.0),
         Align2::LEFT_TOP,
         format!(
-            "{}: {} egui shapes, {} preview segments per cubic",
+            "{}: {} egui shapes, {} drawn items, {} preview segments per cubic",
             preview_mode.as_str(),
             draw_summary.enqueued_shape_count,
+            draw_summary.preview_drawn_item_count,
             draw_summary.preview_segments_per_cubic
         ),
         FontId::monospace(11.0),
@@ -435,12 +439,14 @@ fn draw_houdini_output_view(
         graph_owned_point_count,
         prepared_boundary_debug_point_count,
         enqueued_shape_count: draw_summary.enqueued_shape_count,
+        preview_drawn_item_count: draw_summary.preview_drawn_item_count,
         preview_segments_per_cubic: draw_summary.preview_segments_per_cubic,
     }
 }
 
 struct HoudiniDrawSummary {
     enqueued_shape_count: usize,
+    preview_drawn_item_count: usize,
     preview_segments_per_cubic: usize,
 }
 
@@ -501,6 +507,7 @@ fn draw_detailed_scene_items(
 
     HoudiniDrawSummary {
         enqueued_shape_count,
+        preview_drawn_item_count: scene.items.len(),
         preview_segments_per_cubic: 0,
     }
 }
@@ -512,9 +519,15 @@ fn draw_fast_scene_items(
     selected_item_index: Option<usize>,
 ) -> HoudiniDrawSummary {
     let preview_segments_per_cubic = fast_preview_segments_per_cubic(scene);
-    let mut shapes = Vec::with_capacity(scene.items.len());
+    let preview_stride = fast_preview_item_stride(scene);
+    let selected_item = selected_item_index.unwrap_or(usize::MAX);
+    let mut shapes = Vec::with_capacity(scene.items.len().div_ceil(preview_stride));
 
     for (item_index, geometry) in scene.items.iter().enumerate() {
+        if item_index != selected_item && item_index % preview_stride != 0 {
+            continue;
+        }
+
         let selected = selected_item_index == Some(item_index);
         match geometry {
             RerunSceneItem::Polygon { points, style, .. } => {
@@ -548,6 +561,7 @@ fn draw_fast_scene_items(
 
     HoudiniDrawSummary {
         enqueued_shape_count,
+        preview_drawn_item_count: enqueued_shape_count,
         preview_segments_per_cubic,
     }
 }
@@ -568,6 +582,16 @@ fn fast_preview_segments_per_cubic(scene: &RerunSceneOutput) -> usize {
         10_000..=49_999 => 4,
         _ => 2,
     }
+}
+
+fn fast_preview_item_stride(scene: &RerunSceneOutput) -> usize {
+    const TARGET_FAST_PREVIEW_SHAPES: usize = 2_500;
+
+    scene
+        .items
+        .len()
+        .div_ceil(TARGET_FAST_PREVIEW_SHAPES)
+        .max(1)
 }
 
 fn draw_native_cubic(
@@ -906,8 +930,8 @@ impl GraphBounds {
 #[cfg(test)]
 mod tests {
     use super::{
-        GraphBounds, HoudiniPreviewMode, HoudiniViewTransform, fast_preview_segments_per_cubic,
-        hit_test_scene, preview_mode_for_scene,
+        GraphBounds, HoudiniPreviewMode, HoudiniViewTransform, fast_preview_item_stride,
+        fast_preview_segments_per_cubic, hit_test_scene, preview_mode_for_scene,
     };
     use crate::ui::houdini_graph_panel::model::{
         CubicBezier, GraphPoint, GraphStyle, LayerKind, RerunSceneItem, RerunSceneOutput,
@@ -1096,8 +1120,8 @@ mod tests {
 
         assert_eq!(hit_test_scene(&scene, transform, midpoint), Some(0));
         assert!(matches!(
-            scene.items[0],
-            RerunSceneItem::NativeCubicBezier { .. }
+            scene.items.first(),
+            Some(RerunSceneItem::NativeCubicBezier { .. })
         ));
     }
 
@@ -1133,5 +1157,12 @@ mod tests {
             scene.items.first(),
             Some(RerunSceneItem::NativeCubicBezier { .. })
         ));
+    }
+
+    #[test]
+    fn fast_preview_stride_caps_large_scene_shape_counts() {
+        assert_eq!(fast_preview_item_stride(&native_cubic_scene(2_500)), 1);
+        assert_eq!(fast_preview_item_stride(&native_cubic_scene(10_000)), 4);
+        assert_eq!(fast_preview_item_stride(&native_cubic_scene(20_000)), 8);
     }
 }
