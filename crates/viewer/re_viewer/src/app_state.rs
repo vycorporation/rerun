@@ -539,7 +539,6 @@ impl AppState {
 
                 Self::left_panel_ui(
                     &mut self.recording_panel,
-                    &mut self.houdini_graph_panel,
                     blueprint_tree,
                     redap_servers,
                     view_states,
@@ -549,6 +548,8 @@ impl AppState {
                     &ctx.app_ctx,
                     Some((&viewport_ui, &ctx)),
                 );
+
+                Self::houdini_graph_panel_ui(ui, &mut self.houdini_graph_panel);
 
                 egui::CentralPanel::default()
                     .frame(viewport_frame)
@@ -577,7 +578,6 @@ impl AppState {
             Route::Loading(log_source) => {
                 Self::left_panel_ui(
                     &mut self.recording_panel,
-                    &mut self.houdini_graph_panel,
                     &mut self.blueprint_tree,
                     &self.redap_servers,
                     &self.view_states,
@@ -620,7 +620,6 @@ impl AppState {
             Route::LocalTable(table_id) => {
                 Self::left_panel_ui(
                     &mut self.recording_panel,
-                    &mut self.houdini_graph_panel,
                     &mut self.blueprint_tree,
                     &self.redap_servers,
                     &self.view_states,
@@ -659,7 +658,6 @@ impl AppState {
             Route::RedapServer(origin) => {
                 Self::left_panel_ui(
                     &mut self.recording_panel,
-                    &mut self.houdini_graph_panel,
                     &mut self.blueprint_tree,
                     &self.redap_servers,
                     &self.view_states,
@@ -721,7 +719,6 @@ impl AppState {
             } => {
                 Self::left_panel_ui(
                     &mut self.recording_panel,
-                    &mut self.houdini_graph_panel,
                     &mut self.blueprint_tree,
                     &self.redap_servers,
                     &self.view_states,
@@ -750,7 +747,6 @@ impl AppState {
             } => {
                 Self::left_panel_ui(
                     &mut self.recording_panel,
-                    &mut self.houdini_graph_panel,
                     &mut self.blueprint_tree,
                     &self.redap_servers,
                     &self.view_states,
@@ -894,7 +890,6 @@ impl AppState {
     #[expect(clippy::too_many_arguments)]
     fn left_panel_ui(
         recording_panel: &mut re_recording_panel::RecordingPanel,
-        houdini_graph_panel: &mut crate::ui::HoudiniGraphPanel,
         blueprint_tree: &mut re_blueprint_tree::BlueprintTree,
         redap_servers: &RedapServers,
         view_states: &ViewStates,
@@ -966,10 +961,6 @@ impl AppState {
                             );
                         }
 
-                        ui.separator();
-                        houdini_graph_panel.show(ui);
-                        ui.separator();
-
                         if let Some((viewport_ui, ctx)) = viewport {
                             blueprint_tree.show(ctx, &viewport_ui.blueprint, ui, view_states);
                         }
@@ -984,6 +975,25 @@ impl AppState {
                 egui::WidgetInfo::labeled(egui::WidgetType::Panel, true, "blueprint_panel")
             });
         }
+    }
+
+    fn houdini_graph_panel_ui(ui: &mut Ui, houdini_graph_panel: &mut crate::ui::HoudiniGraphPanel) {
+        egui::Panel::bottom("houdini_graph_panel")
+            .resizable(true)
+            .show_separator_line(true)
+            .min_size(160.0)
+            .default_size(340.0)
+            .frame(egui::Frame {
+                fill: ui.visuals().panel_fill,
+                ..Default::default()
+            })
+            .show_inside(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        houdini_graph_panel.show(ui);
+                    });
+            });
     }
 
     pub fn time_control(&self, rec_id: &StoreId) -> Option<&TimeControl> {
