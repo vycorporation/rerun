@@ -130,19 +130,41 @@ impl GraphDocument {
             ],
             layers: vec![
                 Layer {
-                    name: "Polygons",
+                    name: "Polygons".to_owned(),
                     kind: LayerKind::Polygons,
                     visible: true,
+                    order: 0,
+                    style: GraphStyle::default(),
                 },
                 Layer {
-                    name: "Curves",
+                    name: "Curves".to_owned(),
                     kind: LayerKind::Curves,
                     visible: true,
+                    order: 1,
+                    style: GraphStyle {
+                        color: GraphColor {
+                            r: 239,
+                            g: 188,
+                            b: 84,
+                        },
+                        opacity: 0.85,
+                        stroke_scale: 0.75,
+                    },
                 },
                 Layer {
-                    name: "Debug Output",
+                    name: "Debug Output".to_owned(),
                     kind: LayerKind::Debug,
                     visible: false,
+                    order: 2,
+                    style: GraphStyle {
+                        color: GraphColor {
+                            r: 115,
+                            g: 210,
+                            b: 155,
+                        },
+                        opacity: 0.85,
+                        stroke_scale: 0.75,
+                    },
                 },
             ],
             style: GraphStyle::default(),
@@ -223,8 +245,35 @@ impl GraphDocument {
     pub fn layer_visible(&self, kind: LayerKind) -> bool {
         self.layers
             .iter()
-            .find(|layer| layer.kind == kind)
-            .is_some_and(|layer| layer.visible)
+            .any(|layer| layer.kind == kind && layer.visible)
+    }
+
+    pub fn ordered_layer_views(&self) -> Vec<&Layer> {
+        let mut layers = self.layers.iter().collect::<Vec<_>>();
+        layers.sort_by_key(|layer| layer.order);
+        layers
+    }
+
+    pub fn duplicate_layer_view(&mut self, kind: LayerKind, name: impl Into<String>) -> bool {
+        let Some(source_layer) = self.layers.iter().find(|layer| layer.kind == kind) else {
+            return false;
+        };
+
+        let next_order = self
+            .layers
+            .iter()
+            .map(|layer| layer.order)
+            .max()
+            .unwrap_or_default()
+            + 1;
+        self.layers.push(Layer {
+            name: name.into(),
+            kind,
+            visible: source_layer.visible,
+            order: next_order,
+            style: source_layer.style,
+        });
+        true
     }
 
     pub fn emits(&self, geometry: &Geometry) -> bool {
@@ -471,12 +520,28 @@ impl GraphDocument {
             stroke_scale: style.stroke_scale,
             style,
             items: self
-                .active_geometry()
-                .iter()
-                .filter(|geometry| self.emits(geometry))
-                .map(|geometry| match geometry {
-                    Geometry::Polygon(polygon) => ViewerGeometry::Polygon(polygon.clone()),
-                    Geometry::CubicBezier(curve) => ViewerGeometry::CubicBezier(*curve),
+                .ordered_layer_views()
+                .into_iter()
+                .filter(|layer| layer.visible && layer.kind != LayerKind::Debug)
+                .flat_map(|layer| {
+                    self.active_geometry()
+                        .iter()
+                        .filter(move |geometry| geometry.layer() == layer.kind)
+                        .filter(|geometry| self.passes_filter(geometry))
+                        .map(move |geometry| ViewerItem {
+                            layer: LayerView {
+                                name: layer.name.clone(),
+                                kind: layer.kind,
+                                order: layer.order,
+                                style: layer.style.with_stroke_scale(style.stroke_scale),
+                            },
+                            geometry: match geometry {
+                                Geometry::Polygon(polygon) => {
+                                    ViewerGeometry::Polygon(polygon.clone())
+                                }
+                                Geometry::CubicBezier(curve) => ViewerGeometry::CubicBezier(*curve),
+                            },
+                        })
                 })
                 .collect(),
         }
@@ -520,18 +585,22 @@ impl GraphDocument {
             items: viewer_output
                 .items
                 .into_iter()
-                .map(|geometry| match geometry {
+                .map(|item| match item.geometry {
                     ViewerGeometry::Polygon(polygon) => RerunSceneItem::Polygon {
                         points: polygon.points,
-                        layer: LayerKind::Polygons,
+                        layer: item.layer.kind,
+                        layer_name: item.layer.name,
+                        layer_order: item.layer.order,
                         score: polygon.score,
-                        style,
+                        style: item.layer.style,
                     },
                     ViewerGeometry::CubicBezier(curve) => RerunSceneItem::NativeCubicBezier {
                         curve,
-                        layer: LayerKind::Curves,
+                        layer: item.layer.kind,
+                        layer_name: item.layer.name,
+                        layer_order: item.layer.order,
                         score: curve.score,
-                        style,
+                        style: item.layer.style,
                     },
                 })
                 .collect(),
@@ -545,7 +614,7 @@ impl GraphDocument {
                     }
                 })
                 .chain(self.viewer_output().items.into_iter().filter_map(
-                    |geometry| match geometry {
+                    |item| match item.geometry {
                         ViewerGeometry::Polygon(_) => None,
                         ViewerGeometry::CubicBezier(curve) => Some(
                             RerunSceneDebugItem::NativeCubicControlPolygon(curve.control_points()),
@@ -1181,8 +1250,11 @@ impl HoudiniGraphSidecar {
                 .layers
                 .iter()
                 .map(|layer| LayerSidecar {
+                    name: layer.name.clone(),
                     kind: layer.kind,
                     visible: layer.visible,
+                    order: Some(layer.order),
+                    style: layer.style,
                 })
                 .collect(),
             style: graph.resolved_style(),
@@ -1228,14 +1300,13 @@ impl HoudiniGraphSidecar {
             }
         }
 
-        for layer_snapshot in self.layers {
-            if let Some(layer) = graph
+        if !self.layers.is_empty() {
+            graph.layers = self
                 .layers
-                .iter_mut()
-                .find(|layer| layer.kind == layer_snapshot.kind)
-            {
-                layer.visible = layer_snapshot.visible;
-            }
+                .into_iter()
+                .enumerate()
+                .map(|(index, layer_snapshot)| layer_snapshot.into_layer(index as i32))
+                .collect();
         }
 
         graph.update_source_node_readiness();
@@ -1267,8 +1338,30 @@ struct NodeSidecar {
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct LayerSidecar {
+    #[serde(default)]
+    name: String,
     kind: LayerKind,
     visible: bool,
+    #[serde(default)]
+    order: Option<i32>,
+    #[serde(default)]
+    style: GraphStyle,
+}
+
+impl LayerSidecar {
+    fn into_layer(self, fallback_order: i32) -> Layer {
+        Layer {
+            name: if self.name.is_empty() {
+                self.kind.as_str().to_owned()
+            } else {
+                self.name
+            },
+            kind: self.kind,
+            visible: self.visible,
+            order: self.order.unwrap_or(fallback_order),
+            style: self.style,
+        }
+    }
 }
 
 pub(crate) struct GraphNode {
@@ -1582,9 +1675,11 @@ impl AttributeTableRow {
 }
 
 pub(crate) struct Layer {
-    pub name: &'static str,
+    pub name: String,
     pub kind: LayerKind,
     pub visible: bool,
+    pub order: i32,
+    pub style: GraphStyle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -1699,8 +1794,21 @@ impl CubicBezier {
 }
 
 pub(crate) struct ViewerOutput {
-    pub items: Vec<ViewerGeometry>,
+    pub items: Vec<ViewerItem>,
     pub stroke_scale: f32,
+    pub style: GraphStyle,
+}
+
+pub(crate) struct ViewerItem {
+    pub layer: LayerView,
+    pub geometry: ViewerGeometry,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LayerView {
+    pub name: String,
+    pub kind: LayerKind,
+    pub order: i32,
     pub style: GraphStyle,
 }
 
@@ -1793,12 +1901,16 @@ pub(crate) enum RerunSceneItem {
     Polygon {
         points: Vec<GraphPoint>,
         layer: LayerKind,
+        layer_name: String,
+        layer_order: i32,
         score: f32,
         style: GraphStyle,
     },
     NativeCubicBezier {
         curve: CubicBezier,
         layer: LayerKind,
+        layer_name: String,
+        layer_order: i32,
         score: f32,
         style: GraphStyle,
     },
@@ -1815,6 +1927,22 @@ impl RerunSceneItem {
     pub fn layer(&self) -> LayerKind {
         match self {
             Self::Polygon { layer, .. } | Self::NativeCubicBezier { layer, .. } => *layer,
+        }
+    }
+
+    pub fn layer_name(&self) -> &str {
+        match self {
+            Self::Polygon { layer_name, .. } | Self::NativeCubicBezier { layer_name, .. } => {
+                layer_name
+            }
+        }
+    }
+
+    pub fn layer_order(&self) -> i32 {
+        match self {
+            Self::Polygon { layer_order, .. } | Self::NativeCubicBezier { layer_order, .. } => {
+                *layer_order
+            }
         }
     }
 
@@ -1885,7 +2013,7 @@ mod tests {
             output
                 .items
                 .iter()
-                .any(|geometry| matches!(geometry, ViewerGeometry::CubicBezier(_)))
+                .any(|item| matches!(item.geometry, ViewerGeometry::CubicBezier(_)))
         );
     }
 
@@ -1976,7 +2104,13 @@ mod tests {
         assert_eq!(scene.style.color, graph.style.color);
         assert_eq!(scene.style.opacity, graph.style.opacity);
         assert_eq!(scene.style.stroke_scale, 0.33);
-        assert!(scene.items.iter().all(|item| item.style() == scene.style));
+        assert!(
+            scene
+                .items
+                .iter()
+                .all(|item| item.style().stroke_scale == 0.33)
+        );
+        assert!(scene.items.iter().any(|item| item.layer_name() == "Curves"));
     }
 
     #[test]
@@ -2185,7 +2319,7 @@ mod tests {
                 .viewer_output()
                 .items
                 .iter()
-                .any(|geometry| matches!(geometry, ViewerGeometry::CubicBezier(_)))
+                .any(|item| matches!(item.geometry, ViewerGeometry::CubicBezier(_)))
         );
     }
 
@@ -2311,6 +2445,101 @@ mod tests {
     }
 
     #[test]
+    fn layer_order_controls_viewer_output_order() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .layers
+            .iter_mut()
+            .find(|layer| layer.kind == LayerKind::Polygons)
+            .expect("sample graph should include polygon layer")
+            .order = 10;
+        graph
+            .layers
+            .iter_mut()
+            .find(|layer| layer.kind == LayerKind::Curves)
+            .expect("sample graph should include curve layer")
+            .order = 0;
+
+        let output = graph.viewer_output();
+
+        assert_eq!(output.items.len(), 2);
+        assert_eq!(output.items[0].layer.kind, LayerKind::Curves);
+        assert_eq!(output.items[0].layer.order, 0);
+        assert_eq!(output.items[1].layer.kind, LayerKind::Polygons);
+        assert_eq!(output.items[1].layer.order, 10);
+    }
+
+    #[test]
+    fn duplicate_layer_views_emit_same_native_output_with_distinct_metadata() {
+        let mut graph = GraphDocument::sample();
+        assert!(graph.duplicate_layer_view(LayerKind::Curves, "Curves Copy"));
+
+        let scene = graph.rerun_scene_output();
+        let curve_items = scene
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                RerunSceneItem::NativeCubicBezier {
+                    layer_name,
+                    layer_order,
+                    ..
+                } => Some((layer_name.as_str(), *layer_order)),
+                RerunSceneItem::Polygon { .. } => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(curve_items.len(), 2);
+        assert!(curve_items.contains(&("Curves", 1)));
+        assert!(curve_items.contains(&("Curves Copy", 3)));
+        assert!(
+            scene
+                .items
+                .iter()
+                .any(|item| matches!(item, RerunSceneItem::NativeCubicBezier { .. }))
+        );
+    }
+
+    #[test]
+    fn layer_views_round_trip_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        assert!(graph.duplicate_layer_view(LayerKind::Curves, "Curves Copy"));
+        let duplicate = graph
+            .layers
+            .iter_mut()
+            .find(|layer| layer.name == "Curves Copy")
+            .expect("duplicated layer view should exist");
+        duplicate.order = -2;
+        duplicate.visible = false;
+        duplicate.style = GraphStyle {
+            color: GraphColor { r: 7, g: 8, b: 9 },
+            opacity: 0.4,
+            stroke_scale: 0.6,
+        };
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        let restored_duplicate = restored
+            .layers
+            .iter()
+            .find(|layer| layer.name == "Curves Copy")
+            .expect("duplicated layer view should round trip");
+        assert_eq!(restored.layers.len(), 4);
+        assert_eq!(restored_duplicate.kind, LayerKind::Curves);
+        assert_eq!(restored_duplicate.order, -2);
+        assert!(!restored_duplicate.visible);
+        assert_eq!(
+            restored_duplicate.style,
+            GraphStyle {
+                color: GraphColor { r: 7, g: 8, b: 9 },
+                opacity: 0.4,
+                stroke_scale: 0.6,
+            }
+        );
+    }
+
+    #[test]
     fn recording_query_source_disables_demo_geometry_until_native_geometry_is_imported() {
         let mut graph = GraphDocument::sample();
         let bridge = super::RerunQueryBridge {
@@ -2402,7 +2631,7 @@ mod tests {
                 .viewer_output()
                 .items
                 .iter()
-                .any(|geometry| matches!(geometry, ViewerGeometry::CubicBezier(_)))
+                .any(|item| matches!(item.geometry, ViewerGeometry::CubicBezier(_)))
         );
     }
 

@@ -394,9 +394,11 @@ fn selected_stroke_boost(selected: bool) -> f32 {
 fn selected_item_summary(item: &RerunSceneItem) -> String {
     let style = item.style();
     format!(
-        "Selected: {} in {} layer, score {:.2}, opacity {:.2}, {} {}",
+        "Selected: {} in {} view for {} (order {}), score {:.2}, opacity {:.2}, {} {}",
         item.kind_name(),
-        layer_name(item.layer()),
+        item.layer_name(),
+        item.layer().as_str(),
+        item.layer_order(),
         item.score(),
         style.opacity,
         item.control_or_vertex_count(),
@@ -508,14 +510,6 @@ fn distance_to_segment(point: Pos2, start: Pos2, end: Pos2) -> f32 {
 
     let t = ((point - start).dot(segment) / length_squared).clamp(0.0, 1.0);
     point.distance(start + segment * t)
-}
-
-fn layer_name(layer: LayerKind) -> &'static str {
-    match layer {
-        LayerKind::Polygons => "Polygons",
-        LayerKind::Curves => "Curves",
-        LayerKind::Debug => "Debug",
-    }
 }
 
 fn draw_debug_boundary(
@@ -720,6 +714,8 @@ mod tests {
             items: vec![RerunSceneItem::NativeCubicBezier {
                 curve,
                 layer: LayerKind::Curves,
+                layer_name: "Curves".to_owned(),
+                layer_order: 0,
                 score: curve.score,
                 style: GraphStyle::default(),
             }],
@@ -744,6 +740,8 @@ mod tests {
             items: vec![RerunSceneItem::Polygon {
                 points: vec![point(2.0, 5.0), point(4.0, 5.0)],
                 layer: LayerKind::Polygons,
+                layer_name: "Polygons".to_owned(),
+                layer_order: 0,
                 score: 1.0,
                 style: GraphStyle::default(),
             }],
@@ -766,6 +764,8 @@ mod tests {
             items: vec![RerunSceneItem::Polygon {
                 points: vec![point(0.0, 0.0), point(10.0, 10.0)],
                 layer: LayerKind::Polygons,
+                layer_name: "Polygons".to_owned(),
+                layer_order: 0,
                 score: 1.0,
                 style: GraphStyle::default(),
             }],
@@ -794,6 +794,8 @@ mod tests {
                     point(0.0, 1.0),
                 ],
                 layer: LayerKind::Polygons,
+                layer_name: "Polygons".to_owned(),
+                layer_order: 0,
                 score: 0.75,
                 style: GraphStyle::default(),
             }],
@@ -824,6 +826,8 @@ mod tests {
             items: vec![RerunSceneItem::NativeCubicBezier {
                 curve,
                 layer: LayerKind::Curves,
+                layer_name: "Curves".to_owned(),
+                layer_order: 0,
                 score: curve.score,
                 style: GraphStyle::default(),
             }],

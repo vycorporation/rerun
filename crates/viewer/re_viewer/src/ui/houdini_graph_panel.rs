@@ -9,7 +9,7 @@ pub(crate) mod model;
 
 use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, ExportGeometry, GeometryBounds,
-    GraphDocument, GraphPoint, GraphStyle, NodeStatus, SourceMetadata,
+    GraphDocument, GraphPoint, GraphStyle, LayerKind, NodeStatus, SourceMetadata,
 };
 
 pub(crate) type SharedHoudiniGraph = Arc<Mutex<GraphDocument>>;
@@ -88,9 +88,7 @@ impl HoudiniGraphPanel {
 
             ui.add_space(8.0);
             ui.strong("Layers");
-            for layer in &mut graph.layers {
-                ui.re_checkbox(&mut layer.visible, layer.name);
-            }
+            self.layer_stack_ui(ui, &mut graph);
 
             ui.add_space(8.0);
             ui.strong("Parameters");
@@ -238,6 +236,37 @@ impl HoudiniGraphPanel {
         if let Some(status) = &self.graph_document_status {
             ui.weak(status);
         }
+    }
+
+    fn layer_stack_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.horizontal(|ui| {
+            if ui.button("Duplicate Polygons").clicked() {
+                graph.duplicate_layer_view(LayerKind::Polygons, "Polygons Copy");
+            }
+            if ui.button("Duplicate Curves").clicked() {
+                graph.duplicate_layer_view(LayerKind::Curves, "Curves Copy");
+            }
+        });
+
+        egui::Grid::new("houdini_graph_layer_stack")
+            .num_columns(4)
+            .spacing([10.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.weak("Visible");
+                ui.weak("Order");
+                ui.weak("Name");
+                ui.weak("Kind");
+                ui.end_row();
+
+                for layer in &mut graph.layers {
+                    ui.re_checkbox(&mut layer.visible, "");
+                    ui.add(egui::DragValue::new(&mut layer.order).speed(1));
+                    ui.text_edit_singleline(&mut layer.name);
+                    ui.label(layer.kind.as_str());
+                    ui.end_row();
+                }
+            });
     }
 
     fn import_parquet_path(
