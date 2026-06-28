@@ -303,6 +303,21 @@ impl HoudiniGraphPanel {
         let layout_rect = canvas_rect.shrink2(egui::vec2(12.0, 10.0));
         let node_size = Vec2::new(116.0, 48.0);
         let mut node_rects = layout_node_rects(graph, layout_rect, node_size);
+        let generated_lane_y = layout_rect.top() + layout_rect.height() * 0.82;
+        painter.line_segment(
+            [
+                Pos2::new(layout_rect.left(), generated_lane_y),
+                Pos2::new(layout_rect.right(), generated_lane_y),
+            ],
+            Stroke::new(1.0, ui.visuals().weak_text_color()),
+        );
+        painter.text(
+            Pos2::new(layout_rect.left() + 4.0, generated_lane_y - 14.0),
+            Align2::LEFT_TOP,
+            "Generated",
+            FontId::monospace(10.0),
+            ui.visuals().weak_text_color(),
+        );
 
         if let Some(pointer_pos) = response.interact_pointer_pos() {
             if response.clicked() || response.drag_started() {
@@ -375,6 +390,15 @@ impl HoudiniGraphPanel {
                 FontId::monospace(11.0),
                 ui.visuals().weak_text_color(),
             );
+            if node.generated.is_some() {
+                painter.text(
+                    node_rect.right_top() + egui::vec2(-6.0, 6.0),
+                    Align2::RIGHT_TOP,
+                    "gen",
+                    FontId::monospace(10.0),
+                    ui.visuals().warn_fg_color,
+                );
+            }
         }
 
         response
@@ -427,6 +451,12 @@ impl HoudiniGraphPanel {
                     ui.weak("Attributes");
                     ui.label(format_list(&info.attributes));
                     ui.end_row();
+
+                    if let Some(generated) = info.generated {
+                        ui.weak("Generated");
+                        ui.colored_label(ui.visuals().warn_fg_color, generated.as_str());
+                        ui.end_row();
+                    }
 
                     ui.weak("Parameter");
                     ui.label(format!(

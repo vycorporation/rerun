@@ -32,6 +32,8 @@ pub(crate) struct GraphDocument {
     pub recording_geometry: Vec<Geometry>,
 }
 
+const GENERATED_NODE_LANE_Y: f32 = 0.82;
+
 impl GraphDocument {
     pub fn sample() -> Self {
         let geometry = vec![
@@ -81,6 +83,7 @@ impl GraphDocument {
                     name: "Source",
                     kind: NodeKind::Source,
                     layout_position: GraphPoint::new(0.0, 0.5),
+                    generated: None,
                     parameter: NodeParameter::scalar(
                         "Read",
                         1.0,
@@ -93,6 +96,7 @@ impl GraphDocument {
                     name: "Filter",
                     kind: NodeKind::Filter,
                     layout_position: GraphPoint::new(0.33, 0.5),
+                    generated: None,
                     parameter: NodeParameter::attribute_rule(
                         "Minimum score",
                         "score",
@@ -107,6 +111,7 @@ impl GraphDocument {
                     name: "Style",
                     kind: NodeKind::Style,
                     layout_position: GraphPoint::new(0.66, 0.5),
+                    generated: None,
                     parameter: NodeParameter::scalar(
                         "Stroke scale",
                         0.75,
@@ -119,6 +124,7 @@ impl GraphDocument {
                     name: "Rerun Output",
                     kind: NodeKind::Output,
                     layout_position: GraphPoint::new(1.0, 0.5),
+                    generated: None,
                     parameter: NodeParameter::scalar(
                         "Adaptive segments",
                         1.0,
@@ -350,6 +356,10 @@ impl GraphDocument {
             attribute_name: "score".to_owned(),
             comparison: FilterComparison::GreaterOrEqual,
         });
+        filter_node.layout_position = GraphPoint::new(0.33, GENERATED_NODE_LANE_Y);
+        filter_node.generated = Some(GeneratedNodeInfo {
+            source: GeneratedNodeSource::AttributeTableCommit,
+        });
         true
     }
 
@@ -447,6 +457,7 @@ impl GraphDocument {
                 source_metadata: Some(self.source.metadata.clone()),
                 source_error: self.source.import_error.clone(),
                 style: None,
+                generated: node.generated,
                 warnings: Vec::new(),
             },
             NodeKind::Filter => NodeInfo {
@@ -469,6 +480,7 @@ impl GraphDocument {
                 source_metadata: None,
                 source_error: None,
                 style: None,
+                generated: node.generated,
                 warnings: filter_warnings,
             },
             NodeKind::Style => NodeInfo {
@@ -491,6 +503,7 @@ impl GraphDocument {
                 source_metadata: None,
                 source_error: None,
                 style: Some(self.resolved_style()),
+                generated: node.generated,
                 warnings: style_warnings,
             },
             NodeKind::Output => NodeInfo {
@@ -509,6 +522,7 @@ impl GraphDocument {
                 source_metadata: None,
                 source_error: None,
                 style: None,
+                generated: node.generated,
                 warnings: Vec::new(),
             },
         })
@@ -1244,6 +1258,7 @@ impl HoudiniGraphSidecar {
                     layout_position: node.layout_position,
                     parameter_value: node.parameter.value,
                     parameter_rule: node.parameter.rule_spec.clone(),
+                    generated: node.generated,
                 })
                 .collect(),
             layers: graph
@@ -1297,6 +1312,7 @@ impl HoudiniGraphSidecar {
                 if let Some(parameter_rule) = node_snapshot.parameter_rule {
                     node.parameter.rule_spec = Some(parameter_rule);
                 }
+                node.generated = node_snapshot.generated;
             }
         }
 
@@ -1334,6 +1350,8 @@ struct NodeSidecar {
     parameter_value: f32,
     #[serde(default)]
     parameter_rule: Option<AttributeFilterRuleSpec>,
+    #[serde(default)]
+    generated: Option<GeneratedNodeInfo>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -1368,8 +1386,33 @@ pub(crate) struct GraphNode {
     pub name: &'static str,
     pub kind: NodeKind,
     pub layout_position: GraphPoint,
+    pub generated: Option<GeneratedNodeInfo>,
     pub parameter: NodeParameter,
     pub info: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct GeneratedNodeInfo {
+    pub source: GeneratedNodeSource,
+}
+
+impl GeneratedNodeInfo {
+    pub fn as_str(self) -> &'static str {
+        self.source.as_str()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum GeneratedNodeSource {
+    AttributeTableCommit,
+}
+
+impl GeneratedNodeSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AttributeTableCommit => "Generated from attribute table commit",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1566,6 +1609,7 @@ pub(crate) struct NodeInfo {
     pub source_metadata: Option<SourceMetadata>,
     pub source_error: Option<String>,
     pub style: Option<GraphStyle>,
+    pub generated: Option<GeneratedNodeInfo>,
     pub warnings: Vec<String>,
 }
 
@@ -1974,11 +2018,12 @@ pub(crate) enum RerunSceneDebugItem {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttributeTableQuery, AttributeTableSort, ExportGeometry, Geometry, GeometryKind,
-        GraphColor, GraphDocument, GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema,
-        HoudiniGeometryRecord, HoudiniGeometrySchema, LayerKind, NodeParameterKind, NodeStatus,
-        RerunSceneDebugItem, RerunSceneItem, SourceProvenance, ViewerGeometry,
-        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        AttributeTableQuery, AttributeTableSort, ExportGeometry, GeneratedNodeSource, Geometry,
+        GeometryKind, GraphColor, GraphDocument, GraphPoint, GraphStyle,
+        HoudiniCubicBezierParquetSchema, HoudiniGeometryRecord, HoudiniGeometrySchema, LayerKind,
+        NodeKind, NodeParameterKind, NodeStatus, RerunSceneDebugItem, RerunSceneItem,
+        SourceProvenance, ViewerGeometry, load_cubic_bezier_parquet,
+        load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -2363,6 +2408,59 @@ mod tests {
         assert_eq!(rule.comparison, super::FilterComparison::GreaterOrEqual);
         assert_eq!(rule.value.as_f32(), Some(0.8));
         assert_eq!(graph.visible_output_count(), 1);
+        let filter_node = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+        assert_eq!(
+            filter_node
+                .generated
+                .expect("filter should be generated")
+                .source,
+            GeneratedNodeSource::AttributeTableCommit
+        );
+        assert!(filter_node.layout_position.y >= 0.8);
+        assert_eq!(
+            graph
+                .selected_node_info(1)
+                .expect("filter node info should exist")
+                .generated
+                .expect("filter node info should expose generated metadata")
+                .source,
+            GeneratedNodeSource::AttributeTableCommit
+        );
+    }
+
+    #[test]
+    fn generated_filter_node_remains_editable_as_graph_data() {
+        let mut graph = GraphDocument::sample();
+        assert!(
+            graph.commit_attribute_table_query_as_filter(&AttributeTableQuery {
+                search: String::new(),
+                minimum_score: Some(0.8),
+                sort: AttributeTableSort::RecordIndex,
+                sort_descending: false,
+            })
+        );
+
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == NodeKind::Filter)
+            .expect("generated filter should remain an editable graph node")
+            .parameter
+            .value = 0.6;
+
+        assert_eq!(
+            graph
+                .filter_rule()
+                .expect("generated filter should still expose typed rule")
+                .value
+                .as_f32(),
+            Some(0.6)
+        );
+        assert_eq!(graph.visible_output_count(), 2);
     }
 
     #[test]
@@ -2386,6 +2484,19 @@ mod tests {
             .expect("restored graph should include committed table filter");
         assert_eq!(rule.attribute_name, "score");
         assert_eq!(rule.value.as_f32(), Some(0.8));
+        let restored_filter = restored
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Filter)
+            .expect("restored graph should include filter node");
+        assert_eq!(
+            restored_filter
+                .generated
+                .expect("generated filter metadata should round trip")
+                .source,
+            GeneratedNodeSource::AttributeTableCommit
+        );
+        assert!(restored_filter.layout_position.y >= 0.8);
         assert_eq!(restored.visible_output_count(), 1);
     }
 
