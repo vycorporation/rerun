@@ -32,6 +32,7 @@ pub(crate) struct GraphDocument {
     pub style: GraphStyle,
     pub geometry: Vec<Geometry>,
     pub recording_geometry: Vec<Geometry>,
+    pub python_operator_declarations: Vec<PythonOperatorDeclaration>,
 }
 
 const GENERATED_NODE_LANE_Y: f32 = 0.82;
@@ -186,6 +187,7 @@ impl GraphDocument {
             style: GraphStyle::default(),
             geometry,
             recording_geometry: Vec::new(),
+            python_operator_declarations: Vec::new(),
         }
     }
 
@@ -1547,6 +1549,8 @@ struct HoudiniGraphSidecar {
     style: GraphStyle,
     demo_geometry: Vec<Geometry>,
     recording_geometry: Vec<Geometry>,
+    #[serde(default)]
+    python_operator_declarations: Vec<PythonOperatorDeclaration>,
 }
 
 impl HoudiniGraphSidecar {
@@ -1588,6 +1592,7 @@ impl HoudiniGraphSidecar {
             style: graph.resolved_style(),
             demo_geometry: graph.geometry.clone(),
             recording_geometry: graph.recording_geometry.clone(),
+            python_operator_declarations: graph.python_operator_declarations.clone(),
         }
     }
 
@@ -1611,6 +1616,7 @@ impl HoudiniGraphSidecar {
         graph.geometry = self.demo_geometry;
         graph.recording_geometry = self.recording_geometry;
         graph.style = self.style;
+        graph.python_operator_declarations = self.python_operator_declarations;
 
         for node_snapshot in self.nodes {
             if let Some(node) = graph
@@ -1745,6 +1751,115 @@ impl EvaluationState {
             Self::Manual => "Manual",
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonOperatorDeclaration {
+    pub operator_id: String,
+    pub display_name: String,
+    pub version: String,
+    pub entry_point: PythonOperatorEntryPoint,
+    pub inputs: Vec<PythonOperatorPort>,
+    pub outputs: Vec<PythonOperatorPort>,
+    pub parameters: Vec<PythonOperatorParameterDeclaration>,
+    pub dependencies: PythonOperatorDependencies,
+    pub capabilities: Vec<PythonOperatorCapability>,
+    pub help: String,
+}
+
+impl PythonOperatorDeclaration {
+    #[allow(dead_code)]
+    pub fn cache_key_material(&self) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "operator_id": &self.operator_id,
+            "version": &self.version,
+            "entry_point": &self.entry_point,
+            "inputs": &self.inputs,
+            "outputs": &self.outputs,
+            "parameters": &self.parameters,
+            "dependencies": &self.dependencies,
+            "capabilities": &self.capabilities,
+        }))
+        .unwrap_or_else(|err| format!("invalid-python-operator:{err}"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonOperatorEntryPoint {
+    pub source: PythonOperatorSource,
+    pub callable: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum PythonOperatorSource {
+    File { path: String },
+    Module { module: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonOperatorPort {
+    pub name: String,
+    pub data_kind: PythonOperatorDataKind,
+    pub help: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum PythonOperatorDataKind {
+    GeometryTable,
+    AttributeTable,
+    Scalar,
+    String,
+    LayerStyle,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonOperatorParameterDeclaration {
+    pub name: String,
+    pub kind: PythonOperatorParameterKind,
+    pub default_value: PythonOperatorParameterValue,
+    pub range: Option<PythonOperatorNumericRange>,
+    pub allowed_values: Vec<String>,
+    pub invalidates_cache: bool,
+    pub help: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum PythonOperatorParameterKind {
+    Float,
+    Bool,
+    String,
+    Enum,
+    FilePath,
+    AttributeSelector,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum PythonOperatorParameterValue {
+    Float(f32),
+    Bool(bool),
+    String(String),
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonOperatorNumericRange {
+    pub min: f32,
+    pub max: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonOperatorDependencies {
+    pub python_version: Option<String>,
+    pub requirements: Vec<String>,
+    pub extras: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum PythonOperatorCapability {
+    FileRead,
+    FileWrite,
+    Network,
+    Subprocess,
+    Gpu,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -2608,7 +2723,11 @@ mod tests {
         GeneratedNodeSource, Geometry, GeometryKind, GraphColor, GraphDocument, GraphNode,
         GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema, HoudiniGeometryRecord,
         HoudiniGeometrySchema, LayerKind, NodeEvaluation, NodeKind, NodeParameter,
-        NodeParameterKind, NodeStatus, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
+        NodeParameterKind, NodeStatus, PythonOperatorCapability, PythonOperatorDataKind,
+        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorEntryPoint,
+        PythonOperatorNumericRange, PythonOperatorParameterDeclaration,
+        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
+        PythonOperatorSource, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
         ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
@@ -3828,6 +3947,64 @@ mod tests {
     }
 
     #[test]
+    fn python_operator_declarations_round_trip_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(restored.python_operator_declarations.len(), 1);
+        assert_eq!(
+            restored.python_operator_declarations[0],
+            graph.python_operator_declarations[0]
+        );
+        assert!(json.contains("python_operator_declarations"));
+        assert!(json.contains("vy.blur_curves"));
+    }
+
+    #[test]
+    fn python_operator_declaration_cache_material_tracks_relevant_fields() {
+        let declaration = sample_python_operator_declaration();
+        let original_material = declaration.cache_key_material();
+        let mut renamed = declaration.clone();
+        renamed.display_name = "Blur curves harder".to_owned();
+        renamed.help = "Updated operator help text.".to_owned();
+        let mut changed_dependency = declaration.clone();
+        changed_dependency
+            .dependencies
+            .requirements
+            .push("scipy==1.13.0".to_owned());
+        let mut changed_parameter = declaration.clone();
+        changed_parameter.parameters[0].default_value = PythonOperatorParameterValue::Float(2.0);
+
+        assert_eq!(original_material, renamed.cache_key_material());
+        assert_ne!(original_material, changed_dependency.cache_key_material());
+        assert_ne!(original_material, changed_parameter.cache_key_material());
+    }
+
+    #[test]
+    fn sidecar_without_python_operator_declarations_still_loads() {
+        let graph = GraphDocument::sample();
+        let mut value =
+            serde_json::from_str::<serde_json::Value>(&graph.to_sidecar_json().unwrap())
+                .expect("sidecar should be valid json");
+        value
+            .as_object_mut()
+            .expect("sidecar should be an object")
+            .remove("python_operator_declarations");
+        let json = serde_json::to_string_pretty(&value).unwrap();
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert!(restored.python_operator_declarations.is_empty());
+    }
+
+    #[test]
     fn sidecar_json_does_not_persist_adaptive_export_polyline() {
         let mut graph = GraphDocument::sample();
         graph
@@ -3850,6 +4027,49 @@ mod tests {
         assert!(!json.contains("Polyline"));
         assert!(!json.contains("PreparedExportPolyline"));
         assert!(json.contains("CubicBezier"));
+    }
+
+    fn sample_python_operator_declaration() -> PythonOperatorDeclaration {
+        PythonOperatorDeclaration {
+            operator_id: "vy.blur_curves".to_owned(),
+            display_name: "Blur curves".to_owned(),
+            version: "0.1.0".to_owned(),
+            entry_point: PythonOperatorEntryPoint {
+                source: PythonOperatorSource::File {
+                    path: "operators/blur_curves.py".to_owned(),
+                },
+                callable: "run".to_owned(),
+            },
+            inputs: vec![PythonOperatorPort {
+                name: "geometry".to_owned(),
+                data_kind: PythonOperatorDataKind::GeometryTable,
+                help: "Input polygons and native cubic Beziers.".to_owned(),
+            }],
+            outputs: vec![PythonOperatorPort {
+                name: "geometry".to_owned(),
+                data_kind: PythonOperatorDataKind::GeometryTable,
+                help: "Output polygons and native cubic Beziers.".to_owned(),
+            }],
+            parameters: vec![PythonOperatorParameterDeclaration {
+                name: "radius".to_owned(),
+                kind: PythonOperatorParameterKind::Float,
+                default_value: PythonOperatorParameterValue::Float(1.5),
+                range: Some(PythonOperatorNumericRange {
+                    min: 0.0,
+                    max: 10.0,
+                }),
+                allowed_values: Vec::new(),
+                invalidates_cache: true,
+                help: "Blur radius in graph units.".to_owned(),
+            }],
+            dependencies: PythonOperatorDependencies {
+                python_version: Some(">=3.11,<3.13".to_owned()),
+                requirements: vec!["numpy==2.0.0".to_owned()],
+                extras: vec!["cv".to_owned()],
+            },
+            capabilities: vec![PythonOperatorCapability::FileRead],
+            help: "Smooths curve control points without mutating viewer state.".to_owned(),
+        }
     }
 
     fn write_cubic_bezier_parquet(columns: &[(&str, Vec<f64>)]) -> tempfile::NamedTempFile {
