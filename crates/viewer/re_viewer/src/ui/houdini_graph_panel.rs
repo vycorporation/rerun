@@ -1,6 +1,5 @@
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use egui::epaint::CubicBezierShape;
 use egui::{
     Align2, Color32, FontId, Pos2, Rect, Response, Sense, Slider, Stroke, StrokeKind, Ui, Vec2,
 };
@@ -8,7 +7,7 @@ use re_ui::UiExt as _;
 
 pub(crate) mod model;
 
-use self::model::{ExportGeometry, GraphDocument, GraphPoint, LayerKind, ViewerGeometry};
+use self::model::{ExportGeometry, GraphDocument, GraphPoint};
 
 static SHARED_HOUDINI_GRAPH: LazyLock<Mutex<GraphDocument>> =
     LazyLock::new(|| Mutex::new(GraphDocument::sample()));
@@ -69,10 +68,6 @@ impl HoudiniGraphPanel {
             ui.add_space(8.0);
             ui.strong("Pipeline Trace");
             self.pipeline_trace_ui(ui, &graph);
-
-            ui.add_space(8.0);
-            ui.strong("Viewer Output Preview");
-            self.output_preview_ui(ui, &graph);
 
             ui.add_space(8.0);
             ui.strong("Graph Model");
@@ -248,125 +243,6 @@ impl HoudiniGraphPanel {
                 }
             });
     }
-
-    fn output_preview_ui(&self, ui: &mut Ui, graph: &GraphDocument) -> Response {
-        let desired_size = egui::vec2(ui.available_width().max(280.0), 150.0);
-        let (response, painter) = ui.allocate_painter(desired_size, Sense::hover());
-        let rect = response.rect.shrink(4.0);
-        let bg = ui.visuals().extreme_bg_color;
-        let border = ui.visuals().widgets.noninteractive.bg_stroke;
-
-        painter.rect_filled(rect, 4.0, bg);
-        painter.rect_stroke(rect, 4.0, border, StrokeKind::Inside);
-
-        let viewport = rect.shrink2(egui::vec2(16.0, 14.0));
-        let output = graph.viewer_output();
-        let debug_visible = graph.layer_visible(LayerKind::Debug);
-
-        if debug_visible {
-            self.debug_output_preview_ui(ui, viewport, graph);
-        }
-
-        for geometry in &output.items {
-            match geometry {
-                ViewerGeometry::Polygon(polygon) => {
-                    let points = polygon
-                        .points
-                        .iter()
-                        .map(|point| map_preview_point(viewport, *point))
-                        .collect::<Vec<_>>();
-                    painter.add(egui::Shape::convex_polygon(
-                        points.clone(),
-                        Color32::from_rgba_unmultiplied(38, 125, 255, 45),
-                        Stroke::new(
-                            1.0 + 3.0 * output.stroke_scale,
-                            Color32::from_rgb(91, 169, 255),
-                        ),
-                    ));
-                    for point in points {
-                        painter.circle_filled(point, 3.0, Color32::from_rgb(131, 192, 255));
-                    }
-                }
-                ViewerGeometry::CubicBezier(curve) => {
-                    let points = curve
-                        .control_points()
-                        .map(|point| map_preview_point(viewport, point));
-                    painter.add(CubicBezierShape {
-                        points,
-                        closed: false,
-                        fill: Color32::TRANSPARENT,
-                        stroke: Stroke::new(
-                            1.0 + 4.0 * output.stroke_scale,
-                            Color32::from_rgb(239, 188, 84),
-                        )
-                        .into(),
-                    });
-                    for point in points {
-                        painter.circle_filled(point, 2.5, Color32::from_rgb(250, 212, 124));
-                    }
-                }
-            }
-        }
-
-        painter.text(
-            rect.left_top() + egui::vec2(8.0, 8.0),
-            Align2::LEFT_TOP,
-            format!("{} emitted", graph.visible_output_count()),
-            FontId::monospace(11.0),
-            ui.visuals().weak_text_color(),
-        );
-
-        response
-    }
-
-    fn debug_output_preview_ui(&self, ui: &mut Ui, viewport: Rect, graph: &GraphDocument) {
-        let painter = ui.painter();
-        let control_stroke = Stroke::new(1.0, Color32::from_rgb(150, 150, 150));
-        let export_stroke = Stroke::new(1.0, Color32::from_rgb(115, 210, 155));
-        let export_output = graph.adaptive_export_output();
-
-        for geometry in &export_output.items {
-            if let ExportGeometry::Polyline(points) = geometry {
-                for pair in points.windows(2) {
-                    painter.line_segment(
-                        [
-                            map_preview_point(viewport, pair[0]),
-                            map_preview_point(viewport, pair[1]),
-                        ],
-                        export_stroke,
-                    );
-                }
-                for point in points {
-                    painter.circle_filled(
-                        map_preview_point(viewport, *point),
-                        1.5,
-                        Color32::from_rgb(115, 210, 155),
-                    );
-                }
-            }
-        }
-
-        for geometry in &graph.viewer_output().items {
-            if let ViewerGeometry::CubicBezier(curve) = geometry {
-                let control_points = curve.control_points();
-                for pair in control_points.windows(2) {
-                    painter.line_segment(
-                        [
-                            map_preview_point(viewport, pair[0]),
-                            map_preview_point(viewport, pair[1]),
-                        ],
-                        control_stroke,
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn map_preview_point(rect: Rect, point: GraphPoint) -> Pos2 {
-    let x = rect.left() + point.x * rect.width();
-    let y = rect.bottom() - point.y * rect.height();
-    Pos2::new(x, y)
 }
 
 fn map_node_layout_point(rect: Rect, point: GraphPoint, node_size: Vec2) -> Pos2 {
