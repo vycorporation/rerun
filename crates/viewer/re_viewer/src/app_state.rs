@@ -66,6 +66,8 @@ pub struct AppState {
     blueprint_tree: re_blueprint_tree::BlueprintTree,
     #[serde(skip)]
     pub(crate) recording_panel: re_recording_panel::RecordingPanel,
+    #[serde(skip)]
+    houdini_graph_panel: crate::ui::HoudiniGraphPanel,
 
     #[serde(skip)]
     welcome_screen: crate::ui::WelcomeScreen,
@@ -144,6 +146,7 @@ impl Default for AppState {
             time_panel: Default::default(),
             blueprint_time_panel: re_time_panel::TimePanel::new_blueprint_panel(),
             recording_panel: Default::default(),
+            houdini_graph_panel: Default::default(),
             blueprint_tree: Default::default(),
             welcome_screen: Default::default(),
             datastore_ui: Default::default(),
@@ -536,6 +539,7 @@ impl AppState {
 
                 Self::left_panel_ui(
                     &mut self.recording_panel,
+                    &mut self.houdini_graph_panel,
                     blueprint_tree,
                     redap_servers,
                     view_states,
@@ -573,6 +577,7 @@ impl AppState {
             Route::Loading(log_source) => {
                 Self::left_panel_ui(
                     &mut self.recording_panel,
+                    &mut self.houdini_graph_panel,
                     &mut self.blueprint_tree,
                     &self.redap_servers,
                     &self.view_states,
@@ -615,6 +620,7 @@ impl AppState {
             Route::LocalTable(table_id) => {
                 Self::left_panel_ui(
                     &mut self.recording_panel,
+                    &mut self.houdini_graph_panel,
                     &mut self.blueprint_tree,
                     &self.redap_servers,
                     &self.view_states,
@@ -653,6 +659,7 @@ impl AppState {
             Route::RedapServer(origin) => {
                 Self::left_panel_ui(
                     &mut self.recording_panel,
+                    &mut self.houdini_graph_panel,
                     &mut self.blueprint_tree,
                     &self.redap_servers,
                     &self.view_states,
@@ -714,6 +721,7 @@ impl AppState {
             } => {
                 Self::left_panel_ui(
                     &mut self.recording_panel,
+                    &mut self.houdini_graph_panel,
                     &mut self.blueprint_tree,
                     &self.redap_servers,
                     &self.view_states,
@@ -742,6 +750,7 @@ impl AppState {
             } => {
                 Self::left_panel_ui(
                     &mut self.recording_panel,
+                    &mut self.houdini_graph_panel,
                     &mut self.blueprint_tree,
                     &self.redap_servers,
                     &self.view_states,
@@ -885,6 +894,7 @@ impl AppState {
     #[expect(clippy::too_many_arguments)]
     fn left_panel_ui(
         recording_panel: &mut re_recording_panel::RecordingPanel,
+        houdini_graph_panel: &mut crate::ui::HoudiniGraphPanel,
         blueprint_tree: &mut re_blueprint_tree::BlueprintTree,
         redap_servers: &RedapServers,
         view_states: &ViewStates,
@@ -955,6 +965,10 @@ impl AppState {
                                 welcome_screen_state.hide_examples,
                             );
                         }
+
+                        ui.separator();
+                        houdini_graph_panel.show(ui);
+                        ui.separator();
 
                         if let Some((viewport_ui, ctx)) = viewport {
                             blueprint_tree.show(ctx, &viewport_ui.blueprint, ui, view_states);

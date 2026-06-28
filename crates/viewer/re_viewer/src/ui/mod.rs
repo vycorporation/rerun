@@ -1,3 +1,4 @@
+mod houdini_graph_panel;
 mod mobile_warning_ui;
 mod open_url_modal;
 mod rerun_menu;
@@ -16,6 +17,7 @@ pub(crate) use open_url_modal::OpenUrlModal;
 pub(crate) use settings_screen::settings_screen_ui;
 pub(crate) use share_modal::ShareModal;
 
+pub(crate) use self::houdini_graph_panel::HoudiniGraphPanel;
 pub(crate) use self::mobile_warning_ui::mobile_warning_ui;
 pub(crate) use self::top_panel::top_panel;
 pub(crate) use self::welcome_screen::WelcomeScreen;
