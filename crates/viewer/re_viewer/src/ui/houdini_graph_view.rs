@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use egui::epaint::CubicBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind};
 use re_sdk_types::ViewClassIdentifier;
@@ -24,6 +26,18 @@ pub(crate) struct HoudiniGraphView;
 #[derive(Default)]
 struct HoudiniGraphViewState {
     selected_item_index: Option<usize>,
+    last_frame_stats: Option<HoudiniFrameStats>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct HoudiniFrameStats {
+    scene_prepare_micros: u128,
+    draw_enqueue_micros: u128,
+    item_count: usize,
+    polygon_count: usize,
+    native_cubic_bezier_count: usize,
+    graph_owned_point_count: usize,
+    prepared_boundary_debug_point_count: usize,
 }
 
 impl ViewState for HoudiniGraphViewState {
@@ -159,6 +173,23 @@ impl ViewClass for HoudiniGraphView {
                 "{} adaptive export segments at the current output boundary",
                 graph.export_segments()
             ));
+            if let Some(stats) = state
+                .downcast_ref::<HoudiniGraphViewState>()?
+                .last_frame_stats
+            {
+                ui.label(format!(
+                    "Last frame: {} items ({} polygons, {} native cubics), prepare {:.2} ms, draw enqueue {:.2} ms",
+                    stats.item_count,
+                    stats.polygon_count,
+                    stats.native_cubic_bezier_count,
+                    stats.scene_prepare_micros as f32 / 1_000.0,
+                    stats.draw_enqueue_micros as f32 / 1_000.0
+                ));
+                ui.label(format!(
+                    "{} graph-owned points, {} prepared boundary/debug points",
+                    stats.graph_owned_point_count, stats.prepared_boundary_debug_point_count
+                ));
+            }
             if let Some(item_index) = state
                 .downcast_ref::<HoudiniGraphViewState>()?
                 .selected_item_index
@@ -194,8 +225,10 @@ impl ViewClass for HoudiniGraphView {
         if let Some(shared_graph) = shared_houdini_graph_from_context(ui.ctx()) {
             let query_bridge = query_bridge_from_view_query(ctx, query);
             let mut graph = lock_houdini_graph(&shared_graph);
+            let scene_prepare_start = Instant::now();
             graph.update_source_from_query_bridge(&query_bridge);
             let scene = graph.rerun_scene_output_with_query_bridge(Some(query_bridge));
+            let scene_prepare_micros = scene_prepare_start.elapsed().as_micros();
             let view_transform =
                 HoudiniViewTransform::from_scene(&scene, rect.shrink2(egui::vec2(24.0, 22.0)));
 
@@ -207,14 +240,15 @@ impl ViewClass for HoudiniGraphView {
                     .send_system(SystemCommand::set_selection(Item::View(query.view_id)));
             }
 
-            draw_houdini_output_view(
+            state.last_frame_stats = Some(draw_houdini_output_view(
                 ui,
                 rect,
                 &graph,
                 scene,
                 view_transform,
                 state.selected_item_index,
-            );
+                scene_prepare_micros,
+            ));
         } else {
             if response.clicked() {
                 ctx.command_sender()
@@ -264,7 +298,15 @@ fn draw_houdini_output_view(
     scene: RerunSceneOutput,
     view_transform: HoudiniViewTransform,
     selected_item_index: Option<usize>,
-) {
+    scene_prepare_micros: u128,
+) -> HoudiniFrameStats {
+    let draw_start = Instant::now();
+    let item_count = scene.items.len();
+    let polygon_count = scene.polygon_count();
+    let native_cubic_bezier_count = scene.native_cubic_bezier_count();
+    let graph_owned_point_count = scene.graph_owned_point_count();
+    let prepared_boundary_debug_point_count = scene.prepared_boundary_debug_point_count();
+
     ui.painter()
         .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
 
@@ -319,10 +361,7 @@ fn draw_houdini_output_view(
         Align2::LEFT_TOP,
         format!(
             "{} emitted, {} export segments per cubic, stroke {:.2}, opacity {:.2}",
-            scene.items.len(),
-            scene.export_segments,
-            scene.stroke_scale,
-            scene.style.opacity
+            item_count, scene.export_segments, scene.stroke_scale, scene.style.opacity
         ),
         FontId::monospace(11.0),
         ui.visuals().weak_text_color(),
@@ -350,6 +389,33 @@ fn draw_houdini_output_view(
             FontId::monospace(11.0),
             ui.visuals().text_color(),
         );
+    }
+    let stats_line_y = if selected_item_index.is_some() {
+        86.0
+    } else {
+        68.0
+    };
+    ui.painter().text(
+        rect.left_top() + egui::vec2(14.0, stats_line_y),
+        Align2::LEFT_TOP,
+        format!(
+            "native benchmark: {} graph points, {} boundary/debug points, prepare {:.2} ms",
+            graph_owned_point_count,
+            prepared_boundary_debug_point_count,
+            scene_prepare_micros as f32 / 1_000.0
+        ),
+        FontId::monospace(11.0),
+        ui.visuals().weak_text_color(),
+    );
+
+    HoudiniFrameStats {
+        scene_prepare_micros,
+        draw_enqueue_micros: draw_start.elapsed().as_micros(),
+        item_count,
+        polygon_count,
+        native_cubic_bezier_count,
+        graph_owned_point_count,
+        prepared_boundary_debug_point_count,
     }
 }
 

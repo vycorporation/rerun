@@ -667,6 +667,35 @@ impl GraphDocument {
         }
     }
 
+    pub fn render_feasibility_summary(&self) -> RenderFeasibilitySummary {
+        let scene = self.rerun_scene_output_with_query_bridge(None);
+        RenderFeasibilitySummary::from_scene(&scene)
+    }
+
+    pub fn load_synthetic_render_benchmark(
+        &mut self,
+        native_cubic_bezier_count: usize,
+        polygon_count: usize,
+    ) -> RenderFeasibilitySummary {
+        let geometry =
+            synthetic_render_benchmark_geometry(native_cubic_bezier_count, polygon_count);
+        self.source = GraphSource::recording_import(
+            geometry.len(),
+            Some(format!(
+                "synthetic native render benchmark: {native_cubic_bezier_count} cubics, {polygon_count} polygons"
+            )),
+            SourceMetadata::from_geometry(
+                SourceProvenance::SyntheticBenchmark,
+                None,
+                &geometry,
+                Vec::new(),
+            ),
+        );
+        self.recording_geometry = geometry;
+        self.update_source_node_readiness();
+        self.render_feasibility_summary()
+    }
+
     #[cfg(test)]
     pub fn rerun_scene_output(&self) -> RerunSceneOutput {
         self.rerun_scene_output_with_query_bridge(None)
@@ -1281,6 +1310,7 @@ pub(crate) enum SourceProvenance {
     DemoFallback,
     ParquetImport,
     RecordingQuery,
+    SyntheticBenchmark,
 }
 
 impl SourceProvenance {
@@ -1289,6 +1319,7 @@ impl SourceProvenance {
             Self::DemoFallback => "demo fallback",
             Self::ParquetImport => "parquet import",
             Self::RecordingQuery => "recording query",
+            Self::SyntheticBenchmark => "synthetic benchmark",
         }
     }
 }
@@ -2131,6 +2162,20 @@ impl RerunSceneOutput {
             .count()
     }
 
+    pub fn graph_owned_point_count(&self) -> usize {
+        self.items
+            .iter()
+            .map(RerunSceneItem::control_or_vertex_count)
+            .sum()
+    }
+
+    pub fn prepared_boundary_debug_point_count(&self) -> usize {
+        self.debug_items
+            .iter()
+            .map(RerunSceneDebugItem::point_count)
+            .sum()
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn recording_metadata_markdown(&self, graph: &GraphDocument) -> String {
         let source_path = graph
@@ -2167,6 +2212,29 @@ impl RerunSceneOutput {
         }
 
         markdown
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RenderFeasibilitySummary {
+    pub native_viewer_primitive_count: usize,
+    pub polygon_count: usize,
+    pub native_cubic_bezier_count: usize,
+    pub graph_owned_point_count: usize,
+    pub prepared_boundary_debug_point_count: usize,
+    pub export_segments_per_cubic: usize,
+}
+
+impl RenderFeasibilitySummary {
+    fn from_scene(scene: &RerunSceneOutput) -> Self {
+        Self {
+            native_viewer_primitive_count: scene.items.len(),
+            polygon_count: scene.polygon_count(),
+            native_cubic_bezier_count: scene.native_cubic_bezier_count(),
+            graph_owned_point_count: scene.graph_owned_point_count(),
+            prepared_boundary_debug_point_count: scene.prepared_boundary_debug_point_count(),
+            export_segments_per_cubic: scene.export_segments,
+        }
     }
 }
 
@@ -2360,6 +2428,63 @@ impl RerunSceneItem {
 pub(crate) enum RerunSceneDebugItem {
     NativeCubicControlPolygon([GraphPoint; 4]),
     PreparedExportPolyline(Vec<GraphPoint>),
+}
+
+impl RerunSceneDebugItem {
+    fn point_count(&self) -> usize {
+        match self {
+            Self::NativeCubicControlPolygon(points) => points.len(),
+            Self::PreparedExportPolyline(points) => points.len(),
+        }
+    }
+}
+
+fn synthetic_render_benchmark_geometry(
+    native_cubic_bezier_count: usize,
+    polygon_count: usize,
+) -> Vec<Geometry> {
+    let total = native_cubic_bezier_count.saturating_add(polygon_count);
+    let mut geometry = Vec::with_capacity(total);
+    let columns = ((total as f32).sqrt().ceil() as usize).max(1);
+    let cell = 1.0 / columns as f32;
+
+    for index in 0..native_cubic_bezier_count {
+        let origin = benchmark_cell_origin(index, columns, cell);
+        let wobble = ((index % 11) as f32) * cell * 0.01;
+        geometry.push(Geometry::CubicBezier(CubicBezier {
+            start: GraphPoint::new(origin.x + cell * 0.10, origin.y + cell * 0.18),
+            control_1: GraphPoint::new(origin.x + cell * 0.32, origin.y + cell * (0.88 - wobble)),
+            control_2: GraphPoint::new(origin.x + cell * 0.70, origin.y + cell * (0.12 + wobble)),
+            end: GraphPoint::new(origin.x + cell * 0.92, origin.y + cell * 0.78),
+            score: benchmark_score(index),
+        }));
+    }
+
+    for polygon_index in 0..polygon_count {
+        let index = native_cubic_bezier_count + polygon_index;
+        let origin = benchmark_cell_origin(index, columns, cell);
+        geometry.push(Geometry::Polygon(Polygon {
+            points: vec![
+                GraphPoint::new(origin.x + cell * 0.16, origin.y + cell * 0.16),
+                GraphPoint::new(origin.x + cell * 0.86, origin.y + cell * 0.20),
+                GraphPoint::new(origin.x + cell * 0.78, origin.y + cell * 0.82),
+                GraphPoint::new(origin.x + cell * 0.22, origin.y + cell * 0.74),
+            ],
+            score: benchmark_score(index),
+        }));
+    }
+
+    geometry
+}
+
+fn benchmark_cell_origin(index: usize, columns: usize, cell: f32) -> GraphPoint {
+    let column = index % columns;
+    let row = index / columns;
+    GraphPoint::new(column as f32 * cell, row as f32 * cell)
+}
+
+fn benchmark_score(index: usize) -> f32 {
+    0.55 + ((index % 100) as f32 / 250.0)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2588,6 +2713,44 @@ mod tests {
             graph.cubic_control_point_count(),
             graph.cubic_bezier_count() * 4
         );
+    }
+
+    #[test]
+    fn synthetic_render_benchmark_loads_native_geometry() {
+        let mut graph = GraphDocument::sample();
+
+        let summary = graph.load_synthetic_render_benchmark(128, 16);
+        let scene = graph.rerun_scene_output();
+
+        assert_eq!(
+            graph.source.metadata.provenance,
+            SourceProvenance::SyntheticBenchmark
+        );
+        assert_eq!(summary.native_cubic_bezier_count, 128);
+        assert_eq!(summary.polygon_count, 16);
+        assert_eq!(scene.native_cubic_bezier_count(), 128);
+        assert_eq!(scene.polygon_count(), 16);
+        assert!(
+            graph
+                .recording_geometry
+                .iter()
+                .any(|geometry| matches!(geometry, Geometry::CubicBezier(_)))
+        );
+        assert_eq!(graph.cubic_control_point_count(), 128 * 4);
+    }
+
+    #[test]
+    fn render_feasibility_summary_labels_boundary_debug_points() {
+        let mut graph = GraphDocument::sample();
+        let summary = graph.load_synthetic_render_benchmark(10, 2);
+
+        assert_eq!(summary.native_viewer_primitive_count, 12);
+        assert_eq!(summary.graph_owned_point_count, 10 * 4 + 2 * 4);
+        assert_eq!(
+            summary.prepared_boundary_debug_point_count,
+            10 * (summary.export_segments_per_cubic + 1) + 10 * 4
+        );
+        assert!(summary.prepared_boundary_debug_point_count > summary.graph_owned_point_count);
     }
 
     #[test]

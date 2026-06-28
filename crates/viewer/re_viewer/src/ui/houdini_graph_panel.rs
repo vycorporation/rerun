@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use egui::{
-    Align2, Color32, FontId, Pos2, Rect, Response, Sense, Slider, Stroke, StrokeKind, Ui, Vec2,
+    Align2, Color32, DragValue, FontId, Pos2, Rect, Response, Sense, Slider, Stroke, StrokeKind,
+    Ui, Vec2,
 };
 use re_ui::UiExt as _;
 
@@ -45,6 +46,9 @@ pub(crate) struct HoudiniGraphPanel {
     parquet_status: Option<String>,
     graph_document_status: Option<String>,
     recording_status: Option<String>,
+    benchmark_status: Option<String>,
+    benchmark_curve_count: usize,
+    benchmark_polygon_count: usize,
     table_search: String,
     table_minimum_score_enabled: bool,
     table_minimum_score: f32,
@@ -62,6 +66,9 @@ impl Default for HoudiniGraphPanel {
             parquet_status: None,
             graph_document_status: None,
             recording_status: None,
+            benchmark_status: None,
+            benchmark_curve_count: 10_000,
+            benchmark_polygon_count: 1_000,
             table_search: String::new(),
             table_minimum_score_enabled: false,
             table_minimum_score: 0.0,
@@ -119,6 +126,7 @@ impl HoudiniGraphPanel {
             ui.add_space(8.0);
             ui.strong("Graph Model");
             self.parquet_import_ui(ui, &mut graph);
+            self.render_benchmark_ui(ui, &mut graph);
             self.graph_document_ui(ui, &mut graph);
             self.recording_export_ui(ui, &graph);
             ui.add_space(6.0);
@@ -169,6 +177,15 @@ impl HoudiniGraphPanel {
                 "{} prepared export points at output boundary",
                 export_polyline_points
             ));
+            let feasibility = graph.render_feasibility_summary();
+            ui.label(format!(
+                "{} native viewer primitives, {} graph-owned control/vertex points",
+                feasibility.native_viewer_primitive_count, feasibility.graph_owned_point_count
+            ));
+            ui.label(format!(
+                "{} prepared boundary/debug points (not stored graph geometry)",
+                feasibility.prepared_boundary_debug_point_count
+            ));
             ui.label(format!(
                 "{} adaptive segments per emitted cubic at boundary",
                 graph.export_segments()
@@ -196,6 +213,40 @@ impl HoudiniGraphPanel {
             ui.weak(path);
         }
         if let Some(status) = &self.parquet_status {
+            ui.weak(status);
+        }
+    }
+
+    fn render_benchmark_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.horizontal(|ui| {
+            ui.label("Benchmark curves");
+            ui.add(
+                DragValue::new(&mut self.benchmark_curve_count)
+                    .range(0..=50_000)
+                    .speed(100),
+            );
+            ui.label("polygons");
+            ui.add(
+                DragValue::new(&mut self.benchmark_polygon_count)
+                    .range(0..=20_000)
+                    .speed(25),
+            );
+
+            if ui.button("Load Benchmark").clicked() {
+                let report = graph.load_synthetic_render_benchmark(
+                    self.benchmark_curve_count,
+                    self.benchmark_polygon_count,
+                );
+                self.benchmark_status = Some(format!(
+                    "Loaded {} native cubics and {} polygons; {} prepared boundary/debug points are derived only at viewer/export edges.",
+                    report.native_cubic_bezier_count,
+                    report.polygon_count,
+                    report.prepared_boundary_debug_point_count
+                ));
+            }
+        });
+
+        if let Some(status) = &self.benchmark_status {
             ui.weak(status);
         }
     }
