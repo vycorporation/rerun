@@ -37,11 +37,15 @@ fn shared_houdini_graph_id() -> egui::Id {
 
 pub(crate) struct HoudiniGraphPanel {
     selected_node: usize,
+    dragging_node: Option<usize>,
 }
 
 impl Default for HoudiniGraphPanel {
     fn default() -> Self {
-        Self { selected_node: 1 }
+        Self {
+            selected_node: 1,
+            dragging_node: None,
+        }
     }
 }
 
@@ -59,7 +63,7 @@ impl HoudiniGraphPanel {
             ui.add_space(6.0);
 
             ui.strong("Graph Canvas");
-            self.node_graph_ui(ui, &graph);
+            self.node_graph_ui(ui, &mut graph);
 
             ui.add_space(8.0);
             ui.strong("Layers");
@@ -123,32 +127,52 @@ impl HoudiniGraphPanel {
         });
     }
 
-    fn node_graph_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) -> Response {
+    fn node_graph_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) -> Response {
         let desired_size = egui::vec2(ui.available_width().max(280.0), 176.0);
-        let (response, painter) = ui.allocate_painter(desired_size, Sense::click());
-        let rect = response.rect;
-        painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+        let (response, painter) = ui.allocate_painter(desired_size, Sense::click_and_drag());
+        let canvas_rect = response.rect;
+        painter.rect_filled(canvas_rect, 4.0, ui.visuals().extreme_bg_color);
         painter.rect_stroke(
-            rect,
+            canvas_rect,
             4.0,
             ui.visuals().widgets.noninteractive.bg_stroke,
             StrokeKind::Inside,
         );
 
-        let rect = rect.shrink2(egui::vec2(12.0, 10.0));
+        let layout_rect = canvas_rect.shrink2(egui::vec2(12.0, 10.0));
         let node_size = Vec2::new(116.0, 48.0);
-        let layout = graph.graph_layout();
-        let mut node_rects = vec![Rect::NOTHING; graph.nodes.len()];
-        for layout_node in &layout.nodes {
-            node_rects[layout_node.node_index] = Rect::from_center_size(
-                map_node_layout_point(rect, layout_node.position, node_size),
-                node_size,
-            );
+        let mut node_rects = layout_node_rects(graph, layout_rect, node_size);
+
+        if let Some(pointer_pos) = response.interact_pointer_pos() {
+            if response.clicked() || response.drag_started() {
+                self.dragging_node = None;
+                for (index, node_rect) in node_rects.iter().enumerate() {
+                    if node_rect.contains(pointer_pos) {
+                        self.selected_node = index;
+                        self.dragging_node = Some(index);
+                        break;
+                    }
+                }
+            }
+
+            if response.dragged() {
+                if let Some(dragging_node) = self.dragging_node {
+                    graph.set_node_layout_position(
+                        dragging_node,
+                        unmap_node_layout_point(layout_rect, pointer_pos, node_size),
+                    );
+                    node_rects = layout_node_rects(graph, layout_rect, node_size);
+                }
+            }
+        }
+
+        if ui.input(|input| input.pointer.any_released()) {
+            self.dragging_node = None;
         }
 
         let connector_stroke =
             Stroke::new(1.5, ui.visuals().widgets.noninteractive.fg_stroke.color);
-        for edge in &layout.edges {
+        for edge in graph.graph_layout().edges {
             let from_rect = node_rects[edge.from_node];
             let to_rect = node_rects[edge.to_node];
             let start = Pos2::new(from_rect.right(), from_rect.center().y);
@@ -157,18 +181,7 @@ impl HoudiniGraphPanel {
             draw_arrowhead(&painter, end, connector_stroke.color);
         }
 
-        let pointer_pos = response.interact_pointer_pos();
-        if response.clicked() {
-            if let Some(pointer_pos) = pointer_pos {
-                for (index, node_rect) in node_rects.iter().enumerate() {
-                    if node_rect.contains(pointer_pos) {
-                        self.selected_node = index;
-                    }
-                }
-            }
-        }
-
-        for layout_node in &layout.nodes {
+        for layout_node in graph.graph_layout().nodes {
             let Some(node) = graph.nodes.get(layout_node.node_index) else {
                 continue;
             };
@@ -273,6 +286,27 @@ fn map_node_layout_point(rect: Rect, point: GraphPoint, node_size: Vec2) -> Pos2
         rect.left() + node_size.x * 0.5 + usable_width * point.x,
         rect.top() + node_size.y * 0.5 + usable_height * point.y,
     )
+}
+
+fn unmap_node_layout_point(rect: Rect, position: Pos2, node_size: Vec2) -> GraphPoint {
+    let usable_width = (rect.width() - node_size.x).max(1.0);
+    let usable_height = (rect.height() - node_size.y).max(1.0);
+    GraphPoint {
+        x: ((position.x - rect.left() - node_size.x * 0.5) / usable_width).clamp(0.0, 1.0),
+        y: ((position.y - rect.top() - node_size.y * 0.5) / usable_height).clamp(0.0, 1.0),
+    }
+}
+
+fn layout_node_rects(graph: &GraphDocument, rect: Rect, node_size: Vec2) -> Vec<Rect> {
+    let layout = graph.graph_layout();
+    let mut node_rects = vec![Rect::NOTHING; graph.nodes.len()];
+    for layout_node in &layout.nodes {
+        node_rects[layout_node.node_index] = Rect::from_center_size(
+            map_node_layout_point(rect, layout_node.position, node_size),
+            node_size,
+        );
+    }
+    node_rects
 }
 
 fn draw_arrowhead(painter: &egui::Painter, tip: Pos2, color: Color32) {

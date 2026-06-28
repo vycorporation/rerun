@@ -8,6 +8,13 @@ impl GraphPoint {
     const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
+
+    fn clamped_to_unit(self) -> Self {
+        Self {
+            x: self.x.clamp(0.0, 1.0),
+            y: self.y.clamp(0.0, 1.0),
+        }
+    }
 }
 
 pub(crate) struct GraphDocument {
@@ -23,6 +30,7 @@ impl GraphDocument {
                 GraphNode {
                     name: "Source",
                     kind: NodeKind::Source,
+                    layout_position: GraphPoint::new(0.0, 0.5),
                     parameter: NodeParameter::scalar(
                         "Read",
                         1.0,
@@ -34,6 +42,7 @@ impl GraphDocument {
                 GraphNode {
                     name: "Filter",
                     kind: NodeKind::Filter,
+                    layout_position: GraphPoint::new(0.33, 0.5),
                     parameter: NodeParameter::scalar(
                         "Minimum score",
                         0.55,
@@ -45,6 +54,7 @@ impl GraphDocument {
                 GraphNode {
                     name: "Style",
                     kind: NodeKind::Style,
+                    layout_position: GraphPoint::new(0.66, 0.5),
                     parameter: NodeParameter::scalar(
                         "Stroke scale",
                         0.75,
@@ -56,6 +66,7 @@ impl GraphDocument {
                 GraphNode {
                     name: "Rerun Output",
                     kind: NodeKind::Output,
+                    layout_position: GraphPoint::new(1.0, 0.5),
                     parameter: NodeParameter::scalar(
                         "Adaptive segments",
                         1.0,
@@ -236,23 +247,14 @@ impl GraphDocument {
     }
 
     pub fn graph_layout(&self) -> GraphLayout {
-        let node_count = self.nodes.len().max(1);
         let nodes = self
             .nodes
             .iter()
             .enumerate()
-            .map(|(index, node)| {
-                let x = if node_count == 1 {
-                    0.5
-                } else {
-                    index as f32 / (node_count - 1) as f32
-                };
-
-                GraphLayoutNode {
-                    node_index: index,
-                    name: node.name,
-                    position: GraphPoint::new(x, 0.5),
-                }
+            .map(|(index, node)| GraphLayoutNode {
+                node_index: index,
+                name: node.name,
+                position: node.layout_position,
             })
             .collect();
 
@@ -264,6 +266,12 @@ impl GraphDocument {
             .collect();
 
         GraphLayout { nodes, edges }
+    }
+
+    pub fn set_node_layout_position(&mut self, index: usize, position: GraphPoint) {
+        if let Some(node) = self.nodes.get_mut(index) {
+            node.layout_position = position.clamped_to_unit();
+        }
     }
 
     pub fn selected_node_info(&self, index: usize) -> Option<NodeInfo> {
@@ -342,6 +350,7 @@ impl GraphDocument {
 pub(crate) struct GraphNode {
     pub name: &'static str,
     pub kind: NodeKind,
+    pub layout_position: GraphPoint,
     pub parameter: NodeParameter,
     pub info: &'static str,
 }
@@ -537,7 +546,8 @@ pub(crate) enum ExportGeometry {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportGeometry, Geometry, GraphDocument, LayerKind, NodeParameterKind, ViewerGeometry,
+        ExportGeometry, Geometry, GraphDocument, GraphPoint, LayerKind, NodeParameterKind,
+        ViewerGeometry,
     };
 
     #[test]
@@ -677,6 +687,19 @@ mod tests {
         assert_eq!(layout.edges[0].to_node, 1);
         assert_eq!(layout.edges[2].from_node, 2);
         assert_eq!(layout.edges[2].to_node, 3);
+    }
+
+    #[test]
+    fn graph_layout_node_positions_are_editable_and_clamped() {
+        let mut graph = GraphDocument::sample();
+
+        graph.set_node_layout_position(1, GraphPoint::new(0.25, 0.75));
+        let layout = graph.graph_layout();
+        assert_eq!(layout.nodes[1].position, GraphPoint::new(0.25, 0.75));
+
+        graph.set_node_layout_position(1, GraphPoint::new(-1.0, 2.0));
+        let layout = graph.graph_layout();
+        assert_eq!(layout.nodes[1].position, GraphPoint::new(0.0, 1.0));
     }
 
     #[test]
