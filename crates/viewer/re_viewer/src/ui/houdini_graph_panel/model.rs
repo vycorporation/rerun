@@ -91,10 +91,11 @@ impl GraphDocument {
             )),
             nodes: vec![
                 GraphNode {
-                    name: "Source",
+                    name: "Source".to_owned(),
                     kind: NodeKind::Source,
                     layout_position: GraphPoint::new(0.0, 0.5),
                     generated: None,
+                    null_operator: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -109,10 +110,11 @@ impl GraphDocument {
                     info: "Loads polygon and cubic Bezier records.",
                 },
                 GraphNode {
-                    name: "Filter",
+                    name: "Filter".to_owned(),
                     kind: NodeKind::Filter,
                     layout_position: GraphPoint::new(0.33, 0.5),
                     generated: None,
+                    null_operator: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -129,10 +131,11 @@ impl GraphDocument {
                     info: "Filters features by sample score.",
                 },
                 GraphNode {
-                    name: "Style",
+                    name: "Style".to_owned(),
                     kind: NodeKind::Style,
                     layout_position: GraphPoint::new(0.66, 0.5),
                     generated: None,
+                    null_operator: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -147,10 +150,11 @@ impl GraphDocument {
                     info: "Assigns visual parameters before viewer output.",
                 },
                 GraphNode {
-                    name: "Rerun Output",
+                    name: "Rerun Output".to_owned(),
                     kind: NodeKind::Output,
                     layout_position: GraphPoint::new(1.0, 0.5),
                     generated: None,
+                    null_operator: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -437,6 +441,101 @@ impl GraphDocument {
             source: GeneratedNodeSource::AttributeTableCommit,
         });
         true
+    }
+
+    #[allow(dead_code)]
+    pub fn add_null_operator_node(&mut self, name: impl Into<String>) -> usize {
+        let mut name = name.into();
+        if name.trim().is_empty() {
+            name = format!(
+                "NULL_{}",
+                self.nodes
+                    .iter()
+                    .filter(|node| node.kind == NodeKind::Null)
+                    .count()
+                    + 1
+            );
+        } else {
+            name = name.trim().to_owned();
+        }
+        name = self.unique_node_name(&name);
+
+        let insert_index = self
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .unwrap_or(self.nodes.len());
+        let mut node = GraphNode::null_operator(name);
+        node.layout_position = GraphPoint::new(0.82, 0.5);
+        self.nodes.insert(insert_index, node);
+        insert_index
+    }
+
+    fn unique_node_name(&self, candidate: &str) -> String {
+        if !self.nodes.iter().any(|node| node.name == candidate) {
+            return candidate.to_owned();
+        }
+
+        let mut suffix = 2;
+        loop {
+            let name = format!("{candidate}_{suffix}");
+            if !self.nodes.iter().any(|node| node.name == name) {
+                return name;
+            }
+            suffix += 1;
+        }
+    }
+
+    pub fn null_operator_contract(&self, node_index: usize) -> Option<NullOperatorContract> {
+        let node = self.nodes.get(node_index)?;
+        if node.kind != NodeKind::Null {
+            return None;
+        }
+        let input_count = self.pass_through_input_count_for_node(node_index);
+        Some(NullOperatorContract {
+            node_name: node.name.clone(),
+            convention: NullNameConvention::from_name(&node.name),
+            input_kind: HoudiniDataKind::GeometryTable,
+            output_kind: HoudiniDataKind::GeometryTable,
+            input_record_count: input_count,
+            output_record_count: input_count,
+            source_provenance: self.source.metadata.provenance,
+            preserves_record_identity: true,
+            preserves_source_provenance: true,
+            preserves_evaluation_state: true,
+        })
+    }
+
+    fn pass_through_input_count_for_node(&self, node_index: usize) -> usize {
+        self.nodes
+            .iter()
+            .take(node_index)
+            .rev()
+            .find(|node| node.participates_in_output)
+            .map_or_else(
+                || self.active_geometry().len(),
+                |node| self.node_output_record_count(node.kind),
+            )
+    }
+
+    fn node_output_record_count(&self, kind: NodeKind) -> usize {
+        let source_count = self.active_geometry().len();
+        let filtered_count = self
+            .active_geometry()
+            .iter()
+            .filter(|geometry| self.passes_filter(geometry))
+            .count();
+
+        match kind {
+            NodeKind::Source => source_count,
+            NodeKind::Filter
+            | NodeKind::Style
+            | NodeKind::Null
+            | NodeKind::PythonOperator
+            | NodeKind::ProceduralAsset
+            | NodeKind::NativeOperator => filtered_count,
+            NodeKind::Output => self.visible_output_count(),
+        }
     }
 
     #[allow(dead_code)]
@@ -1261,41 +1360,41 @@ impl GraphDocument {
     }
 
     pub fn pipeline_stages(&self) -> Vec<PipelineStage> {
-        let source_count = self.active_geometry().len();
-        let filtered_count = self
-            .active_geometry()
+        self.nodes
             .iter()
-            .filter(|geometry| self.passes_filter(geometry))
-            .count();
-        let styled_count = filtered_count;
-        let output_count = self.visible_output_count();
+            .enumerate()
+            .filter(|(_, node)| node.participates_in_output)
+            .map(|(index, node)| self.pipeline_stage_for_node(index, node))
+            .collect()
+    }
 
-        vec![
-            PipelineStage {
-                name: "Source",
-                input_count: 0,
-                output_count: source_count,
-                note: "Loaded native graph geometry.",
+    fn pipeline_stage_for_node(&self, index: usize, node: &GraphNode) -> PipelineStage {
+        let input_count = if node.kind == NodeKind::Source {
+            0
+        } else {
+            self.pass_through_input_count_for_node(index)
+        };
+        PipelineStage {
+            name: node.name.clone(),
+            input_count,
+            output_count: self.node_output_record_count(node.kind),
+            note: match node.kind {
+                NodeKind::Source => "Loaded native graph geometry.".to_owned(),
+                NodeKind::Filter => "Applied minimum score threshold.".to_owned(),
+                NodeKind::Style => "Prepared stroke scale for viewer output.".to_owned(),
+                NodeKind::Null => {
+                    "Typed pass-through anchor; geometry, provenance, and evaluation flow are unchanged.".to_owned()
+                }
+                NodeKind::PythonOperator => "Deferred graph-visible Python operator.".to_owned(),
+                NodeKind::ProceduralAsset => {
+                    "Graph-backed procedural asset instance.".to_owned()
+                }
+                NodeKind::NativeOperator => "Deferred trusted native operator.".to_owned(),
+                NodeKind::Output => {
+                    "Applied layer visibility and boundary preparation.".to_owned()
+                }
             },
-            PipelineStage {
-                name: "Filter",
-                input_count: source_count,
-                output_count: filtered_count,
-                note: "Applied minimum score threshold.",
-            },
-            PipelineStage {
-                name: "Style",
-                input_count: filtered_count,
-                output_count: styled_count,
-                note: "Prepared stroke scale for viewer output.",
-            },
-            PipelineStage {
-                name: "Rerun Output",
-                input_count: styled_count,
-                output_count,
-                note: "Applied layer visibility and boundary preparation.",
-            },
-        ]
+        }
     }
 
     pub fn graph_layout(&self) -> GraphLayout {
@@ -1305,7 +1404,7 @@ impl GraphDocument {
             .enumerate()
             .map(|(index, node)| GraphLayoutNode {
                 node_index: index,
-                name: node.name,
+                name: node.name.clone(),
                 position: node.layout_position,
             })
             .collect();
@@ -1428,7 +1527,7 @@ impl GraphDocument {
 
     pub fn selected_node_info(&self, index: usize) -> Option<NodeInfo> {
         let node = self.nodes.get(index)?;
-        let stages = self.pipeline_stages();
+        let stage = self.pipeline_stage_for_node(index, node);
         let source_metadata = self.source.metadata.clone();
         let filter_warnings = self.filter_rule_warning().into_iter().collect::<Vec<_>>();
         let style_warnings = self.style_warnings();
@@ -1437,8 +1536,8 @@ impl GraphDocument {
             NodeKind::Source => NodeInfo {
                 kind: node.kind,
                 role: node.kind.role(),
-                input_count: stages[0].input_count,
-                output_count: stages[0].output_count,
+                input_count: stage.input_count,
+                output_count: stage.output_count,
                 status: if self.source.import_error.is_some() {
                     NodeStatus::Failed
                 } else {
@@ -1457,6 +1556,7 @@ impl GraphDocument {
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
                 warnings: Vec::new(),
+                null_operator: None,
                 python_operator: None,
                 procedural_asset: None,
                 native_operator: None,
@@ -1464,15 +1564,15 @@ impl GraphDocument {
             NodeKind::Filter => NodeInfo {
                 kind: node.kind,
                 role: node.kind.role(),
-                input_count: stages[1].input_count,
-                output_count: stages[1].output_count,
+                input_count: stage.input_count,
+                output_count: stage.output_count,
                 status: if filter_warnings.is_empty() {
                     NodeStatus::Healthy
                 } else {
                     NodeStatus::Warning
                 },
                 data_kind: "Filtered geometry",
-                record_count: stages[1].output_count,
+                record_count: stage.output_count,
                 bounds: self.filtered_bounds(),
                 provenance: Some(self.source.metadata.provenance),
                 attributes: self.source.metadata.attribute_names.clone(),
@@ -1484,6 +1584,7 @@ impl GraphDocument {
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
                 warnings: filter_warnings,
+                null_operator: None,
                 python_operator: None,
                 procedural_asset: None,
                 native_operator: None,
@@ -1491,15 +1592,15 @@ impl GraphDocument {
             NodeKind::Style => NodeInfo {
                 kind: node.kind,
                 role: node.kind.role(),
-                input_count: stages[2].input_count,
-                output_count: stages[2].output_count,
+                input_count: stage.input_count,
+                output_count: stage.output_count,
                 status: if style_warnings.is_empty() {
                     NodeStatus::Healthy
                 } else {
                     NodeStatus::Warning
                 },
                 data_kind: "Styled geometry",
-                record_count: stages[2].output_count,
+                record_count: stage.output_count,
                 bounds: self.filtered_bounds(),
                 provenance: Some(self.source.metadata.provenance),
                 attributes: self.source.metadata.attribute_names.clone(),
@@ -1511,10 +1612,44 @@ impl GraphDocument {
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
                 warnings: style_warnings,
+                null_operator: None,
                 python_operator: None,
                 procedural_asset: None,
                 native_operator: None,
             },
+            NodeKind::Null => {
+                let contract = self.null_operator_contract(index)?;
+                NodeInfo {
+                    kind: node.kind,
+                    role: node.kind.role(),
+                    input_count: stage.input_count,
+                    output_count: stage.output_count,
+                    status: NodeStatus::Healthy,
+                    data_kind: "Geometry table pass-through",
+                    record_count: contract.output_record_count,
+                    bounds: self.filtered_bounds(),
+                    provenance: Some(contract.source_provenance),
+                    attributes: self.source.metadata.attribute_names.clone(),
+                    parameter: node.parameter.clone(),
+                    summary: "Null operator is a visible typed pass-through anchor. OUT_* and IN_* are naming conventions only.",
+                    source_metadata: None,
+                    source_error: None,
+                    style: Some(self.resolved_style()),
+                    generated: node.generated,
+                    evaluation: node.evaluation.clone(),
+                    warnings: Vec::new(),
+                    null_operator: Some(NullOperatorNodeInfo {
+                        convention: contract.convention,
+                        input_kind: contract.input_kind,
+                        output_kind: contract.output_kind,
+                        preserves_record_identity: contract.preserves_record_identity,
+                        preserves_source_provenance: contract.preserves_source_provenance,
+                    }),
+                    python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
+                }
+            }
             NodeKind::PythonOperator => {
                 let python_operator = node.python_operator.as_ref()?;
                 let declaration = self
@@ -1554,6 +1689,7 @@ impl GraphDocument {
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
                     warnings,
+                    null_operator: None,
                     python_operator: Some(PythonOperatorNodeInfo {
                         declaration_id: python_operator.declaration_id.clone(),
                         display_name: declaration
@@ -1616,6 +1752,7 @@ impl GraphDocument {
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
                     warnings,
+                    null_operator: None,
                     python_operator: None,
                     procedural_asset: Some(ProceduralAssetNodeInfo {
                         asset_id: asset_node.asset_id.clone(),
@@ -1688,6 +1825,7 @@ impl GraphDocument {
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
                     warnings,
+                    null_operator: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: Some(NativeOperatorNodeInfo {
@@ -1752,11 +1890,11 @@ impl GraphDocument {
             NodeKind::Output => NodeInfo {
                 kind: node.kind,
                 role: node.kind.role(),
-                input_count: stages[3].input_count,
-                output_count: stages[3].output_count,
+                input_count: stage.input_count,
+                output_count: stage.output_count,
                 status: NodeStatus::Healthy,
                 data_kind: "Rerun scene output",
-                record_count: stages[3].output_count,
+                record_count: stage.output_count,
                 bounds: self.output_bounds(),
                 provenance: Some(self.source.metadata.provenance),
                 attributes: self.source.metadata.attribute_names.clone(),
@@ -1768,6 +1906,7 @@ impl GraphDocument {
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
                 warnings: Vec::new(),
+                null_operator: None,
                 python_operator: None,
                 procedural_asset: None,
                 native_operator: None,
@@ -2762,11 +2901,13 @@ impl HoudiniGraphSidecar {
                 .nodes
                 .iter()
                 .map(|node| NodeSidecar {
+                    name: node.name.clone(),
                     kind: node.kind,
                     layout_position: node.layout_position,
                     parameter_value: node.parameter.value,
                     parameter_rule: node.parameter.rule_spec.clone(),
                     generated: node.generated,
+                    null_operator: node.null_operator.clone(),
                     python_operator: node.python_operator.clone(),
                     procedural_asset: node.procedural_asset.clone(),
                     native_operator: node.native_operator.clone(),
@@ -2820,7 +2961,7 @@ impl HoudiniGraphSidecar {
         graph.native_operator_trust = self.native_operator_trust;
         graph.python_environment = self.python_environment;
 
-        for node_snapshot in self.nodes {
+        for (snapshot_index, node_snapshot) in self.nodes.into_iter().enumerate() {
             let matching_node = graph.nodes.iter_mut().find(|node| {
                 node.kind == node_snapshot.kind
                     && node_matches_snapshot_identity(node, &node_snapshot)
@@ -2838,7 +2979,10 @@ impl HoudiniGraphSidecar {
                 node.procedural_asset = node_snapshot.procedural_asset;
                 node.native_operator = node_snapshot.native_operator;
             } else if node_snapshot.is_instance_node() {
-                graph.nodes.push(node_snapshot.into_instance_node());
+                let insert_index = snapshot_index.min(graph.nodes.len());
+                graph
+                    .nodes
+                    .insert(insert_index, node_snapshot.into_instance_node());
             }
         }
 
@@ -2871,6 +3015,8 @@ struct GraphSourceSidecar {
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct NodeSidecar {
+    #[serde(default)]
+    name: String,
     kind: NodeKind,
     layout_position: GraphPoint,
     parameter_value: f32,
@@ -2878,6 +3024,8 @@ struct NodeSidecar {
     parameter_rule: Option<AttributeFilterRuleSpec>,
     #[serde(default)]
     generated: Option<GeneratedNodeInfo>,
+    #[serde(default)]
+    null_operator: Option<NullOperatorNode>,
     #[serde(default)]
     python_operator: Option<PythonOperatorNode>,
     #[serde(default)]
@@ -2890,7 +3038,10 @@ impl NodeSidecar {
     fn is_instance_node(&self) -> bool {
         matches!(
             self.kind,
-            NodeKind::PythonOperator | NodeKind::ProceduralAsset | NodeKind::NativeOperator
+            NodeKind::Null
+                | NodeKind::PythonOperator
+                | NodeKind::ProceduralAsset
+                | NodeKind::NativeOperator
         )
     }
 
@@ -2908,13 +3059,22 @@ impl NodeSidecar {
                 "Native Operator",
                 "Runs a trusted native operator once a loader is available.",
             ),
+            NodeKind::Null => (
+                "Null",
+                "Passes typed geometry through unchanged as a visible graph anchor.",
+            ),
             _ => ("Graph Node", "Restored graph node."),
         };
         GraphNode {
-            name,
+            name: if self.name.is_empty() {
+                name.to_owned()
+            } else {
+                self.name
+            },
             kind: self.kind,
             layout_position: self.layout_position.clamped_to_unit(),
             generated: self.generated,
+            null_operator: self.null_operator,
             python_operator: self.python_operator,
             procedural_asset: self.procedural_asset,
             native_operator: self.native_operator,
@@ -2933,6 +3093,7 @@ impl NodeSidecar {
 
 fn node_matches_snapshot_identity(node: &GraphNode, snapshot: &NodeSidecar) -> bool {
     match node.kind {
+        NodeKind::Null => node.name == snapshot.name,
         NodeKind::PythonOperator => {
             node.python_operator.as_ref().and_then(|python_operator| {
                 snapshot
@@ -2990,10 +3151,11 @@ impl LayerSidecar {
 }
 
 pub(crate) struct GraphNode {
-    pub name: &'static str,
+    pub name: String,
     pub kind: NodeKind,
     pub layout_position: GraphPoint,
     pub generated: Option<GeneratedNodeInfo>,
+    pub null_operator: Option<NullOperatorNode>,
     pub python_operator: Option<PythonOperatorNode>,
     pub procedural_asset: Option<ProceduralAssetInstanceNode>,
     pub native_operator: Option<NativeOperatorNode>,
@@ -3004,12 +3166,38 @@ pub(crate) struct GraphNode {
 }
 
 impl GraphNode {
+    fn null_operator(name: String) -> Self {
+        Self {
+            name,
+            kind: NodeKind::Null,
+            layout_position: GraphPoint::new(0.5, 0.5),
+            generated: None,
+            null_operator: Some(NullOperatorNode {
+                input_kind: HoudiniDataKind::GeometryTable,
+                output_kind: HoudiniDataKind::GeometryTable,
+            }),
+            python_operator: None,
+            procedural_asset: None,
+            native_operator: None,
+            evaluation: NodeEvaluation::clean(),
+            participates_in_output: true,
+            parameter: NodeParameter::scalar(
+                "Pass-through",
+                1.0,
+                0.0..=1.0,
+                "Typed pass-through anchor; the parameter is inspect-only in this spike.",
+            ),
+            info: "Passes compatible typed geometry through unchanged as a visible named graph anchor.",
+        }
+    }
+
     fn python_operator(instance_id: String, declaration_id: String) -> Self {
         Self {
-            name: "Python Operator",
+            name: "Python Operator".to_owned(),
             kind: NodeKind::PythonOperator,
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
+            null_operator: None,
             python_operator: Some(PythonOperatorNode {
                 instance_id,
                 declaration_id,
@@ -3038,10 +3226,11 @@ impl GraphNode {
 
     fn procedural_asset(instance_id: String, asset_id: String, instance_version: String) -> Self {
         Self {
-            name: "Asset",
+            name: "Asset".to_owned(),
             kind: NodeKind::ProceduralAsset,
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
+            null_operator: None,
             python_operator: None,
             procedural_asset: Some(ProceduralAssetInstanceNode {
                 instance_id,
@@ -3069,10 +3258,11 @@ impl GraphNode {
 
     fn native_operator(instance_id: String, operator_id: String) -> Self {
         Self {
-            name: "Native Operator",
+            name: "Native Operator".to_owned(),
             kind: NodeKind::NativeOperator,
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
+            null_operator: None,
             python_operator: None,
             procedural_asset: None,
             native_operator: Some(NativeOperatorNode {
@@ -3094,6 +3284,54 @@ impl GraphNode {
                 "Native operator readiness placeholder.",
             ),
             info: "Runs a trusted native operator once a loader is available.",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct NullOperatorNode {
+    pub input_kind: HoudiniDataKind,
+    pub output_kind: HoudiniDataKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NullOperatorContract {
+    pub node_name: String,
+    pub convention: NullNameConvention,
+    pub input_kind: HoudiniDataKind,
+    pub output_kind: HoudiniDataKind,
+    pub input_record_count: usize,
+    pub output_record_count: usize,
+    pub source_provenance: SourceProvenance,
+    pub preserves_record_identity: bool,
+    pub preserves_source_provenance: bool,
+    pub preserves_evaluation_state: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NullNameConvention {
+    InputAnchor,
+    OutputAnchor,
+    Ordinary,
+}
+
+impl NullNameConvention {
+    fn from_name(name: &str) -> Self {
+        let upper_name = name.to_ascii_uppercase();
+        if upper_name.starts_with("IN_") {
+            Self::InputAnchor
+        } else if upper_name.starts_with("OUT_") {
+            Self::OutputAnchor
+        } else {
+            Self::Ordinary
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InputAnchor => "IN_* convention",
+            Self::OutputAnchor => "OUT_* convention",
+            Self::Ordinary => "ordinary null",
         }
     }
 }
@@ -4373,7 +4611,7 @@ pub(crate) struct GraphLayout {
 
 pub(crate) struct GraphLayoutNode {
     pub node_index: usize,
-    pub name: &'static str,
+    pub name: String,
     pub position: GraphPoint,
 }
 
@@ -4387,6 +4625,7 @@ pub(crate) enum NodeKind {
     Source,
     Filter,
     Style,
+    Null,
     PythonOperator,
     ProceduralAsset,
     NativeOperator,
@@ -4399,6 +4638,7 @@ impl NodeKind {
             Self::Source => "Source",
             Self::Filter => "Filter",
             Self::Style => "Style",
+            Self::Null => "Null",
             Self::PythonOperator => "Python Operator",
             Self::ProceduralAsset => "Asset",
             Self::NativeOperator => "Native Operator",
@@ -4411,6 +4651,7 @@ impl NodeKind {
             Self::Source => "Read",
             Self::Filter => "Cull",
             Self::Style => "Style",
+            Self::Null => "Anchor",
             Self::PythonOperator => "Compute",
             Self::ProceduralAsset => "Asset",
             Self::NativeOperator => "Native",
@@ -4438,9 +4679,18 @@ pub(crate) struct NodeInfo {
     pub generated: Option<GeneratedNodeInfo>,
     pub evaluation: NodeEvaluation,
     pub warnings: Vec<String>,
+    pub null_operator: Option<NullOperatorNodeInfo>,
     pub python_operator: Option<PythonOperatorNodeInfo>,
     pub procedural_asset: Option<ProceduralAssetNodeInfo>,
     pub native_operator: Option<NativeOperatorNodeInfo>,
+}
+
+pub(crate) struct NullOperatorNodeInfo {
+    pub convention: NullNameConvention,
+    pub input_kind: HoudiniDataKind,
+    pub output_kind: HoudiniDataKind,
+    pub preserves_record_identity: bool,
+    pub preserves_source_provenance: bool,
 }
 
 pub(crate) struct PythonOperatorNodeInfo {
@@ -4614,11 +4864,12 @@ impl NodeStatus {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PipelineStage {
-    pub name: &'static str,
+    pub name: String,
     pub input_count: usize,
     pub output_count: usize,
-    pub note: &'static str,
+    pub note: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -5617,6 +5868,99 @@ mod tests {
     }
 
     #[test]
+    fn null_operator_inserts_as_visible_typed_pass_through_anchor() {
+        let mut graph = GraphDocument::sample();
+        let before_rows = graph.attribute_table_rows(&AttributeTableQuery::default());
+        let before_scene = graph.rerun_scene_output();
+
+        let null_index = graph.add_null_operator_node("OUT_FILTERED");
+
+        assert_eq!(graph.nodes[null_index].kind, NodeKind::Null);
+        assert_eq!(graph.nodes[null_index].name, "OUT_FILTERED");
+        assert_eq!(graph.nodes[null_index + 1].kind, NodeKind::Output);
+        assert_eq!(graph.graph_layout().edges.len(), graph.nodes.len() - 1);
+
+        let contract = graph
+            .null_operator_contract(null_index)
+            .expect("null node should expose a pass-through contract");
+        assert_eq!(contract.convention, super::NullNameConvention::OutputAnchor);
+        assert_eq!(contract.input_kind, HoudiniDataKind::GeometryTable);
+        assert_eq!(contract.output_kind, HoudiniDataKind::GeometryTable);
+        assert_eq!(contract.input_record_count, before_rows.len());
+        assert_eq!(contract.output_record_count, before_rows.len());
+        assert_eq!(contract.source_provenance, SourceProvenance::DemoFallback);
+        assert!(contract.preserves_record_identity);
+        assert!(contract.preserves_source_provenance);
+        assert!(contract.preserves_evaluation_state);
+
+        let after_rows = graph.attribute_table_rows(&AttributeTableQuery::default());
+        let after_scene = graph.rerun_scene_output();
+        assert_eq!(
+            after_rows
+                .iter()
+                .map(|row| (row.record_index, row.geometry_kind, row.provenance))
+                .collect::<Vec<_>>(),
+            before_rows
+                .iter()
+                .map(|row| (row.record_index, row.geometry_kind, row.provenance))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(after_scene.items.len(), before_scene.items.len());
+        assert_eq!(after_scene.polygon_count(), before_scene.polygon_count());
+        assert_eq!(
+            after_scene.native_cubic_bezier_count(),
+            before_scene.native_cubic_bezier_count()
+        );
+    }
+
+    #[test]
+    fn null_operator_node_info_exposes_convention_without_type_magic() {
+        let mut graph = GraphDocument::sample();
+        let null_index = graph.add_null_operator_node("IN_GEO");
+
+        let info = graph
+            .selected_node_info(null_index)
+            .expect("null node should report node info");
+        let null_info = info
+            .null_operator
+            .expect("null node info should expose pass-through metadata");
+
+        assert_eq!(info.kind, NodeKind::Null);
+        assert_eq!(info.role, "Anchor");
+        assert_eq!(info.input_count, info.output_count);
+        assert_eq!(info.record_count, graph.visible_output_count());
+        assert_eq!(info.data_kind, "Geometry table pass-through");
+        assert_eq!(null_info.convention, super::NullNameConvention::InputAnchor);
+        assert_eq!(null_info.input_kind, HoudiniDataKind::GeometryTable);
+        assert_eq!(null_info.output_kind, HoudiniDataKind::GeometryTable);
+        assert!(null_info.preserves_record_identity);
+        assert!(null_info.preserves_source_provenance);
+    }
+
+    #[test]
+    fn null_operator_round_trips_through_sidecar_with_anchor_name() {
+        let mut graph = GraphDocument::sample();
+        graph.add_null_operator_node("OUT_CURVES");
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        let null_index = restored
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Null && node.name == "OUT_CURVES")
+            .expect("restored graph should include named null anchor");
+        let contract = restored
+            .null_operator_contract(null_index)
+            .expect("restored null should expose a contract");
+
+        assert_eq!(contract.convention, super::NullNameConvention::OutputAnchor);
+        assert_eq!(contract.input_kind, contract.output_kind);
+        assert_eq!(restored.nodes[null_index + 1].kind, NodeKind::Output);
+    }
+
+    #[test]
     fn attribute_table_rows_report_visible_native_output_records() {
         let graph = GraphDocument::sample();
         let rows = graph.attribute_table_rows(&AttributeTableQuery::default());
@@ -5831,10 +6175,11 @@ mod tests {
     fn output_demand_evaluates_stale_connected_nodes_only() {
         let mut graph = GraphDocument::sample();
         graph.nodes.push(GraphNode {
-            name: "Scratch Filter",
+            name: "Scratch Filter".to_owned(),
             kind: NodeKind::Filter,
             layout_position: GraphPoint::new(0.5, 0.1),
             generated: None,
+            null_operator: None,
             python_operator: None,
             procedural_asset: None,
             native_operator: None,

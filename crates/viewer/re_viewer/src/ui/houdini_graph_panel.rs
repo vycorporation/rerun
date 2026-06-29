@@ -579,6 +579,10 @@ impl HoudiniGraphPanel {
 
     fn layer_stack_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         ui.horizontal(|ui| {
+            if ui.button("Add OUT Null").clicked() {
+                let index = graph.add_null_operator_node("OUT_MAIN");
+                self.selected_node = index;
+            }
             if ui.button("Duplicate Polygons").clicked() {
                 graph.duplicate_layer_view(LayerKind::Polygons, "Polygons Copy");
             }
@@ -873,6 +877,27 @@ impl HoudiniGraphPanel {
                     if let Some(style) = info.style {
                         ui.weak("Style");
                         ui.label(format_style(style));
+                        ui.end_row();
+                    }
+
+                    if let Some(null_operator) = &info.null_operator {
+                        ui.weak("Convention");
+                        ui.label(null_operator.convention.as_str());
+                        ui.end_row();
+
+                        ui.weak("Pass-through");
+                        ui.label(format!(
+                            "{:?} -> {:?}",
+                            null_operator.input_kind, null_operator.output_kind
+                        ));
+                        ui.end_row();
+
+                        ui.weak("Preserves");
+                        ui.label(format!(
+                            "records: {}, provenance: {}",
+                            null_operator.preserves_record_identity,
+                            null_operator.preserves_source_provenance
+                        ));
                         ui.end_row();
                     }
 
