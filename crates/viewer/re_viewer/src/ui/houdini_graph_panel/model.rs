@@ -511,24 +511,131 @@ impl GraphDocument {
     fn node_id_is_reserved(&self, node_id: &str) -> bool {
         self.nodes.iter().any(|node| node.node_id == node_id)
             || self.nodes.iter().any(|node| {
-                node.reference_input
-                    .as_ref()
-                    .is_some_and(|reference| reference.target.node_id == node_id)
+                node.reference_input.as_ref().is_some_and(|reference| {
+                    reference
+                        .targets
+                        .iter()
+                        .any(|target| target.target.node_id == node_id)
+                })
             })
     }
 
     #[allow(dead_code)]
     pub fn add_reference_input_node(&mut self, target_node_index: usize) -> Option<usize> {
         let target = self.reference_target_for_node(target_node_index)?;
+        let provenance =
+            ReferenceTargetProvenance::from_node(self.nodes.get(target_node_index)?, &target);
         let insert_index = self
             .nodes
             .iter()
             .position(|node| node.kind == NodeKind::Output)
             .unwrap_or(self.nodes.len());
-        let mut node = GraphNode::reference_input(self.unique_node_id("reference_input"), target);
+        let mut node = GraphNode::reference_input(
+            self.unique_node_id("reference_input"),
+            ReferenceTargetEntry {
+                target,
+                enabled: true,
+                provenance,
+            },
+        );
         node.layout_position = GraphPoint::new(0.88, 0.5);
         self.nodes.insert(insert_index, node);
         Some(insert_index)
+    }
+
+    #[allow(dead_code)]
+    pub fn add_reference_target_to_node(
+        &mut self,
+        reference_node_index: usize,
+        target_node_index: usize,
+    ) -> bool {
+        let Some(target) = self.reference_target_for_node(target_node_index) else {
+            return false;
+        };
+        let Some(source_node) = self.nodes.get(target_node_index) else {
+            return false;
+        };
+        let provenance = ReferenceTargetProvenance::from_node(source_node, &target);
+        let Some(reference_input) = self
+            .nodes
+            .get_mut(reference_node_index)
+            .and_then(|node| node.reference_input.as_mut())
+        else {
+            return false;
+        };
+        if reference_input
+            .targets
+            .iter()
+            .any(|entry| entry.target == target)
+        {
+            return false;
+        }
+
+        reference_input.targets.push(ReferenceTargetEntry {
+            target,
+            enabled: true,
+            provenance,
+        });
+        if let Some(node) = self.nodes.get_mut(reference_node_index) {
+            node.evaluation.state = EvaluationState::Stale;
+            node.evaluation.message = Some("Reference target set changed.".to_owned());
+        }
+        true
+    }
+
+    #[allow(dead_code)]
+    pub fn set_reference_target_enabled(
+        &mut self,
+        reference_node_index: usize,
+        target_node_id: &str,
+        enabled: bool,
+    ) -> bool {
+        let Some(node) = self.nodes.get_mut(reference_node_index) else {
+            return false;
+        };
+        let Some(reference_input) = node.reference_input.as_mut() else {
+            return false;
+        };
+        let Some(entry) = reference_input
+            .targets
+            .iter_mut()
+            .find(|entry| entry.target.node_id == target_node_id)
+        else {
+            return false;
+        };
+        if entry.enabled == enabled {
+            return false;
+        }
+
+        entry.enabled = enabled;
+        node.evaluation.state = EvaluationState::Stale;
+        node.evaluation.message = Some("Reference target enablement changed.".to_owned());
+        true
+    }
+
+    #[allow(dead_code)]
+    pub fn remove_reference_target_from_node(
+        &mut self,
+        reference_node_index: usize,
+        target_node_id: &str,
+    ) -> bool {
+        let Some(node) = self.nodes.get_mut(reference_node_index) else {
+            return false;
+        };
+        let Some(reference_input) = node.reference_input.as_mut() else {
+            return false;
+        };
+        let original_len = reference_input.targets.len();
+        reference_input
+            .targets
+            .retain(|entry| entry.target.node_id != target_node_id);
+        if reference_input.targets.len() == original_len {
+            return false;
+        }
+
+        node.evaluation.state = EvaluationState::Stale;
+        node.evaluation.message = Some("Reference target removed.".to_owned());
+        true
     }
 
     pub fn reference_target_for_node(
@@ -610,13 +717,34 @@ impl GraphDocument {
         }
     }
 
+    #[allow(dead_code)]
     pub fn reference_input_resolution(
         &self,
         node_index: usize,
     ) -> Option<ReferenceTargetResolution> {
+        self.reference_input_resolutions(node_index)?
+            .into_iter()
+            .next()
+            .map(|entry| entry.resolution)
+    }
+
+    pub fn reference_input_resolutions(
+        &self,
+        node_index: usize,
+    ) -> Option<Vec<ReferenceTargetEntryResolution>> {
         let node = self.nodes.get(node_index)?;
         let reference_input = node.reference_input.as_ref()?;
-        Some(self.resolve_reference_target(&reference_input.target))
+        Some(
+            reference_input
+                .targets
+                .iter()
+                .map(|entry| ReferenceTargetEntryResolution {
+                    enabled: entry.enabled,
+                    provenance: entry.provenance.clone(),
+                    resolution: self.resolve_reference_target(&entry.target),
+                })
+                .collect(),
+        )
     }
 
     #[allow(dead_code)]
@@ -643,7 +771,11 @@ impl GraphDocument {
             let Some(reference_input) = node.reference_input.as_ref() else {
                 continue;
             };
-            if reference_input.target.node_id == target_node_id {
+            if reference_input
+                .targets
+                .iter()
+                .any(|entry| entry.enabled && entry.target.node_id == target_node_id)
+            {
                 node.evaluation.state = EvaluationState::Stale;
                 node.evaluation.message =
                     Some("Referenced output changed; reference input is stale.".to_owned());
@@ -690,8 +822,20 @@ impl GraphDocument {
         };
         if node.kind == NodeKind::ReferenceInput {
             return self
-                .reference_input_resolution(node_index)
-                .map_or(0, |resolution| resolution.record_count);
+                .reference_input_resolutions(node_index)
+                .map_or(0, |entries| {
+                    entries
+                        .iter()
+                        .filter(|entry| entry.enabled)
+                        .map(|entry| {
+                            if entry.resolution.status == ReferenceDiagnosticStatus::Resolved {
+                                entry.resolution.record_count
+                            } else {
+                                0
+                            }
+                        })
+                        .sum()
+                });
         }
         self.node_output_record_count(node.kind)
     }
@@ -1466,15 +1610,26 @@ impl GraphDocument {
                         .map(|cache_key| cache_key.key_digest.clone())
                         .unwrap_or_else(|| format!("{}:uncached", native_operator.instance_id))
                 } else if let Some(reference_input) = &node.reference_input {
-                    let resolution = self.resolve_reference_target(&reference_input.target);
+                    let target_set = reference_input
+                        .targets
+                        .iter()
+                        .map(|entry| {
+                            let resolution = self.resolve_reference_target(&entry.target);
+                            serde_json::json!({
+                                "target": &entry.target,
+                                "enabled": entry.enabled,
+                                "provenance": &entry.provenance,
+                                "target_status": resolution.status.as_str(),
+                                "target_cache_key": resolution
+                                    .target_node_index
+                                    .map(|target_index| self.node_cache_key_material(target_index)),
+                            })
+                        })
+                        .collect::<Vec<_>>();
                     stable_digest(&serde_json::json!({
                         "kind": node.kind.as_str(),
                         "node_id": &node.node_id,
-                        "target": &reference_input.target,
-                        "target_status": resolution.status.as_str(),
-                        "target_cache_key": resolution
-                            .target_node_index
-                            .map(|target_index| self.node_cache_key_material(target_index)),
+                        "target_set": target_set,
                     }))
                 } else {
                     self.node_cache_key_material_for_node(node)
@@ -1562,8 +1717,11 @@ impl GraphDocument {
     }
 
     fn reference_input_diagnostic(&self, node_index: usize) -> Option<ReferenceTargetResolution> {
-        let resolution = self.reference_input_resolution(node_index)?;
-        (resolution.status != ReferenceDiagnosticStatus::Resolved).then_some(resolution)
+        self.reference_input_resolutions(node_index)?
+            .into_iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| entry.resolution)
+            .find(|resolution| resolution.status != ReferenceDiagnosticStatus::Resolved)
     }
 
     fn apply_reference_input_diagnostic(
@@ -1886,35 +2044,36 @@ impl GraphDocument {
                 }
             }
             NodeKind::ReferenceInput => {
-                let resolution = self.reference_input_resolution(index)?;
-                let warnings = if resolution.status == ReferenceDiagnosticStatus::Resolved {
-                    Vec::new()
-                } else {
-                    vec![
-                        resolution
+                let target_entries = self.reference_input_resolutions(index)?;
+                let primary = target_entries.first()?;
+                let warnings = target_entries
+                    .iter()
+                    .filter(|entry| entry.enabled)
+                    .filter(|entry| entry.resolution.status != ReferenceDiagnosticStatus::Resolved)
+                    .map(|entry| {
+                        entry
+                            .resolution
                             .diagnostic
                             .clone()
-                            .unwrap_or_else(|| resolution.status.as_str().to_owned()),
-                    ]
-                };
+                            .unwrap_or_else(|| entry.resolution.status.as_str().to_owned())
+                    })
+                    .collect::<Vec<_>>();
                 NodeInfo {
                     kind: node.kind,
                     role: node.kind.role(),
-                    input_count: usize::from(
-                        resolution.status == ReferenceDiagnosticStatus::Resolved,
-                    ),
-                    output_count: resolution.record_count,
+                    input_count: target_entries.iter().filter(|entry| entry.enabled).count(),
+                    output_count: stage.output_count,
                     status: if warnings.is_empty() {
                         NodeStatus::Healthy
                     } else {
                         NodeStatus::Failed
                     },
                     data_kind: "Referenced geometry table",
-                    record_count: resolution.record_count,
-                    bounds: (resolution.status == ReferenceDiagnosticStatus::Resolved)
+                    record_count: stage.output_count,
+                    bounds: (warnings.is_empty() && stage.output_count > 0)
                         .then(|| self.filtered_bounds())
                         .flatten(),
-                    provenance: resolution.source_provenance,
+                    provenance: primary.resolution.source_provenance,
                     attributes: self.source.metadata.attribute_names.clone(),
                     parameter: node.parameter.clone(),
                     summary: "Reference input imports one compatible graph output by stable identity. It is live, one-way, and does not copy source data.",
@@ -1926,11 +2085,24 @@ impl GraphDocument {
                     warnings,
                     null_operator: None,
                     reference_input: Some(ReferenceInputNodeInfo {
-                        target: resolution.target,
-                        readable_path: resolution.readable_path,
-                        status: resolution.status,
-                        output_kind: resolution.output_kind,
-                        source_provenance: resolution.source_provenance,
+                        target: primary.resolution.target.clone(),
+                        readable_path: primary.resolution.readable_path.clone(),
+                        status: primary.resolution.status,
+                        output_kind: primary.resolution.output_kind,
+                        source_provenance: primary.resolution.source_provenance,
+                        targets: target_entries
+                            .into_iter()
+                            .map(|entry| ReferenceTargetNodeInfo {
+                                target: entry.resolution.target,
+                                readable_path: entry.resolution.readable_path,
+                                status: entry.resolution.status,
+                                enabled: entry.enabled,
+                                output_kind: entry.resolution.output_kind,
+                                record_count: entry.resolution.record_count,
+                                source_provenance: entry.resolution.source_provenance,
+                                provenance: entry.provenance,
+                            })
+                            .collect(),
                         preserves_source_data: true,
                         applies_hidden_transform: false,
                     }),
@@ -3523,7 +3695,7 @@ impl GraphNode {
         }
     }
 
-    fn reference_input(node_id: String, target: ReferenceTargetIdentity) -> Self {
+    fn reference_input(node_id: String, target: ReferenceTargetEntry) -> Self {
         Self {
             node_id,
             name: "Reference Input".to_owned(),
@@ -3531,7 +3703,9 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             null_operator: None,
-            reference_input: Some(ReferenceInputNode { target }),
+            reference_input: Some(ReferenceInputNode {
+                targets: vec![target],
+            }),
             python_operator: None,
             procedural_asset: None,
             native_operator: None,
@@ -3658,7 +3832,14 @@ pub(crate) struct NullOperatorNode {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct ReferenceInputNode {
+    pub targets: Vec<ReferenceTargetEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ReferenceTargetEntry {
     pub target: ReferenceTargetIdentity,
+    pub enabled: bool,
+    pub provenance: ReferenceTargetProvenance,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -3666,6 +3847,34 @@ pub(crate) struct ReferenceTargetIdentity {
     pub graph_id: String,
     pub node_id: String,
     pub output_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ReferenceTargetProvenance {
+    pub source_graph_id: String,
+    pub source_node_id: String,
+    pub source_node_name: String,
+    pub source_output_name: String,
+    pub source_data_kind: HoudiniDataKind,
+}
+
+impl ReferenceTargetProvenance {
+    fn from_node(node: &GraphNode, target: &ReferenceTargetIdentity) -> Self {
+        Self {
+            source_graph_id: target.graph_id.clone(),
+            source_node_id: node.node_id.clone(),
+            source_node_name: node.name.clone(),
+            source_output_name: target.output_name.clone(),
+            source_data_kind: HoudiniDataKind::GeometryTable,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReferenceTargetEntryResolution {
+    pub enabled: bool,
+    pub provenance: ReferenceTargetProvenance,
+    pub resolution: ReferenceTargetResolution,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5130,8 +5339,20 @@ pub(crate) struct ReferenceInputNodeInfo {
     pub status: ReferenceDiagnosticStatus,
     pub output_kind: Option<HoudiniDataKind>,
     pub source_provenance: Option<SourceProvenance>,
+    pub targets: Vec<ReferenceTargetNodeInfo>,
     pub preserves_source_data: bool,
     pub applies_hidden_transform: bool,
+}
+
+pub(crate) struct ReferenceTargetNodeInfo {
+    pub target: ReferenceTargetIdentity,
+    pub readable_path: String,
+    pub status: ReferenceDiagnosticStatus,
+    pub enabled: bool,
+    pub output_kind: Option<HoudiniDataKind>,
+    pub record_count: usize,
+    pub source_provenance: Option<SourceProvenance>,
+    pub provenance: ReferenceTargetProvenance,
 }
 
 pub(crate) struct PythonOperatorNodeInfo {
@@ -6454,6 +6675,9 @@ mod tests {
             .reference_input
             .as_ref()
             .expect("reference input should exist")
+            .targets
+            .first()
+            .expect("reference input should have a target")
             .target
             .clone();
 
@@ -6478,6 +6702,9 @@ mod tests {
             .reference_input
             .as_ref()
             .expect("reference input should exist")
+            .targets
+            .first()
+            .expect("reference input should have a target")
             .target
             .clone();
 
@@ -6510,6 +6737,9 @@ mod tests {
             .reference_input
             .as_ref()
             .expect("reference input should exist")
+            .targets
+            .first()
+            .expect("reference input should have a target")
             .target
             .clone();
 
@@ -6561,6 +6791,9 @@ mod tests {
             .reference_input
             .as_ref()
             .expect("reference input should exist")
+            .targets
+            .first()
+            .expect("reference input should have a target")
             .target
             .clone();
 
@@ -6584,6 +6817,177 @@ mod tests {
         assert_eq!(
             restored_resolution.readable_path,
             "main/OUT_SERIALIZED:geometry"
+        );
+    }
+
+    #[test]
+    fn reference_input_supports_visible_multi_source_target_set() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+
+        let entries = graph
+            .reference_input_resolutions(reference_index)
+            .expect("reference node should expose target entries");
+        let info = graph
+            .selected_node_info(reference_index)
+            .expect("reference node should expose node info");
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.enabled));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.resolution.status == ReferenceDiagnosticStatus::Resolved)
+        );
+        assert_eq!(info.input_count, 2);
+        assert_eq!(info.output_count, graph.visible_output_count() * 2);
+        assert_eq!(
+            info.reference_input
+                .expect("reference info should exist")
+                .targets
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn reference_input_disable_retains_target_but_excludes_output() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        let second_target_node_id = graph.nodes[second_null_index].node_id.clone();
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+
+        assert!(
+            graph.set_reference_target_enabled(reference_index, &second_target_node_id, false,)
+        );
+
+        let entries = graph
+            .reference_input_resolutions(reference_index)
+            .expect("reference node should expose target entries");
+        let disabled_entry = entries
+            .iter()
+            .find(|entry| entry.resolution.target.node_id == second_target_node_id)
+            .expect("disabled target should remain visible");
+
+        assert!(!disabled_entry.enabled);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            graph.node_output_record_count_for_index(reference_index),
+            graph.visible_output_count()
+        );
+        assert_eq!(
+            graph.nodes[reference_index].evaluation.state,
+            EvaluationState::Stale
+        );
+    }
+
+    #[test]
+    fn reference_input_remove_target_deletes_entry_but_disable_does_not() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        let second_target_node_id = graph.nodes[second_null_index].node_id.clone();
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+
+        assert!(
+            graph.set_reference_target_enabled(reference_index, &second_target_node_id, false,)
+        );
+        assert_eq!(
+            graph
+                .reference_input_resolutions(reference_index)
+                .expect("reference entries should exist")
+                .len(),
+            2
+        );
+
+        assert!(graph.remove_reference_target_from_node(reference_index, &second_target_node_id,));
+        assert_eq!(
+            graph
+                .reference_input_resolutions(reference_index)
+                .expect("reference entries should exist")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn disabled_missing_reference_target_is_retained_without_blocking_evaluation() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        let second_target_node_id = graph.nodes[second_null_index].node_id.clone();
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+        assert!(
+            graph.set_reference_target_enabled(reference_index, &second_target_node_id, false,)
+        );
+
+        graph
+            .remove_node(second_null_index)
+            .expect("disabled target node should be removable");
+        let reference_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::ReferenceInput)
+            .expect("reference node should still exist");
+        graph.demand_output_evaluation();
+        let info = graph
+            .selected_node_info(reference_index)
+            .expect("reference node should still have info");
+        let target_info = info.reference_input.expect("reference info should exist");
+
+        assert_eq!(info.status, NodeStatus::Healthy);
+        assert!(target_info.targets.iter().any(
+            |target| !target.enabled && target.status == ReferenceDiagnosticStatus::MissingNode
+        ));
+    }
+
+    #[test]
+    fn reference_target_set_provenance_and_enablement_affect_fingerprint() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        let second_target_node_id = graph.nodes[second_null_index].node_id.clone();
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .expect("output node should exist");
+        let before = graph.input_cache_keys_for_node(output_index);
+
+        assert!(
+            graph.set_reference_target_enabled(reference_index, &second_target_node_id, false,)
+        );
+        let after = graph.input_cache_keys_for_node(output_index);
+        let info = graph
+            .selected_node_info(reference_index)
+            .expect("reference node should have info")
+            .reference_input
+            .expect("reference info should exist");
+
+        assert_ne!(before, after);
+        assert!(
+            info.targets
+                .iter()
+                .any(|target| target.provenance.source_node_name == "OUT_B")
         );
     }
 

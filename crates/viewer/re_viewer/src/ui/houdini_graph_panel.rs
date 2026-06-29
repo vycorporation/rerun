@@ -955,6 +955,41 @@ impl HoudiniGraphPanel {
                             reference_input.applies_hidden_transform
                         ));
                         ui.end_row();
+
+                        ui.weak("Target set");
+                        ui.label(format!("{} target(s)", reference_input.targets.len()));
+                        ui.end_row();
+
+                        for (index, target) in reference_input.targets.iter().enumerate() {
+                            ui.weak(format!("Target {}", index + 1));
+                            ui.label(format!(
+                                "{} [{} / {}], {} record(s), id {}/{}:{}, provenance {} / {}:{}, source {}",
+                                target.readable_path,
+                                if target.enabled { "enabled" } else { "disabled" },
+                                target.status.as_str(),
+                                target.record_count,
+                                target.target.graph_id,
+                                target.target.node_id,
+                                target.target.output_name,
+                                target.provenance.source_graph_id,
+                                target.provenance.source_node_name,
+                                target.provenance.source_output_name,
+                                target
+                                    .source_provenance
+                                    .map(|provenance| provenance.as_str())
+                                    .unwrap_or("missing")
+                            ));
+                            ui.end_row();
+
+                            ui.weak("Target kind");
+                            ui.label(
+                                target
+                                    .output_kind
+                                    .map(|kind| format!("{kind:?}"))
+                                    .unwrap_or_else(|| "missing".to_owned()),
+                            );
+                            ui.end_row();
+                        }
                     }
 
                     if let Some(python_operator) = &info.python_operator {
