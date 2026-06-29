@@ -35,8 +35,15 @@ struct HoudiniGraphViewState {
 #[derive(Clone, Copy, Default)]
 struct HoudiniFrameStats {
     scene_prepare_micros: u128,
-    draw_enqueue_micros: u128,
+    draw_total_micros: u128,
+    boundary_expand_micros: u128,
+    draw_data_build_micros: u128,
+    renderer_callback_micros: u128,
     preview_mode: HoudiniPreviewMode,
+    renderer_path: HoudiniRendererPath,
+    cubic_evaluation: HoudiniCubicEvaluationPlacement,
+    fallback_path: HoudiniRendererPath,
+    target_draw_data_shape: &'static str,
     item_count: usize,
     polygon_count: usize,
     native_cubic_bezier_count: usize,
@@ -52,6 +59,72 @@ enum HoudiniPreviewMode {
     #[default]
     DetailedNativeCubic,
     RendererNativeLines,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum HoudiniRendererPath {
+    #[default]
+    EguiPainterShapes,
+    RendererLineDrawData,
+}
+
+impl HoudiniRendererPath {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::EguiPainterShapes => "egui painter fallback",
+            Self::RendererLineDrawData => "renderer line draw data",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum HoudiniCubicEvaluationPlacement {
+    #[default]
+    NativeEguiCubicShape,
+    CpuBoundaryLineStrips,
+    #[allow(dead_code)]
+    ShaderSideDeferred,
+}
+
+impl HoudiniCubicEvaluationPlacement {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeEguiCubicShape => "egui native cubic shape",
+            Self::CpuBoundaryLineStrips => "CPU boundary line strips",
+            Self::ShaderSideDeferred => "shader-side cubic evaluation deferred",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HoudiniRendererPlan {
+    preview_mode: HoudiniPreviewMode,
+    renderer_path: HoudiniRendererPath,
+    cubic_evaluation: HoudiniCubicEvaluationPlacement,
+    fallback_path: HoudiniRendererPath,
+    target_draw_data_shape: &'static str,
+}
+
+impl HoudiniRendererPlan {
+    fn for_scene(scene: &RerunSceneOutput) -> Self {
+        let preview_mode = preview_mode_for_scene(scene);
+        match preview_mode {
+            HoudiniPreviewMode::DetailedNativeCubic => Self {
+                preview_mode,
+                renderer_path: HoudiniRendererPath::EguiPainterShapes,
+                cubic_evaluation: HoudiniCubicEvaluationPlacement::NativeEguiCubicShape,
+                fallback_path: HoudiniRendererPath::EguiPainterShapes,
+                target_draw_data_shape: "egui convex polygon and native cubic shapes",
+            },
+            HoudiniPreviewMode::RendererNativeLines => Self {
+                preview_mode,
+                renderer_path: HoudiniRendererPath::RendererLineDrawData,
+                cubic_evaluation: HoudiniCubicEvaluationPlacement::CpuBoundaryLineStrips,
+                fallback_path: HoudiniRendererPath::EguiPainterShapes,
+                target_draw_data_shape: "batched 2D line strips: closed polygon rings plus CPU-sampled cubic previews",
+            },
+        }
+    }
 }
 
 impl HoudiniPreviewMode {
@@ -201,19 +274,29 @@ impl ViewClass for HoudiniGraphView {
                 .last_frame_stats
             {
                 ui.label(format!(
-                    "Last frame: {} items ({} polygons, {} native cubics), prepare {:.2} ms, draw enqueue {:.2} ms",
+                    "Last frame: {} items ({} polygons, {} native cubics), prepare {:.2} ms, draw total {:.2} ms",
                     stats.item_count,
                     stats.polygon_count,
                     stats.native_cubic_bezier_count,
                     stats.scene_prepare_micros as f32 / 1_000.0,
-                    stats.draw_enqueue_micros as f32 / 1_000.0
+                    stats.draw_total_micros as f32 / 1_000.0
                 ));
                 ui.label(format!(
-                    "{} mode, {} egui shapes, {} drawn items, {} preview segments, {} graph-owned points, {} boundary/debug points",
+                    "{} via {}, cubic eval: {}, fallback {}, {} egui/strip items, {} drawn items, {} preview segments",
                     stats.preview_mode.as_str(),
+                    stats.renderer_path.as_str(),
+                    stats.cubic_evaluation.as_str(),
+                    stats.fallback_path.as_str(),
                     stats.enqueued_shape_count,
                     stats.preview_drawn_item_count,
-                    stats.preview_segments_per_cubic,
+                    stats.preview_segments_per_cubic
+                ));
+                ui.label(format!("Draw data: {}", stats.target_draw_data_shape));
+                ui.label(format!(
+                    "Cost split: boundary expand {:.2} ms, draw-data build {:.2} ms, renderer callback {:.2} ms; {} graph-owned points, {} boundary/debug points",
+                    stats.boundary_expand_micros as f32 / 1_000.0,
+                    stats.draw_data_build_micros as f32 / 1_000.0,
+                    stats.renderer_callback_micros as f32 / 1_000.0,
                     stats.graph_owned_point_count,
                     stats.prepared_boundary_debug_point_count
                 ));
@@ -337,7 +420,8 @@ fn draw_houdini_output_view(
     let native_cubic_bezier_count = scene.native_cubic_bezier_count();
     let graph_owned_point_count = scene.graph_owned_point_count();
     let prepared_boundary_debug_point_count = scene.prepared_boundary_debug_point_count();
-    let preview_mode = preview_mode_for_scene(&scene);
+    let renderer_plan = HoudiniRendererPlan::for_scene(&scene);
+    let preview_mode = renderer_plan.preview_mode;
 
     ui.painter()
         .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
@@ -413,10 +497,11 @@ fn draw_houdini_output_view(
         rect.left_top() + egui::vec2(14.0, stats_line_y),
         Align2::LEFT_TOP,
         format!(
-            "native benchmark: {} graph points, {} boundary/debug points, prepare {:.2} ms",
+            "native benchmark: {} graph points, {} boundary/debug points, prepare {:.2} ms, draw {:.2} ms",
             graph_owned_point_count,
             prepared_boundary_debug_point_count,
-            scene_prepare_micros as f32 / 1_000.0
+            scene_prepare_micros as f32 / 1_000.0,
+            draw_start.elapsed().as_micros() as f32 / 1_000.0
         ),
         FontId::monospace(11.0),
         ui.visuals().weak_text_color(),
@@ -425,8 +510,9 @@ fn draw_houdini_output_view(
         rect.left_top() + egui::vec2(14.0, stats_line_y + 18.0),
         Align2::LEFT_TOP,
         format!(
-            "{}: {} egui shapes, {} drawn items, {} preview segments per cubic",
+            "{} via {}: {} egui/strip items, {} drawn items, {} preview segments per cubic",
             preview_mode.as_str(),
+            renderer_plan.renderer_path.as_str(),
             draw_summary.enqueued_shape_count,
             draw_summary.preview_drawn_item_count,
             draw_summary.preview_segments_per_cubic
@@ -437,8 +523,15 @@ fn draw_houdini_output_view(
 
     HoudiniFrameStats {
         scene_prepare_micros,
-        draw_enqueue_micros: draw_start.elapsed().as_micros(),
+        draw_total_micros: draw_start.elapsed().as_micros(),
+        boundary_expand_micros: draw_summary.boundary_expand_micros,
+        draw_data_build_micros: draw_summary.draw_data_build_micros,
+        renderer_callback_micros: draw_summary.renderer_callback_micros,
         preview_mode,
+        renderer_path: renderer_plan.renderer_path,
+        cubic_evaluation: renderer_plan.cubic_evaluation,
+        fallback_path: renderer_plan.fallback_path,
+        target_draw_data_shape: renderer_plan.target_draw_data_shape,
         item_count,
         polygon_count,
         native_cubic_bezier_count,
@@ -454,6 +547,9 @@ struct HoudiniDrawSummary {
     enqueued_shape_count: usize,
     preview_drawn_item_count: usize,
     preview_segments_per_cubic: usize,
+    boundary_expand_micros: u128,
+    draw_data_build_micros: u128,
+    renderer_callback_micros: u128,
 }
 
 fn draw_scene_items(
@@ -484,6 +580,7 @@ fn draw_detailed_scene_items(
     view_transform: HoudiniViewTransform,
     selected_item_index: Option<usize>,
 ) -> HoudiniDrawSummary {
+    let draw_start = Instant::now();
     let mut enqueued_shape_count = 0;
 
     for (item_index, geometry) in scene.items.iter().enumerate() {
@@ -520,6 +617,9 @@ fn draw_detailed_scene_items(
         enqueued_shape_count,
         preview_drawn_item_count: scene.items.len(),
         preview_segments_per_cubic: 0,
+        boundary_expand_micros: 0,
+        draw_data_build_micros: draw_start.elapsed().as_micros(),
+        renderer_callback_micros: 0,
     }
 }
 
@@ -529,6 +629,7 @@ fn draw_fast_scene_items(
     view_transform: HoudiniViewTransform,
     selected_item_index: Option<usize>,
 ) -> HoudiniDrawSummary {
+    let boundary_expand_start = Instant::now();
     let preview_segments_per_cubic = fast_preview_segments_per_cubic(scene);
     let preview_stride = fast_preview_item_stride(scene);
     let selected_item = selected_item_index.unwrap_or(usize::MAX);
@@ -568,12 +669,18 @@ fn draw_fast_scene_items(
     }
 
     let enqueued_shape_count = shapes.len();
+    let boundary_expand_micros = boundary_expand_start.elapsed().as_micros();
+    let draw_data_start = Instant::now();
     ui.painter().extend(shapes);
+    let draw_data_build_micros = draw_data_start.elapsed().as_micros();
 
     HoudiniDrawSummary {
         enqueued_shape_count,
         preview_drawn_item_count: enqueued_shape_count,
         preview_segments_per_cubic,
+        boundary_expand_micros,
+        draw_data_build_micros,
+        renderer_callback_micros: 0,
     }
 }
 
@@ -593,9 +700,13 @@ fn draw_renderer_native_scene_items(
             enqueued_shape_count: 0,
             preview_drawn_item_count: 0,
             preview_segments_per_cubic,
+            boundary_expand_micros: 0,
+            draw_data_build_micros: 0,
+            renderer_callback_micros: 0,
         });
     }
 
+    let boundary_expand_start = Instant::now();
     let mut line_builder = LineDrawableBuilder::new(ctx.render_ctx());
     line_builder.enable_alpha_blending();
     line_builder.reserve_strips(scene.items.len().div_ceil(preview_stride))?;
@@ -630,8 +741,10 @@ fn draw_renderer_native_scene_items(
             }
         }
     }
+    let boundary_expand_micros = boundary_expand_start.elapsed().as_micros();
 
     let enqueued_shape_count = preview_drawn_item_count;
+    let draw_data_start = Instant::now();
     let target_config = TargetConfiguration {
         name: "Houdini Graph renderer preview".into(),
         render_mode: ctx.render_mode(),
@@ -650,16 +763,22 @@ fn draw_renderer_native_scene_items(
     };
     let mut view_builder = ViewBuilder::new(ctx.render_ctx(), target_config)?;
     view_builder.queue_draw(ctx.render_ctx(), line_builder.into_draw_data()?);
+    let draw_data_build_micros = draw_data_start.elapsed().as_micros();
+    let renderer_callback_start = Instant::now();
     ui.painter().add(gpu_bridge::new_renderer_callback(
         view_builder,
         view_transform.viewport,
         re_renderer::Rgba::TRANSPARENT,
     ));
+    let renderer_callback_micros = renderer_callback_start.elapsed().as_micros();
 
     Ok(HoudiniDrawSummary {
         enqueued_shape_count,
         preview_drawn_item_count,
         preview_segments_per_cubic,
+        boundary_expand_micros,
+        draw_data_build_micros,
+        renderer_callback_micros,
     })
 }
 
@@ -1094,8 +1213,9 @@ impl GraphBounds {
 #[cfg(test)]
 mod tests {
     use super::{
-        GraphBounds, HoudiniPreviewMode, HoudiniViewTransform, hit_test_scene,
-        preview_mode_for_scene, renderer_preview_item_stride, renderer_preview_segments_per_cubic,
+        GraphBounds, HoudiniCubicEvaluationPlacement, HoudiniPreviewMode, HoudiniRendererPath,
+        HoudiniRendererPlan, HoudiniViewTransform, hit_test_scene, preview_mode_for_scene,
+        renderer_preview_item_stride, renderer_preview_segments_per_cubic,
     };
     use crate::ui::houdini_graph_panel::model::{
         CubicBezier, GraphPoint, GraphStyle, LayerKind, RerunSceneItem, RerunSceneOutput,
@@ -1371,6 +1491,40 @@ mod tests {
         assert_eq!(
             renderer_preview_item_stride(&native_cubic_scene(100_000)),
             2
+        );
+    }
+
+    #[test]
+    fn renderer_plan_keeps_small_scenes_on_native_egui_fallback() {
+        let plan = HoudiniRendererPlan::for_scene(&native_cubic_scene(64));
+
+        assert_eq!(plan.preview_mode, HoudiniPreviewMode::DetailedNativeCubic);
+        assert_eq!(plan.renderer_path, HoudiniRendererPath::EguiPainterShapes);
+        assert_eq!(
+            plan.cubic_evaluation,
+            HoudiniCubicEvaluationPlacement::NativeEguiCubicShape
+        );
+        assert_eq!(plan.fallback_path, HoudiniRendererPath::EguiPainterShapes);
+        assert!(plan.target_draw_data_shape.contains("native cubic"));
+    }
+
+    #[test]
+    fn renderer_plan_uses_batched_line_draw_data_for_large_scenes() {
+        let plan = HoudiniRendererPlan::for_scene(&native_cubic_scene(50_000));
+
+        assert_eq!(plan.preview_mode, HoudiniPreviewMode::RendererNativeLines);
+        assert_eq!(
+            plan.renderer_path,
+            HoudiniRendererPath::RendererLineDrawData
+        );
+        assert_eq!(
+            plan.cubic_evaluation,
+            HoudiniCubicEvaluationPlacement::CpuBoundaryLineStrips
+        );
+        assert_eq!(plan.fallback_path, HoudiniRendererPath::EguiPainterShapes);
+        assert!(
+            plan.target_draw_data_shape
+                .contains("batched 2D line strips")
         );
     }
 }
