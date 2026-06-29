@@ -1,6 +1,7 @@
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Float32Array, Float64Array, RecordBatch};
 use arrow::datatypes::SchemaRef;
@@ -442,6 +443,129 @@ impl GraphDocument {
         insert_index
     }
 
+    fn python_operator_node_inputs(
+        &self,
+        node_index: usize,
+    ) -> Option<(&GraphNode, &PythonOperatorNode, &PythonOperatorDeclaration)> {
+        let node = self.nodes.get(node_index)?;
+        let python_operator = node.python_operator.as_ref()?;
+        let declaration = self
+            .python_operator_declarations
+            .iter()
+            .find(|declaration| declaration.operator_id == python_operator.declaration_id)?;
+        Some((node, python_operator, declaration))
+    }
+
+    #[allow(dead_code)]
+    pub fn python_operator_cache_key(&self, node_index: usize) -> Option<PythonOperatorCacheKey> {
+        let (node, python_operator, declaration) = self.python_operator_node_inputs(node_index)?;
+        let source_digest = declaration.source_digest();
+        let parameter_digest = declaration.parameter_digest(node.parameter.value);
+        let input_cache_keys = self.input_cache_keys_for_node(node_index);
+        let dependency_lock_digest = self.python_environment.lock_digest.clone();
+        let capability_digest = declaration.capability_digest();
+        let key_digest = stable_digest(&serde_json::json!({
+            "operator_id": &declaration.operator_id,
+            "source_digest": &source_digest,
+            "declaration_version": &declaration.version,
+            "parameter_digest": &parameter_digest,
+            "input_cache_keys": &input_cache_keys,
+            "dependency_lock_digest": &dependency_lock_digest,
+            "capability_digest": &capability_digest,
+        }));
+
+        Some(PythonOperatorCacheKey {
+            key_digest,
+            operator_id: declaration.operator_id.clone(),
+            node_instance_id: python_operator.instance_id.clone(),
+            source_digest,
+            declaration_version: declaration.version.clone(),
+            parameter_digest,
+            input_cache_keys,
+            dependency_lock_digest,
+            capability_digest,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn record_python_operator_output(
+        &mut self,
+        node_index: usize,
+        output_counts: PythonOperatorOutputCounts,
+    ) -> Option<PythonOperatorProvenanceRecord> {
+        let (_, python_operator, declaration) = self.python_operator_node_inputs(node_index)?;
+        let cache_key = self.python_operator_cache_key(node_index)?;
+        let record = PythonOperatorProvenanceRecord {
+            operator_id: declaration.operator_id.clone(),
+            version: declaration.version.clone(),
+            node_instance_id: python_operator.instance_id.clone(),
+            source_path: declaration.source_path(),
+            source_digest: cache_key.source_digest.clone(),
+            parameter_digest: cache_key.parameter_digest.clone(),
+            input_cache_keys: cache_key.input_cache_keys.clone(),
+            dependency_identity: self.python_environment.dependency_identity(),
+            timestamp: current_timestamp_millis(),
+            output_counts,
+        };
+
+        if let Some(node) = self.nodes.get_mut(node_index)
+            && let Some(python_operator) = node.python_operator.as_mut()
+        {
+            python_operator.cache_key = Some(cache_key);
+            python_operator.provenance = Some(record.clone());
+            python_operator.provenance_summary = Some(record.summary());
+        }
+
+        Some(record)
+    }
+
+    #[allow(dead_code)]
+    fn input_cache_keys_for_node(&self, node_index: usize) -> Vec<String> {
+        self.nodes
+            .iter()
+            .take(node_index)
+            .filter(|node| node.participates_in_output)
+            .map(|node| match &node.python_operator {
+                Some(python_operator) => python_operator
+                    .cache_key
+                    .as_ref()
+                    .map(|cache_key| cache_key.key_digest.clone())
+                    .unwrap_or_else(|| format!("{}:uncached", python_operator.instance_id)),
+                None => stable_digest(&serde_json::json!({
+                    "kind": node.kind.as_str(),
+                    "parameter": node.parameter.value,
+                    "rule": &node.parameter.rule_spec,
+                })),
+            })
+            .collect()
+    }
+
+    fn block_python_operator_run(
+        &self,
+        node_index: usize,
+    ) -> Option<PythonOperatorDependencyStatus> {
+        let (_, _, declaration) = self.python_operator_node_inputs(node_index)?;
+        let dependency_status =
+            self.python_operator_dependency_status(Some(declaration.operator_id.as_str()));
+        (dependency_status != PythonOperatorDependencyStatus::Ready).then_some(dependency_status)
+    }
+
+    fn apply_python_operator_block(
+        node: &mut GraphNode,
+        dependency_status: PythonOperatorDependencyStatus,
+    ) {
+        node.evaluation.state = match dependency_status {
+            PythonOperatorDependencyStatus::StaleEnvironment => EvaluationState::Stale,
+            _ => EvaluationState::Manual,
+        };
+        node.evaluation.manual =
+            dependency_status != PythonOperatorDependencyStatus::StaleEnvironment;
+        node.evaluation.message = Some(dependency_status.summary().to_owned());
+        if let Some(python_operator) = node.python_operator.as_mut() {
+            python_operator.last_failure_summary = Some(dependency_status.summary().to_owned());
+        }
+    }
+
     fn python_operator_dependency_status(
         &self,
         declaration_id: Option<&str>,
@@ -572,7 +696,14 @@ impl GraphDocument {
     }
 
     pub fn demand_output_evaluation(&mut self) {
-        for node in &mut self.nodes {
+        for index in 0..self.nodes.len() {
+            if let Some(dependency_status) = self.block_python_operator_run(index) {
+                let node = &mut self.nodes[index];
+                Self::apply_python_operator_block(node, dependency_status);
+                continue;
+            }
+
+            let node = &mut self.nodes[index];
             if !node.participates_in_output || node.evaluation.manual {
                 continue;
             }
@@ -587,6 +718,13 @@ impl GraphDocument {
     }
 
     pub fn request_node_run(&mut self, index: usize) {
+        if let Some(dependency_status) = self.block_python_operator_run(index) {
+            if let Some(node) = self.nodes.get_mut(index) {
+                Self::apply_python_operator_block(node, dependency_status);
+            }
+            return;
+        }
+
         if let Some(node) = self.nodes.get_mut(index) {
             node.evaluation.state = EvaluationState::Running;
             node.evaluation.message = None;
@@ -755,6 +893,11 @@ impl GraphDocument {
                             declaration.dependencies.requirements.clone()
                         }),
                         provenance_summary: python_operator.provenance_summary.clone(),
+                        cache_key_summary: python_operator
+                            .cache_key
+                            .as_ref()
+                            .map(PythonOperatorCacheKey::summary),
+                        last_failure_summary: python_operator.last_failure_summary.clone(),
                     }),
                 }
             }
@@ -1884,6 +2027,9 @@ impl GraphNode {
                 instance_id,
                 declaration_id,
                 provenance_summary: None,
+                cache_key: None,
+                provenance: None,
+                last_failure_summary: None,
             }),
             evaluation: NodeEvaluation {
                 state: EvaluationState::Manual,
@@ -1908,6 +2054,75 @@ pub(crate) struct PythonOperatorNode {
     pub instance_id: String,
     pub declaration_id: String,
     pub provenance_summary: Option<String>,
+    #[serde(default)]
+    pub cache_key: Option<PythonOperatorCacheKey>,
+    #[serde(default)]
+    pub provenance: Option<PythonOperatorProvenanceRecord>,
+    #[serde(default)]
+    pub last_failure_summary: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonOperatorCacheKey {
+    pub key_digest: String,
+    pub operator_id: String,
+    pub node_instance_id: String,
+    pub source_digest: String,
+    pub declaration_version: String,
+    pub parameter_digest: String,
+    pub input_cache_keys: Vec<String>,
+    pub dependency_lock_digest: Option<String>,
+    pub capability_digest: String,
+}
+
+impl PythonOperatorCacheKey {
+    fn summary(&self) -> String {
+        format!(
+            "{} {} with {} input key(s)",
+            self.operator_id,
+            self.key_digest,
+            self.input_cache_keys.len()
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonOperatorProvenanceRecord {
+    pub operator_id: String,
+    pub version: String,
+    pub node_instance_id: String,
+    pub source_path: Option<String>,
+    pub source_digest: String,
+    pub parameter_digest: String,
+    pub input_cache_keys: Vec<String>,
+    pub dependency_identity: PythonDependencyIdentity,
+    pub timestamp: u128,
+    pub output_counts: PythonOperatorOutputCounts,
+}
+
+impl PythonOperatorProvenanceRecord {
+    fn summary(&self) -> String {
+        format!(
+            "{} {} produced {} geometry record(s)",
+            self.operator_id, self.version, self.output_counts.geometry_records
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonDependencyIdentity {
+    pub environment_id: String,
+    pub lock_digest: Option<String>,
+    pub resolver_tool: String,
+    pub resolver_version: Option<String>,
+    pub interpreter_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonOperatorOutputCounts {
+    pub geometry_records: usize,
+    pub attribute_records: usize,
+    pub layer_records: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1979,6 +2194,40 @@ impl PythonOperatorDeclaration {
             "capabilities": &self.capabilities,
         }))
         .unwrap_or_else(|err| format!("invalid-python-operator:{err}"))
+    }
+
+    #[allow(dead_code)]
+    fn source_digest(&self) -> String {
+        stable_digest(&serde_json::json!({
+            "source": &self.entry_point.source,
+            "callable": &self.entry_point.callable,
+        }))
+    }
+
+    #[allow(dead_code)]
+    fn parameter_digest(&self, node_parameter_value: f32) -> String {
+        stable_digest(&serde_json::json!({
+            "node_parameter_value": node_parameter_value,
+            "parameters": &self.parameters
+                .iter()
+                .filter(|parameter| parameter.invalidates_cache)
+                .collect::<Vec<_>>(),
+        }))
+    }
+
+    #[allow(dead_code)]
+    fn capability_digest(&self) -> String {
+        stable_digest(&serde_json::json!({
+            "capabilities": &self.capabilities,
+        }))
+    }
+
+    #[allow(dead_code)]
+    fn source_path(&self) -> Option<String> {
+        match &self.entry_point.source {
+            PythonOperatorSource::File { path } => Some(path.clone()),
+            PythonOperatorSource::Module { .. } => None,
+        }
     }
 }
 
@@ -2123,6 +2372,17 @@ impl PythonEnvironmentDescriptor {
             PythonEnvironmentStatus::Disabled => "Project Python execution is disabled.".to_owned(),
         }
     }
+
+    #[allow(dead_code)]
+    fn dependency_identity(&self) -> PythonDependencyIdentity {
+        PythonDependencyIdentity {
+            environment_id: self.environment_id.clone(),
+            lock_digest: self.lock_digest.clone(),
+            resolver_tool: self.resolver.tool.clone(),
+            resolver_version: self.resolver.version.clone(),
+            interpreter_path: self.environment_path.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -2189,6 +2449,24 @@ impl PythonDependencyHealth {
             && self.conflicts.is_empty()
             && self.failed_imports.is_empty()
     }
+}
+
+#[allow(dead_code)]
+fn stable_digest(value: &serde_json::Value) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+#[allow(dead_code)]
+fn current_timestamp_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -2426,6 +2704,8 @@ pub(crate) struct PythonOperatorNodeInfo {
     pub dependency_summary: String,
     pub requirements: Vec<String>,
     pub provenance_summary: Option<String>,
+    pub cache_key_summary: Option<String>,
+    pub last_failure_summary: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3113,10 +3393,11 @@ mod tests {
         PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
         PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
         PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
-        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
-        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
-        PythonRequirementsSource, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
-        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
+        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
+        PythonOperatorSource, PythonRequirementsSource, RerunSceneDebugItem, RerunSceneItem,
+        SourceProvenance, ViewerGeometry, load_cubic_bezier_parquet,
+        load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -3838,6 +4119,220 @@ mod tests {
             .dependency_status;
 
         assert_eq!(failed, PythonOperatorDependencyStatus::FailedEnvironment);
+    }
+
+    #[test]
+    fn python_operator_cache_key_invalidates_on_explicit_inputs() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        graph.python_environment = sample_python_environment_descriptor();
+        let node_index = graph.add_python_operator_node("vy.blur_curves");
+
+        let base_key = graph
+            .python_operator_cache_key(node_index)
+            .expect("cache key should derive from declaration and environment");
+        assert_eq!(base_key.operator_id, "vy.blur_curves");
+        assert_eq!(base_key.declaration_version, "0.1.0");
+        assert_eq!(
+            base_key.dependency_lock_digest.as_deref(),
+            Some("lock:abc123")
+        );
+        assert_eq!(base_key.input_cache_keys.len(), node_index);
+
+        graph.nodes[node_index].parameter.value = 0.75;
+        let changed_parameter = graph
+            .python_operator_cache_key(node_index)
+            .expect("cache key should update after parameter changes");
+        assert_ne!(changed_parameter.key_digest, base_key.key_digest);
+        assert_ne!(
+            changed_parameter.parameter_digest,
+            base_key.parameter_digest
+        );
+
+        graph.nodes[node_index].parameter.value = 0.0;
+        graph.python_environment.lock_digest = Some("lock:def456".to_owned());
+        let changed_lock = graph
+            .python_operator_cache_key(node_index)
+            .expect("cache key should update after lock changes");
+        assert_ne!(changed_lock.key_digest, base_key.key_digest);
+        assert_ne!(
+            changed_lock.dependency_lock_digest,
+            base_key.dependency_lock_digest
+        );
+
+        graph.python_environment.lock_digest = Some("lock:abc123".to_owned());
+        graph.python_operator_declarations[0].entry_point.source = PythonOperatorSource::File {
+            path: "operators/blur_curves_v2.py".to_owned(),
+        };
+        let changed_source = graph
+            .python_operator_cache_key(node_index)
+            .expect("cache key should update after source changes");
+        assert_ne!(changed_source.key_digest, base_key.key_digest);
+        assert_ne!(changed_source.source_digest, base_key.source_digest);
+    }
+
+    #[test]
+    fn python_operator_cache_key_tracks_upstream_input_keys() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        graph.python_environment = sample_python_environment_descriptor();
+        let node_index = graph.add_python_operator_node("vy.blur_curves");
+
+        let base_key = graph
+            .python_operator_cache_key(node_index)
+            .expect("cache key should exist");
+        graph.nodes[1].parameter.value = 0.25;
+        let changed_input = graph
+            .python_operator_cache_key(node_index)
+            .expect("cache key should update after upstream graph input changes");
+
+        assert_ne!(changed_input.key_digest, base_key.key_digest);
+        assert_ne!(changed_input.input_cache_keys, base_key.input_cache_keys);
+    }
+
+    #[test]
+    fn python_operator_provenance_persists_typed_output_metadata() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        graph.python_environment = sample_python_environment_descriptor();
+        let node_index = graph.add_python_operator_node("vy.blur_curves");
+
+        let record = graph
+            .record_python_operator_output(
+                node_index,
+                PythonOperatorOutputCounts {
+                    geometry_records: 4,
+                    attribute_records: 2,
+                    layer_records: 1,
+                },
+            )
+            .expect("provenance should be recorded for python operator");
+
+        assert_eq!(record.operator_id, "vy.blur_curves");
+        assert_eq!(
+            record.source_path.as_deref(),
+            Some("operators/blur_curves.py")
+        );
+        assert_eq!(
+            record.dependency_identity.interpreter_path.as_deref(),
+            Some(".houdini/python/envs/project-python")
+        );
+        assert_eq!(record.output_counts.geometry_records, 4);
+
+        let json = graph.to_sidecar_json().unwrap();
+        assert!(json.contains("cache_key"));
+        assert!(json.contains("provenance"));
+        assert!(!json.contains("pickle"));
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        let restored_python = restored
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::PythonOperator)
+            .expect("python node should restore")
+            .python_operator
+            .as_ref()
+            .expect("python node should restore");
+        assert_eq!(
+            restored_python
+                .cache_key
+                .as_ref()
+                .expect("cache key should restore")
+                .operator_id,
+            "vy.blur_curves"
+        );
+        assert_eq!(
+            restored_python
+                .provenance
+                .as_ref()
+                .expect("provenance should restore")
+                .output_counts
+                .geometry_records,
+            4
+        );
+    }
+
+    #[test]
+    fn python_operator_environment_health_blocks_or_allows_run_requests() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        let node_index = graph.add_python_operator_node("vy.blur_curves");
+
+        graph.request_node_run(node_index);
+        assert_eq!(
+            graph.nodes[node_index].evaluation.state,
+            EvaluationState::Manual
+        );
+        assert_eq!(
+            graph.nodes[node_index].evaluation.message.as_deref(),
+            Some("Project Python environment is not configured.")
+        );
+
+        graph.python_environment = sample_python_environment_descriptor();
+        graph.python_environment.lock_status = PythonEnvironmentStatus::Stale;
+        graph.request_node_run(node_index);
+        assert_eq!(
+            graph.nodes[node_index].evaluation.state,
+            EvaluationState::Stale
+        );
+        assert!(!graph.nodes[node_index].evaluation.manual);
+
+        graph.python_environment = sample_python_environment_descriptor();
+        graph.python_environment.lock_status = PythonEnvironmentStatus::Failed;
+        graph.python_environment.last_failure_summary = Some("uv lock conflict".to_owned());
+        graph.request_node_run(node_index);
+        assert_eq!(
+            graph.nodes[node_index].evaluation.state,
+            EvaluationState::Manual
+        );
+        assert_eq!(
+            graph.nodes[node_index]
+                .python_operator
+                .as_ref()
+                .expect("python operator should exist")
+                .last_failure_summary
+                .as_deref(),
+            Some("Project Python environment has dependency or validation failures.")
+        );
+
+        graph.python_environment = sample_python_environment_descriptor();
+        graph.request_node_run(node_index);
+        assert_eq!(
+            graph.nodes[node_index].evaluation.state,
+            EvaluationState::Running
+        );
+        assert!(graph.nodes[node_index].evaluation.message.is_none());
+    }
+
+    #[test]
+    fn stale_python_environment_marks_python_nodes_stale_on_demand() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        graph.python_environment = sample_python_environment_descriptor();
+        graph.python_environment.lock_status = PythonEnvironmentStatus::Stale;
+        let node_index = graph.add_python_operator_node("vy.blur_curves");
+
+        graph.demand_output_evaluation();
+
+        assert_eq!(
+            graph.nodes[node_index].evaluation.state,
+            EvaluationState::Stale
+        );
+        assert_eq!(
+            graph.nodes[node_index].evaluation.message.as_deref(),
+            Some("Project Python environment must be resolved before execution.")
+        );
     }
 
     #[test]

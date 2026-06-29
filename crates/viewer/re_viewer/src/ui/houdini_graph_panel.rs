@@ -743,6 +743,18 @@ impl HoudiniGraphPanel {
                             ui.label(provenance);
                             ui.end_row();
                         }
+
+                        if let Some(cache_key) = &python_operator.cache_key_summary {
+                            ui.weak("Cache key");
+                            ui.label(cache_key);
+                            ui.end_row();
+                        }
+
+                        if let Some(last_failure) = &python_operator.last_failure_summary {
+                            ui.weak("Last failure");
+                            ui.label(last_failure);
+                            ui.end_row();
+                        }
                     }
                 });
             ui.label(info.summary);
