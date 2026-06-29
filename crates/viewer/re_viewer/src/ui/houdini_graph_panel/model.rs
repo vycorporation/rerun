@@ -443,6 +443,156 @@ impl GraphDocument {
         insert_index
     }
 
+    #[allow(dead_code)]
+    pub fn python_environment_resolve_plan(
+        &self,
+        trigger: PythonEnvironmentResolveTrigger,
+    ) -> PythonEnvironmentResolvePlan {
+        let mut requirements = Vec::new();
+        for requirement in &self.python_environment.project_requirements.requirements {
+            push_unique_requirement(
+                &mut requirements,
+                PythonRequirementContribution {
+                    requirement: requirement.clone(),
+                    source: PythonRequirementSource::Project,
+                },
+            );
+        }
+
+        for node in self.nodes.iter().filter(|node| node.participates_in_output) {
+            let Some(python_operator) = &node.python_operator else {
+                continue;
+            };
+            let Some(declaration) = self
+                .python_operator_declarations
+                .iter()
+                .find(|declaration| declaration.operator_id == python_operator.declaration_id)
+            else {
+                continue;
+            };
+            for requirement in &declaration.dependencies.requirements {
+                push_unique_requirement(
+                    &mut requirements,
+                    PythonRequirementContribution {
+                        requirement: requirement.clone(),
+                        source: PythonRequirementSource::Operator {
+                            operator_id: declaration.operator_id.clone(),
+                        },
+                    },
+                );
+            }
+        }
+
+        let conflicts = dependency_conflicts(&requirements);
+        PythonEnvironmentResolvePlan {
+            trigger,
+            requirements,
+            conflicts,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn begin_python_environment_resolve(
+        &mut self,
+        trigger: PythonEnvironmentResolveTrigger,
+    ) -> PythonEnvironmentResolvePlan {
+        let plan = self.python_environment_resolve_plan(trigger);
+        let previous_ready = (self.python_environment.lock_status
+            == PythonEnvironmentStatus::Ready)
+            .then(|| PythonEnvironmentReadySnapshot {
+                lock_digest: self.python_environment.lock_digest.clone(),
+                resolver_version: self.python_environment.resolver.version.clone(),
+                environment_path: self.python_environment.environment_path.clone(),
+                dependency_health: self.python_environment.dependency_health.clone(),
+                last_health_check: self.python_environment.last_health_check.clone(),
+            });
+
+        self.python_environment.lock_status = PythonEnvironmentStatus::Resolving;
+        self.python_environment.last_failure_summary = None;
+        self.python_environment.resolve_state.last_plan = Some(plan.clone());
+        self.python_environment.resolve_state.in_progress = Some(PythonEnvironmentResolveRun {
+            trigger,
+            resolver_tool: self.python_environment.resolver.tool.clone(),
+            started_at: current_timestamp_millis(),
+        });
+        if previous_ready.is_some() {
+            self.python_environment.resolve_state.previous_ready = previous_ready;
+        }
+
+        plan
+    }
+
+    #[allow(dead_code)]
+    pub fn complete_python_environment_resolve(
+        &mut self,
+        lock_digest: impl Into<String>,
+        resolver_version: impl Into<String>,
+        interpreter_path: impl Into<String>,
+        package_count: usize,
+    ) {
+        self.python_environment.lock_status = PythonEnvironmentStatus::Ready;
+        self.python_environment.lock_digest = Some(lock_digest.into());
+        self.python_environment.resolver.version = Some(resolver_version.into());
+        self.python_environment.environment_path = Some(interpreter_path.into());
+        self.python_environment.last_health_check = Some(current_timestamp_millis().to_string());
+        self.python_environment.last_failure_summary = None;
+        self.python_environment.dependency_health = PythonDependencyHealth {
+            package_count,
+            missing_packages: Vec::new(),
+            conflicts: Vec::new(),
+            failed_imports: Vec::new(),
+        };
+        self.python_environment.resolve_state.in_progress = None;
+        self.python_environment.resolve_state.previous_ready = None;
+    }
+
+    #[allow(dead_code)]
+    pub fn fail_python_environment_resolve(&mut self, failure_summary: impl Into<String>) {
+        let failure_summary = failure_summary.into();
+        self.python_environment.lock_status = PythonEnvironmentStatus::Failed;
+        self.python_environment.last_failure_summary = Some(failure_summary.clone());
+        self.python_environment.dependency_health.conflicts = self
+            .python_environment
+            .resolve_state
+            .last_plan
+            .as_ref()
+            .map(|plan| {
+                plan.conflicts
+                    .iter()
+                    .map(PythonDependencyConflict::summary)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if self
+            .python_environment
+            .dependency_health
+            .conflicts
+            .is_empty()
+        {
+            self.python_environment
+                .dependency_health
+                .conflicts
+                .push(failure_summary);
+        }
+        self.python_environment.resolve_state.in_progress = None;
+    }
+
+    #[allow(dead_code)]
+    pub fn cancel_python_environment_resolve(&mut self) {
+        if let Some(previous_ready) = self.python_environment.resolve_state.previous_ready.take() {
+            self.python_environment.lock_status = PythonEnvironmentStatus::Ready;
+            self.python_environment.lock_digest = previous_ready.lock_digest;
+            self.python_environment.resolver.version = previous_ready.resolver_version;
+            self.python_environment.environment_path = previous_ready.environment_path;
+            self.python_environment.dependency_health = previous_ready.dependency_health;
+            self.python_environment.last_health_check = previous_ready.last_health_check;
+            self.python_environment.last_failure_summary = None;
+        } else {
+            self.python_environment.lock_status = PythonEnvironmentStatus::Unlocked;
+        }
+        self.python_environment.resolve_state.in_progress = None;
+    }
+
     fn python_operator_node_inputs(
         &self,
         node_index: usize,
@@ -2314,6 +2464,7 @@ pub(crate) struct PythonEnvironmentDescriptor {
     pub environment_id: String,
     pub python_version_requirement: String,
     pub requirements_source: PythonRequirementsSource,
+    pub project_requirements: PythonProjectRequirements,
     pub lock_status: PythonEnvironmentStatus,
     pub lock_digest: Option<String>,
     pub environment_path: Option<String>,
@@ -2321,6 +2472,7 @@ pub(crate) struct PythonEnvironmentDescriptor {
     pub last_health_check: Option<String>,
     pub last_failure_summary: Option<String>,
     pub dependency_health: PythonDependencyHealth,
+    pub resolve_state: PythonEnvironmentResolveState,
 }
 
 impl Default for PythonEnvironmentDescriptor {
@@ -2329,6 +2481,7 @@ impl Default for PythonEnvironmentDescriptor {
             environment_id: "project-python".to_owned(),
             python_version_requirement: ">=3.11,<3.13".to_owned(),
             requirements_source: PythonRequirementsSource::ProjectLocal,
+            project_requirements: PythonProjectRequirements::default(),
             lock_status: PythonEnvironmentStatus::Missing,
             lock_digest: None,
             environment_path: Some(".houdini/python/envs/project-python".to_owned()),
@@ -2339,6 +2492,7 @@ impl Default for PythonEnvironmentDescriptor {
             last_health_check: None,
             last_failure_summary: None,
             dependency_health: PythonDependencyHealth::default(),
+            resolve_state: PythonEnvironmentResolveState::default(),
         }
     }
 }
@@ -2383,6 +2537,11 @@ impl PythonEnvironmentDescriptor {
             interpreter_path: self.environment_path.clone(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonProjectRequirements {
+    pub requirements: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -2436,6 +2595,104 @@ pub(crate) struct PythonEnvironmentResolver {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonEnvironmentResolveState {
+    pub last_plan: Option<PythonEnvironmentResolvePlan>,
+    pub in_progress: Option<PythonEnvironmentResolveRun>,
+    pub previous_ready: Option<PythonEnvironmentReadySnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonEnvironmentResolvePlan {
+    pub trigger: PythonEnvironmentResolveTrigger,
+    pub requirements: Vec<PythonRequirementContribution>,
+    pub conflicts: Vec<PythonDependencyConflict>,
+}
+
+impl PythonEnvironmentResolvePlan {
+    pub fn unique_requirement_count(&self) -> usize {
+        self.requirements.len()
+    }
+
+    pub fn conflict_summary(&self) -> String {
+        if self.conflicts.is_empty() {
+            "No dependency conflicts detected in declared requirements.".to_owned()
+        } else {
+            format!("{} dependency conflict(s) detected.", self.conflicts.len())
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum PythonEnvironmentResolveTrigger {
+    ExplicitUserAction,
+    TrustedProjectOpen,
+}
+
+impl PythonEnvironmentResolveTrigger {
+    #[allow(dead_code)]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitUserAction => "Explicit user action",
+            Self::TrustedProjectOpen => "Trusted project open",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonEnvironmentResolveRun {
+    pub trigger: PythonEnvironmentResolveTrigger,
+    pub resolver_tool: String,
+    pub started_at: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonEnvironmentReadySnapshot {
+    pub lock_digest: Option<String>,
+    pub resolver_version: Option<String>,
+    pub environment_path: Option<String>,
+    pub dependency_health: PythonDependencyHealth,
+    pub last_health_check: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonRequirementContribution {
+    pub requirement: String,
+    pub source: PythonRequirementSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum PythonRequirementSource {
+    Project,
+    Operator { operator_id: String },
+}
+
+impl PythonRequirementSource {
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> String {
+        match self {
+            Self::Project => "project".to_owned(),
+            Self::Operator { operator_id } => format!("operator {operator_id}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonDependencyConflict {
+    pub package: String,
+    pub requirements: Vec<PythonRequirementContribution>,
+}
+
+impl PythonDependencyConflict {
+    pub fn summary(&self) -> String {
+        format!(
+            "{} has {} incompatible requirement declaration(s)",
+            self.package,
+            self.requirements.len()
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct PythonDependencyHealth {
     pub package_count: usize,
     pub missing_packages: Vec<String>,
@@ -2467,6 +2724,60 @@ fn current_timestamp_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis())
+}
+
+#[allow(dead_code)]
+fn push_unique_requirement(
+    requirements: &mut Vec<PythonRequirementContribution>,
+    contribution: PythonRequirementContribution,
+) {
+    if !requirements.iter().any(|existing| {
+        existing.requirement == contribution.requirement && existing.source == contribution.source
+    }) {
+        requirements.push(contribution);
+    }
+}
+
+#[allow(dead_code)]
+fn dependency_conflicts(
+    requirements: &[PythonRequirementContribution],
+) -> Vec<PythonDependencyConflict> {
+    let mut conflicts = Vec::new();
+    for contribution in requirements {
+        let package = requirement_package_name(&contribution.requirement);
+        if conflicts
+            .iter()
+            .any(|conflict: &PythonDependencyConflict| conflict.package == package)
+        {
+            continue;
+        }
+        let package_requirements = requirements
+            .iter()
+            .filter(|other| requirement_package_name(&other.requirement) == package)
+            .cloned()
+            .collect::<Vec<_>>();
+        let distinct_specs = package_requirements
+            .iter()
+            .map(|other| other.requirement.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        if distinct_specs.len() > 1 {
+            conflicts.push(PythonDependencyConflict {
+                package,
+                requirements: package_requirements,
+            });
+        }
+    }
+    conflicts
+}
+
+#[allow(dead_code)]
+fn requirement_package_name(requirement: &str) -> String {
+    requirement
+        .split(['=', '<', '>', '!', '~', '[', ';', ' '])
+        .next()
+        .unwrap_or(requirement)
+        .trim()
+        .to_ascii_lowercase()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -3390,14 +3701,15 @@ mod tests {
         GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema, HoudiniGeometryRecord,
         HoudiniGeometrySchema, LayerKind, NodeEvaluation, NodeKind, NodeParameter,
         NodeParameterKind, NodeStatus, PythonDependencyHealth, PythonEnvironmentDescriptor,
-        PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
-        PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
-        PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
-        PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
-        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
-        PythonOperatorSource, PythonRequirementsSource, RerunSceneDebugItem, RerunSceneItem,
-        SourceProvenance, ViewerGeometry, load_cubic_bezier_parquet,
-        load_cubic_bezier_parquet_with_metadata,
+        PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
+        PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
+        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorDependencyStatus,
+        PythonOperatorEntryPoint, PythonOperatorNumericRange, PythonOperatorOutputCounts,
+        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
+        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
+        PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
+        RerunSceneDebugItem, RerunSceneItem, SourceProvenance, ViewerGeometry,
+        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -4119,6 +4431,155 @@ mod tests {
             .dependency_status;
 
         assert_eq!(failed, PythonOperatorDependencyStatus::FailedEnvironment);
+    }
+
+    #[test]
+    fn python_environment_resolve_plan_unions_project_and_enabled_operator_requirements() {
+        let mut graph = GraphDocument::sample();
+        graph.python_environment.project_requirements = PythonProjectRequirements {
+            requirements: vec!["pyarrow==16.1.0".to_owned()],
+        };
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        graph.add_python_operator_node("vy.blur_curves");
+
+        let plan = graph
+            .python_environment_resolve_plan(PythonEnvironmentResolveTrigger::ExplicitUserAction);
+
+        assert_eq!(
+            plan.trigger,
+            PythonEnvironmentResolveTrigger::ExplicitUserAction
+        );
+        assert_eq!(plan.unique_requirement_count(), 2);
+        assert!(plan.requirements.iter().any(|contribution| {
+            contribution.requirement == "pyarrow==16.1.0"
+                && contribution.source == PythonRequirementSource::Project
+        }));
+        assert!(plan.requirements.iter().any(|contribution| {
+            contribution.requirement == "numpy==2.0.0"
+                && contribution.source
+                    == PythonRequirementSource::Operator {
+                        operator_id: "vy.blur_curves".to_owned(),
+                    }
+        }));
+        assert!(plan.conflicts.is_empty());
+    }
+
+    #[test]
+    fn python_environment_resolve_plan_reports_operator_conflicts() {
+        let mut graph = GraphDocument::sample();
+        graph.python_environment.project_requirements = PythonProjectRequirements {
+            requirements: vec!["numpy==1.26.4".to_owned()],
+        };
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        graph.add_python_operator_node("vy.blur_curves");
+
+        let plan = graph
+            .python_environment_resolve_plan(PythonEnvironmentResolveTrigger::ExplicitUserAction);
+
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].package, "numpy");
+        assert_eq!(plan.conflicts[0].requirements.len(), 2);
+        assert_eq!(
+            plan.conflict_summary(),
+            "1 dependency conflict(s) detected."
+        );
+    }
+
+    #[test]
+    fn python_environment_resolve_lifecycle_records_ready_identity() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        graph.add_python_operator_node("vy.blur_curves");
+
+        let plan = graph
+            .begin_python_environment_resolve(PythonEnvironmentResolveTrigger::ExplicitUserAction);
+        assert_eq!(
+            graph.python_environment.lock_status,
+            PythonEnvironmentStatus::Resolving
+        );
+        assert_eq!(plan.trigger.as_str(), "Explicit user action");
+        assert!(
+            graph
+                .python_environment
+                .resolve_state
+                .in_progress
+                .as_ref()
+                .is_some_and(|run| run.resolver_tool == "uv")
+        );
+
+        graph.complete_python_environment_resolve(
+            "lock:resolved",
+            "0.7.1",
+            ".houdini/python/envs/project-python",
+            8,
+        );
+
+        assert_eq!(
+            graph.python_environment.lock_status,
+            PythonEnvironmentStatus::Ready
+        );
+        assert_eq!(
+            graph.python_environment.lock_digest.as_deref(),
+            Some("lock:resolved")
+        );
+        assert_eq!(
+            graph.python_environment.resolver.version.as_deref(),
+            Some("0.7.1")
+        );
+        assert_eq!(
+            graph.python_environment.environment_path.as_deref(),
+            Some(".houdini/python/envs/project-python")
+        );
+        assert_eq!(graph.python_environment.dependency_health.package_count, 8);
+        assert!(graph.python_environment.resolve_state.in_progress.is_none());
+    }
+
+    #[test]
+    fn python_environment_cancel_or_failure_preserves_previous_ready_snapshot() {
+        let mut graph = GraphDocument::sample();
+        graph.python_environment = sample_python_environment_descriptor();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        graph.add_python_operator_node("vy.blur_curves");
+
+        graph.begin_python_environment_resolve(PythonEnvironmentResolveTrigger::ExplicitUserAction);
+        graph.cancel_python_environment_resolve();
+        assert_eq!(
+            graph.python_environment.lock_status,
+            PythonEnvironmentStatus::Ready
+        );
+        assert_eq!(
+            graph.python_environment.lock_digest.as_deref(),
+            Some("lock:abc123")
+        );
+        assert_eq!(graph.python_environment.dependency_health.package_count, 3);
+
+        graph.begin_python_environment_resolve(PythonEnvironmentResolveTrigger::ExplicitUserAction);
+        graph.fail_python_environment_resolve("uv resolve failed");
+        assert_eq!(
+            graph.python_environment.lock_status,
+            PythonEnvironmentStatus::Failed
+        );
+        assert_eq!(
+            graph.python_environment.last_failure_summary.as_deref(),
+            Some("uv resolve failed")
+        );
+        assert_eq!(
+            graph
+                .python_environment
+                .resolve_state
+                .previous_ready
+                .as_ref()
+                .and_then(|snapshot| snapshot.lock_digest.as_deref()),
+            Some("lock:abc123")
+        );
     }
 
     #[test]
@@ -5146,6 +5607,9 @@ mod tests {
             environment_id: "project-python".to_owned(),
             python_version_requirement: ">=3.11,<3.13".to_owned(),
             requirements_source: PythonRequirementsSource::GeneratedFromOperators,
+            project_requirements: PythonProjectRequirements {
+                requirements: vec!["pyarrow==16.1.0".to_owned()],
+            },
             lock_status: PythonEnvironmentStatus::Ready,
             lock_digest: Some("lock:abc123".to_owned()),
             environment_path: Some(".houdini/python/envs/project-python".to_owned()),
@@ -5161,6 +5625,7 @@ mod tests {
                 conflicts: Vec::new(),
                 failed_imports: Vec::new(),
             },
+            resolve_state: PythonEnvironmentResolveState::default(),
         }
     }
 

@@ -10,8 +10,8 @@ pub(crate) mod model;
 
 use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState, GeometryBounds,
-    GraphDocument, GraphPoint, GraphStyle, LayerKind, NodeStatus, PythonEnvironmentStatus,
-    PythonOperatorDependencyStatus, SourceMetadata,
+    GraphDocument, GraphPoint, GraphStyle, LayerKind, NodeStatus, PythonEnvironmentResolveTrigger,
+    PythonEnvironmentStatus, PythonOperatorDependencyStatus, SourceMetadata,
 };
 
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
@@ -133,7 +133,7 @@ impl HoudiniGraphPanel {
             self.render_benchmark_ui(ui, &mut graph);
             self.graph_document_ui(ui, &mut graph);
             self.recording_export_ui(ui, &graph);
-            self.python_environment_ui(ui, &graph);
+            self.python_environment_ui(ui, &mut graph);
             ui.add_space(6.0);
             let export_polyline_points = graph.prepared_export_point_count();
             ui.label(format!(
@@ -213,7 +213,7 @@ impl HoudiniGraphPanel {
         }
     }
 
-    fn python_environment_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
+    fn python_environment_ui(&self, ui: &mut Ui, graph: &mut GraphDocument) {
         let environment = &graph.python_environment;
         ui.add_space(6.0);
         ui.strong("Python Environment");
@@ -299,6 +299,35 @@ impl HoudiniGraphPanel {
         if environment.lock_status == PythonEnvironmentStatus::Failed {
             ui.weak("Resolve or repair the project environment before running Python operators.");
         }
+
+        if let Some(plan) = &environment.resolve_state.last_plan {
+            ui.weak(format!(
+                "Resolve plan: {} requirement(s), {}",
+                plan.unique_requirement_count(),
+                plan.conflict_summary()
+            ));
+            for conflict in &plan.conflicts {
+                ui.colored_label(ui.visuals().warn_fg_color, conflict.summary());
+            }
+        }
+
+        let resolving = environment.lock_status == PythonEnvironmentStatus::Resolving;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!resolving, egui::Button::new("Resolve with uv"))
+                .clicked()
+            {
+                graph.begin_python_environment_resolve(
+                    PythonEnvironmentResolveTrigger::ExplicitUserAction,
+                );
+            }
+            if ui
+                .add_enabled(resolving, egui::Button::new("Cancel resolve"))
+                .clicked()
+            {
+                graph.cancel_python_environment_resolve();
+            }
+        });
     }
 
     fn render_benchmark_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
