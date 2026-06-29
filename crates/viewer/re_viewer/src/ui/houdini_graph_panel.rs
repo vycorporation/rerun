@@ -60,6 +60,10 @@ pub(crate) struct HoudiniGraphPanel {
     table_sort: AttributeTableSort,
     table_sort_descending: bool,
     table_commit_status: Option<String>,
+    asset_name: String,
+    asset_description: String,
+    asset_help: String,
+    asset_status: Option<String>,
 }
 
 impl Default for HoudiniGraphPanel {
@@ -80,6 +84,10 @@ impl Default for HoudiniGraphPanel {
             table_sort: AttributeTableSort::RecordIndex,
             table_sort_descending: false,
             table_commit_status: None,
+            asset_name: "Curve cleanup".to_owned(),
+            asset_description: "Project-local graph asset.".to_owned(),
+            asset_help: "Created from the current Houdini graph.".to_owned(),
+            asset_status: None,
         }
     }
 }
@@ -133,6 +141,7 @@ impl HoudiniGraphPanel {
             self.parquet_import_ui(ui, &mut graph);
             self.render_benchmark_ui(ui, &mut graph);
             self.graph_document_ui(ui, &mut graph);
+            self.asset_authoring_ui(ui, &mut graph);
             self.recording_export_ui(ui, &graph);
             self.python_environment_ui(ui, &mut graph);
             ui.add_space(6.0);
@@ -403,6 +412,39 @@ impl HoudiniGraphPanel {
             }
         });
         if let Some(status) = &self.graph_document_status {
+            ui.weak(status);
+        }
+    }
+
+    fn asset_authoring_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.add_space(6.0);
+        ui.strong("Asset");
+        egui::Grid::new("houdini_create_asset")
+            .num_columns(2)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                ui.weak("Name");
+                ui.text_edit_singleline(&mut self.asset_name);
+                ui.end_row();
+
+                ui.weak("Description");
+                ui.text_edit_singleline(&mut self.asset_description);
+                ui.end_row();
+
+                ui.weak("Help");
+                ui.text_edit_singleline(&mut self.asset_help);
+                ui.end_row();
+            });
+        if ui.button("Create Asset from Graph").clicked() {
+            let draft = graph.create_asset_draft_from_graph(
+                self.asset_name.trim(),
+                self.asset_description.trim(),
+                self.asset_help.trim(),
+            );
+            let asset_id = graph.commit_asset_draft(draft);
+            self.asset_status = Some(format!("Created project asset: {asset_id}"));
+        }
+        if let Some(status) = &self.asset_status {
             ui.weak(status);
         }
     }
@@ -794,8 +836,9 @@ impl HoudiniGraphPanel {
 
                         ui.weak("Version");
                         ui.label(format!(
-                            "{} / {}",
-                            asset.version,
+                            "instance {} / current {} / {}",
+                            asset.instance_version,
+                            asset.current_version.as_deref().unwrap_or("missing"),
                             asset.version_status.as_str()
                         ));
                         ui.end_row();

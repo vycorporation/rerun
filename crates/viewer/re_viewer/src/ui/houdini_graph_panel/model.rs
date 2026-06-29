@@ -458,6 +458,12 @@ impl GraphDocument {
     #[allow(dead_code)]
     pub fn add_procedural_asset_node(&mut self, asset_id: impl Into<String>) -> usize {
         let asset_id = asset_id.into();
+        let instance_version = self
+            .procedural_asset_declarations
+            .iter()
+            .find(|declaration| declaration.asset_id == asset_id)
+            .map(|declaration| declaration.version.clone())
+            .unwrap_or_else(|| "unknown".to_owned());
         let instance_id = format!(
             "asset_{}",
             self.nodes
@@ -471,9 +477,115 @@ impl GraphDocument {
             .iter()
             .position(|node| node.kind == NodeKind::Output)
             .unwrap_or(self.nodes.len());
-        let node = GraphNode::procedural_asset(instance_id, asset_id);
+        let node = GraphNode::procedural_asset(instance_id, asset_id, instance_version);
         self.nodes.insert(insert_index, node);
         insert_index
+    }
+
+    #[allow(dead_code)]
+    pub fn create_asset_draft_from_graph(
+        &self,
+        display_name: impl Into<String>,
+        description: impl Into<String>,
+        help: impl Into<String>,
+    ) -> CreateAssetDraft {
+        let display_name = display_name.into();
+        let asset_slug = sanitize_asset_id_part(&display_name);
+        CreateAssetDraft {
+            asset_id: format!("project.asset.{asset_slug}"),
+            display_name,
+            version: "0.1.0".to_owned(),
+            description: description.into(),
+            help: help.into(),
+            inputs: vec![HoudiniOperatorPort {
+                name: "geometry".to_owned(),
+                data_kind: HoudiniDataKind::GeometryTable,
+                required: true,
+                help: "Input graph geometry.".to_owned(),
+            }],
+            outputs: vec![HoudiniOperatorPort {
+                name: "geometry".to_owned(),
+                data_kind: HoudiniDataKind::GeometryTable,
+                required: true,
+                help: "Output graph geometry preserving native cubic Beziers.".to_owned(),
+            }],
+            promoted_parameters: self.promotable_asset_parameters(),
+            graph_snapshot: ProceduralAssetGraphSnapshot {
+                node_count: self.nodes.len(),
+                edge_count: self.graph_layout().edges.len(),
+                layer_count: self.layers.len(),
+                geometry_contract: "HoudiniGeometryRecord polygons and native cubic Beziers"
+                    .to_owned(),
+            },
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn commit_asset_draft(&mut self, draft: CreateAssetDraft) -> String {
+        let asset_id = draft.asset_id.clone();
+        let declaration = draft.into_declaration();
+        if let Some(existing) = self
+            .procedural_asset_declarations
+            .iter_mut()
+            .find(|existing| existing.asset_id == declaration.asset_id)
+        {
+            *existing = declaration;
+        } else {
+            self.procedural_asset_declarations.push(declaration);
+        }
+        self.refresh_asset_version_statuses();
+        asset_id
+    }
+
+    #[allow(dead_code)]
+    pub fn refresh_asset_version_statuses(&mut self) {
+        for node in &mut self.nodes {
+            let Some(asset_node) = node.procedural_asset.as_mut() else {
+                continue;
+            };
+            let declaration = self
+                .procedural_asset_declarations
+                .iter()
+                .find(|declaration| declaration.asset_id == asset_node.asset_id);
+            asset_node.version_status = match declaration {
+                Some(declaration) if declaration.version == asset_node.instance_version => {
+                    OperatorVersionStatus::Current
+                }
+                Some(_) => OperatorVersionStatus::NewerAvailable,
+                None => OperatorVersionStatus::MissingDeclaration,
+            };
+            if asset_node.version_status == OperatorVersionStatus::NewerAvailable {
+                node.evaluation.state = EvaluationState::Stale;
+                node.evaluation.message = Some(
+                    "Asset declaration version changed after this instance was created.".to_owned(),
+                );
+            }
+        }
+    }
+
+    fn promotable_asset_parameters(&self) -> Vec<HoudiniParameterDeclaration> {
+        let mut parameters = Vec::new();
+        if let Some(filter_node) = self.nodes.iter().find(|node| node.kind == NodeKind::Filter) {
+            parameters.push(HoudiniParameterDeclaration {
+                name: "minimum_score".to_owned(),
+                kind: HoudiniParameterKind::Float,
+                default_value: HoudiniParameterValue::Float(filter_node.parameter.value),
+                range: Some(HoudiniNumericRange { min: 0.0, max: 1.0 }),
+                allowed_values: Vec::new(),
+                help: "Promoted graph filter threshold.".to_owned(),
+            });
+        }
+        if let Some(style_node) = self.nodes.iter().find(|node| node.kind == NodeKind::Style) {
+            parameters.push(HoudiniParameterDeclaration {
+                name: "stroke_scale".to_owned(),
+                kind: HoudiniParameterKind::Float,
+                default_value: HoudiniParameterValue::Float(style_node.parameter.value),
+                range: Some(HoudiniNumericRange { min: 0.0, max: 1.0 }),
+                allowed_values: Vec::new(),
+                help: "Promoted graph style stroke scale.".to_owned(),
+            });
+        }
+        parameters
     }
 
     #[allow(dead_code)]
@@ -1157,9 +1269,8 @@ impl GraphDocument {
                         display_name: declaration
                             .map(|declaration| declaration.display_name.clone())
                             .unwrap_or_else(|| "Missing asset declaration".to_owned()),
-                        version: declaration
-                            .map(|declaration| declaration.version.clone())
-                            .unwrap_or_else(|| "unknown".to_owned()),
+                        instance_version: asset_node.instance_version.clone(),
+                        current_version: declaration.map(|declaration| declaration.version.clone()),
                         description: declaration
                             .map(|declaration| declaration.description.clone())
                             .unwrap_or_default(),
@@ -2494,7 +2605,7 @@ impl GraphNode {
         }
     }
 
-    fn procedural_asset(instance_id: String, asset_id: String) -> Self {
+    fn procedural_asset(instance_id: String, asset_id: String, instance_version: String) -> Self {
         Self {
             name: "Asset",
             kind: NodeKind::ProceduralAsset,
@@ -2504,6 +2615,7 @@ impl GraphNode {
             procedural_asset: Some(ProceduralAssetInstanceNode {
                 instance_id,
                 asset_id,
+                instance_version,
                 input_bindings: vec![HoudiniNodeBinding {
                     port_name: "geometry".to_owned(),
                     source_summary: "previous output".to_owned(),
@@ -2571,6 +2683,8 @@ pub(crate) struct ProceduralAssetInstanceNode {
     #[serde(default)]
     pub instance_id: String,
     pub asset_id: String,
+    #[serde(default)]
+    pub instance_version: String,
     #[serde(default)]
     pub input_bindings: Vec<HoudiniNodeBinding>,
     pub output_summary: Option<String>,
@@ -2706,6 +2820,58 @@ pub(crate) struct ProceduralAssetSubgraphReference {
     pub graph_id: String,
     pub output_node_id: String,
     pub captures_native_cubic_bezier: bool,
+    pub graph_snapshot: Option<ProceduralAssetGraphSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ProceduralAssetGraphSnapshot {
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub layer_count: usize,
+    pub geometry_contract: String,
+}
+
+pub(crate) struct CreateAssetDraft {
+    pub asset_id: String,
+    pub display_name: String,
+    pub version: String,
+    pub description: String,
+    pub help: String,
+    pub inputs: Vec<HoudiniOperatorPort>,
+    pub outputs: Vec<HoudiniOperatorPort>,
+    pub promoted_parameters: Vec<HoudiniParameterDeclaration>,
+    pub graph_snapshot: ProceduralAssetGraphSnapshot,
+}
+
+impl CreateAssetDraft {
+    fn into_declaration(self) -> ProceduralAssetDeclaration {
+        ProceduralAssetDeclaration {
+            asset_id: self.asset_id.clone(),
+            display_name: self.display_name,
+            version: self.version,
+            description: self.description,
+            labels: vec!["project-local".to_owned()],
+            help: self.help,
+            source: ProceduralAssetSource {
+                project_path: format!("assets/{}.houdini_graph.json", self.asset_id),
+                author: None,
+                created_at: Some(current_timestamp_millis().to_string()),
+                source_digest: Some(stable_digest(&serde_json::json!({
+                    "asset_id": &self.asset_id,
+                    "snapshot": &self.graph_snapshot,
+                }))),
+            },
+            inputs: self.inputs,
+            outputs: self.outputs,
+            promoted_parameters: self.promoted_parameters,
+            wrapped_subgraph: ProceduralAssetSubgraphReference {
+                graph_id: format!("{}.graph", self.asset_id),
+                output_node_id: "output.main".to_owned(),
+                captures_native_cubic_bezier: true,
+                graph_snapshot: Some(self.graph_snapshot),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -3344,6 +3510,26 @@ fn requirement_package_name(requirement: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn sanitize_asset_id_part(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_owned();
+    if sanitized.is_empty() {
+        "asset".to_owned()
+    } else {
+        sanitized
+    }
+}
+
 fn port_names(ports: &[HoudiniOperatorPort]) -> Vec<String> {
     ports
         .iter()
@@ -3601,7 +3787,8 @@ pub(crate) struct PythonOperatorNodeInfo {
 pub(crate) struct ProceduralAssetNodeInfo {
     pub asset_id: String,
     pub display_name: String,
-    pub version: String,
+    pub instance_version: String,
+    pub current_version: Option<String>,
     pub description: String,
     pub labels: Vec<String>,
     pub promoted_parameters: Vec<String>,
@@ -4311,16 +4498,17 @@ mod tests {
         NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
         NativeOperatorImplementation, NativeOperatorProvenance, NodeEvaluation, NodeKind,
         NodeParameter, NodeParameterKind, NodeStatus, OperatorVersionStatus,
-        ProceduralAssetDeclaration, ProceduralAssetSource, ProceduralAssetSubgraphReference,
-        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentResolveState,
-        PythonEnvironmentResolveTrigger, PythonEnvironmentResolver, PythonEnvironmentStatus,
-        PythonOperatorCapability, PythonOperatorDataKind, PythonOperatorDeclaration,
-        PythonOperatorDependencies, PythonOperatorDependencyStatus, PythonOperatorEntryPoint,
-        PythonOperatorNumericRange, PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
-        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
-        PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
-        PythonRequirementsSource, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
-        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot, ProceduralAssetSource,
+        ProceduralAssetSubgraphReference, PythonDependencyHealth, PythonEnvironmentDescriptor,
+        PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
+        PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
+        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorDependencyStatus,
+        PythonOperatorEntryPoint, PythonOperatorNumericRange, PythonOperatorOutputCounts,
+        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
+        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
+        PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
+        RerunSceneDebugItem, RerunSceneItem, SourceProvenance, ViewerGeometry,
+        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -6202,7 +6390,8 @@ mod tests {
             .expect("asset inspector info should exist");
         assert_eq!(asset.asset_id, "vy.asset.curve_cleanup");
         assert_eq!(asset.display_name, "Curve cleanup");
-        assert_eq!(asset.version, "0.1.0");
+        assert_eq!(asset.instance_version, "0.1.0");
+        assert_eq!(asset.current_version.as_deref(), Some("0.1.0"));
         assert_eq!(asset.version_status, OperatorVersionStatus::Current);
         assert_eq!(
             asset.promoted_parameters,
@@ -6229,6 +6418,82 @@ mod tests {
                 .version_status,
             OperatorVersionStatus::MissingDeclaration
         );
+    }
+
+    #[test]
+    fn procedural_asset_version_drift_marks_instance_stale() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        let node_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        graph.procedural_asset_declarations[0].version = "0.2.0".to_owned();
+
+        graph.refresh_asset_version_statuses();
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("asset node info should exist");
+        let asset = info
+            .procedural_asset
+            .expect("asset inspector info should exist");
+        assert_eq!(asset.instance_version, "0.1.0");
+        assert_eq!(asset.current_version.as_deref(), Some("0.2.0"));
+        assert_eq!(asset.version_status, OperatorVersionStatus::NewerAvailable);
+        assert_eq!(info.status, NodeStatus::Warning);
+        assert_eq!(info.evaluation.state, EvaluationState::Stale);
+        assert_eq!(
+            info.evaluation.message.as_deref(),
+            Some("Asset declaration version changed after this instance was created.")
+        );
+    }
+
+    #[test]
+    fn create_asset_draft_from_graph_commits_project_local_declaration() {
+        let mut graph = GraphDocument::sample();
+        let draft = graph.create_asset_draft_from_graph(
+            "My Cleanup Asset",
+            "Cleans the current graph.",
+            "Use inside this project.",
+        );
+
+        assert_eq!(draft.asset_id, "project.asset.my_cleanup_asset");
+        assert_eq!(draft.inputs[0].data_kind, HoudiniDataKind::GeometryTable);
+        assert_eq!(draft.outputs[0].data_kind, HoudiniDataKind::GeometryTable);
+        assert_eq!(draft.graph_snapshot.node_count, graph.nodes.len());
+        assert_eq!(
+            draft.graph_snapshot.edge_count,
+            graph.graph_layout().edges.len()
+        );
+        assert!(
+            draft
+                .promoted_parameters
+                .iter()
+                .any(|parameter| parameter.name == "minimum_score")
+        );
+
+        let asset_id = graph.commit_asset_draft(draft);
+
+        assert_eq!(asset_id, "project.asset.my_cleanup_asset");
+        assert_eq!(graph.procedural_asset_declarations.len(), 1);
+        let declaration = &graph.procedural_asset_declarations[0];
+        assert_eq!(declaration.display_name, "My Cleanup Asset");
+        assert_eq!(declaration.description, "Cleans the current graph.");
+        assert_eq!(declaration.help, "Use inside this project.");
+        assert!(
+            declaration
+                .source
+                .project_path
+                .starts_with("assets/project.asset.")
+        );
+        assert!(
+            declaration
+                .wrapped_subgraph
+                .graph_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.node_count == 4)
+        );
+        assert!(!graph.to_sidecar_json().unwrap().contains("cached_output"));
     }
 
     #[test]
@@ -6511,6 +6776,13 @@ mod tests {
                 graph_id: "graph.curve_cleanup".to_owned(),
                 output_node_id: "output.main".to_owned(),
                 captures_native_cubic_bezier: true,
+                graph_snapshot: Some(ProceduralAssetGraphSnapshot {
+                    node_count: 4,
+                    edge_count: 3,
+                    layer_count: 3,
+                    geometry_contract: "HoudiniGeometryRecord polygons and native cubic Beziers"
+                        .to_owned(),
+                }),
             },
         }
     }
