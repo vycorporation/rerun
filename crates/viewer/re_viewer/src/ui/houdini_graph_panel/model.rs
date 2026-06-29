@@ -1,6 +1,8 @@
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Float32Array, Float64Array, RecordBatch};
@@ -1004,6 +1006,116 @@ impl GraphDocument {
         }
 
         Some(record)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(dead_code)]
+    pub fn execute_python_operator_process(
+        &mut self,
+        node_index: usize,
+        project_root: impl AsRef<Path>,
+        timeout: Duration,
+    ) -> anyhow::Result<PythonProcessRunReport> {
+        let (_, python_operator, declaration) = self
+            .python_operator_node_inputs(node_index)
+            .ok_or_else(|| anyhow::anyhow!("Python operator node or declaration is missing."))?;
+        let operator_id = declaration.operator_id.clone();
+        let node_instance_id = python_operator.instance_id.clone();
+        let dependency_status = self.python_operator_dependency_status(Some(operator_id.as_str()));
+        if dependency_status != PythonOperatorDependencyStatus::Ready {
+            anyhow::bail!("{}", dependency_status.summary());
+        }
+
+        let interpreter_path = self
+            .python_environment
+            .environment_path
+            .clone()
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Project Python environment path is not configured."))?
+            .to_owned();
+        let PythonOperatorSource::File { path: source_path } = &declaration.entry_point.source
+        else {
+            anyhow::bail!(
+                "Process-boundary Python execution requires a project-local file entry point."
+            );
+        };
+        let source_path = source_path.clone();
+
+        let project_root = project_root.as_ref();
+        let run_dir = std::env::temp_dir().join(format!(
+            "houdini-python-{}-{}",
+            sanitize_asset_id_part(&node_instance_id),
+            current_timestamp_millis()
+        ));
+        std::fs::create_dir_all(&run_dir)?;
+        let input_path = run_dir.join("input.houdini_geometry.json");
+        let output_path = run_dir.join("output.houdini_geometry.json");
+        let input = PythonGeometryExchange::from_geometry(self.active_geometry());
+        std::fs::write(&input_path, serde_json::to_vec_pretty(&input)?)?;
+
+        let output = run_python_process(
+            project_root.join(&interpreter_path),
+            project_root.join(&source_path),
+            &input_path,
+            &output_path,
+            timeout,
+        )?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_status = output.exit_status;
+        let timed_out = output.timed_out;
+        let traceback_summary = traceback_summary(&stderr);
+
+        let mut output_record_count = 0;
+        if exit_status == Some(0) && output_path.exists() {
+            let exchange =
+                serde_json::from_slice::<PythonGeometryExchange>(&std::fs::read(&output_path)?)?;
+            output_record_count = exchange.records.len();
+            self.recording_geometry = exchange.into_geometry()?;
+            self.source = GraphSource::recording_import(
+                output_record_count,
+                Some(format!("python operator {operator_id}")),
+                SourceMetadata::from_geometry(
+                    SourceProvenance::PythonOperator,
+                    Some(source_path.clone()),
+                    &self.recording_geometry,
+                    Vec::new(),
+                ),
+            );
+            self.update_source_node_readiness();
+            self.record_python_operator_output(
+                node_index,
+                PythonOperatorOutputCounts {
+                    geometry_records: output_record_count,
+                    attribute_records: 0,
+                    layer_records: 0,
+                },
+            );
+            self.complete_node_run(node_index);
+        } else if let Some(node) = self.nodes.get_mut(node_index) {
+            node.evaluation.state = EvaluationState::Failed;
+            node.evaluation.message = Some(
+                traceback_summary
+                    .clone()
+                    .unwrap_or_else(|| "Python process execution failed.".to_owned()),
+            );
+            if let Some(python_operator) = node.python_operator.as_mut() {
+                python_operator.last_failure_summary = node.evaluation.message.clone();
+            }
+        }
+
+        Ok(PythonProcessRunReport {
+            entry_point: source_path.clone(),
+            interpreter_path,
+            input_path,
+            output_path,
+            stdout,
+            stderr,
+            exit_status,
+            timed_out,
+            traceback_summary,
+            output_record_count,
+        })
     }
 
     #[allow(dead_code)]
@@ -2275,6 +2387,71 @@ impl HoudiniGeometryRecord {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+const PYTHON_GEOMETRY_EXCHANGE_VERSION: u32 = 1;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PythonGeometryExchange {
+    schema_version: u32,
+    records: Vec<PythonGeometryExchangeRecord>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PythonGeometryExchange {
+    fn from_geometry(geometry: &[Geometry]) -> Self {
+        Self {
+            schema_version: PYTHON_GEOMETRY_EXCHANGE_VERSION,
+            records: geometry
+                .iter()
+                .map(|geometry| PythonGeometryExchangeRecord {
+                    kind: geometry.kind(),
+                    layer: geometry.layer(),
+                    score: geometry.score(),
+                    geometry: geometry.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn into_geometry(self) -> anyhow::Result<Vec<Geometry>> {
+        if self.schema_version != PYTHON_GEOMETRY_EXCHANGE_VERSION {
+            anyhow::bail!(
+                "unsupported Houdini Python geometry exchange version {}; expected {}",
+                self.schema_version,
+                PYTHON_GEOMETRY_EXCHANGE_VERSION
+            );
+        }
+
+        self.records
+            .into_iter()
+            .map(PythonGeometryExchangeRecord::into_geometry)
+            .collect()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PythonGeometryExchangeRecord {
+    kind: GeometryKind,
+    layer: LayerKind,
+    score: f32,
+    geometry: Geometry,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PythonGeometryExchangeRecord {
+    fn into_geometry(self) -> anyhow::Result<Geometry> {
+        match (&self.kind, &self.geometry) {
+            (GeometryKind::Polygon, Geometry::Polygon(_))
+            | (GeometryKind::CubicBezier, Geometry::CubicBezier(_)) => Ok(self.geometry),
+            _ => {
+                anyhow::bail!("Houdini Python geometry record kind did not match geometry payload")
+            }
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum HoudiniGeometryKind {
@@ -2356,6 +2533,7 @@ pub(crate) enum SourceProvenance {
     ParquetImport,
     RecordingQuery,
     SyntheticBenchmark,
+    PythonOperator,
 }
 
 impl SourceProvenance {
@@ -2365,6 +2543,7 @@ impl SourceProvenance {
             Self::ParquetImport => "parquet import",
             Self::RecordingQuery => "recording query",
             Self::SyntheticBenchmark => "synthetic benchmark",
+            Self::PythonOperator => "python operator",
         }
     }
 }
@@ -3058,6 +3237,21 @@ pub(crate) struct PythonOperatorOutputCounts {
     pub geometry_records: usize,
     pub attribute_records: usize,
     pub layer_records: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+pub(crate) struct PythonProcessRunReport {
+    pub entry_point: String,
+    pub interpreter_path: String,
+    pub input_path: PathBuf,
+    pub output_path: PathBuf,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_status: Option<i32>,
+    pub timed_out: bool,
+    pub traceback_summary: Option<String>,
+    pub output_record_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -3800,6 +3994,75 @@ fn requirement_package_name(requirement: &str) -> String {
         .to_ascii_lowercase()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct PythonProcessOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit_status: Option<i32>,
+    timed_out: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_python_process(
+    interpreter_path: PathBuf,
+    entry_point_path: PathBuf,
+    input_path: &Path,
+    output_path: &Path,
+    timeout: Duration,
+) -> anyhow::Result<PythonProcessOutput> {
+    let mut child = std::process::Command::new(interpreter_path)
+        .arg(entry_point_path)
+        .arg("--houdini-input")
+        .arg(input_path)
+        .arg("--houdini-output")
+        .arg(output_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            let output = child.wait_with_output()?;
+            return Ok(PythonProcessOutput {
+                stdout: output.stdout,
+                stderr: output.stderr,
+                exit_status: output.status.code(),
+                timed_out: false,
+            });
+        }
+
+        if Instant::now() >= deadline {
+            child.kill()?;
+            let output = child.wait_with_output()?;
+            return Ok(PythonProcessOutput {
+                stdout: output.stdout,
+                stderr: output.stderr,
+                exit_status: output.status.code(),
+                timed_out: true,
+            });
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn traceback_summary(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .rev()
+        .find(|line| {
+            line.contains("Traceback")
+                || line.contains("Error:")
+                || line.contains("Exception:")
+                || line.starts_with("  File ")
+        })
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+}
+
 fn sanitize_asset_id_part(value: &str) -> String {
     let sanitized = value
         .chars()
@@ -4406,7 +4669,7 @@ impl Geometry {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum GeometryKind {
     Polygon,
     CubicBezier,
@@ -5902,6 +6165,169 @@ mod tests {
                 .output_counts
                 .geometry_records,
             4
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn python_operator_process_executes_typed_geometry_boundary() {
+        let project = tempfile::tempdir().unwrap();
+        let operators_dir = project.path().join("operators");
+        std::fs::create_dir_all(&operators_dir).unwrap();
+        std::fs::write(
+            operators_dir.join("blur_curves.py"),
+            r#"
+import argparse
+import json
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--houdini-input", required=True)
+parser.add_argument("--houdini-output", required=True)
+args = parser.parse_args()
+
+with open(args.houdini_input, "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+print(f"records={len(payload['records'])}")
+
+with open(args.houdini_output, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+"#,
+        )
+        .unwrap();
+
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        graph.python_environment = sample_python_environment_descriptor();
+        graph.python_environment.environment_path = Some(configured_python_interpreter());
+        let node_index = graph.add_python_operator_node("vy.blur_curves");
+
+        let report = graph
+            .execute_python_operator_process(
+                node_index,
+                project.path(),
+                std::time::Duration::from_secs(5),
+            )
+            .expect("python process should execute");
+
+        assert_eq!(report.exit_status, Some(0));
+        assert!(!report.timed_out);
+        assert!(report.stdout.contains("records=4"));
+        assert_eq!(report.output_record_count, 4);
+        assert_eq!(
+            graph.source.metadata.provenance,
+            SourceProvenance::PythonOperator
+        );
+        assert_eq!(graph.cubic_bezier_count(), 2);
+        assert!(
+            graph
+                .recording_geometry
+                .iter()
+                .any(|geometry| matches!(geometry, Geometry::CubicBezier(_)))
+        );
+        assert!(
+            graph
+                .nodes
+                .get(node_index)
+                .and_then(|node| node.python_operator.as_ref())
+                .and_then(|python| python.provenance.as_ref())
+                .is_some_and(|record| record.output_counts.geometry_records == 4)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn python_operator_process_captures_traceback_summary() {
+        let project = tempfile::tempdir().unwrap();
+        let operators_dir = project.path().join("operators");
+        std::fs::create_dir_all(&operators_dir).unwrap();
+        std::fs::write(
+            operators_dir.join("blur_curves.py"),
+            "raise RuntimeError('boom from trusted operator')\n",
+        )
+        .unwrap();
+
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        graph.python_environment = sample_python_environment_descriptor();
+        graph.python_environment.environment_path = Some(configured_python_interpreter());
+        let node_index = graph.add_python_operator_node("vy.blur_curves");
+
+        let report = graph
+            .execute_python_operator_process(
+                node_index,
+                project.path(),
+                std::time::Duration::from_secs(5),
+            )
+            .expect("python process failure should still return a report");
+
+        assert_ne!(report.exit_status, Some(0));
+        assert!(report.stderr.contains("RuntimeError"));
+        assert!(
+            report
+                .traceback_summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("RuntimeError"))
+        );
+        assert_eq!(
+            graph.nodes[node_index].evaluation.state,
+            EvaluationState::Failed
+        );
+        assert!(
+            graph.nodes[node_index]
+                .evaluation
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("RuntimeError"))
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn python_operator_process_times_out_without_global_default_python() {
+        let project = tempfile::tempdir().unwrap();
+        let operators_dir = project.path().join("operators");
+        std::fs::create_dir_all(&operators_dir).unwrap();
+        std::fs::write(
+            operators_dir.join("blur_curves.py"),
+            "import time\ntime.sleep(2)\n",
+        )
+        .unwrap();
+
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        graph.python_environment = sample_python_environment_descriptor();
+        let node_index = graph.add_python_operator_node("vy.blur_curves");
+        assert!(
+            graph
+                .execute_python_operator_process(
+                    node_index,
+                    project.path(),
+                    std::time::Duration::from_millis(20),
+                )
+                .is_err()
+        );
+
+        graph.python_environment.environment_path = Some(configured_python_interpreter());
+        let report = graph
+            .execute_python_operator_process(
+                node_index,
+                project.path(),
+                std::time::Duration::from_millis(20),
+            )
+            .expect("timeout should return process report");
+
+        assert!(report.timed_out);
+        assert_ne!(report.exit_status, Some(0));
+        assert_eq!(
+            graph.nodes[node_index].evaluation.state,
+            EvaluationState::Failed
         );
     }
 
@@ -7533,6 +7959,26 @@ mod tests {
             required: true,
             help: help.to_owned(),
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn configured_python_interpreter() -> String {
+        if let Ok(path) = std::env::var("PYTHON3")
+            && std::path::Path::new(&path).is_absolute()
+        {
+            return path;
+        }
+
+        std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import sys; print(sys.executable)")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|path| path.trim().to_owned())
+            .filter(|path| std::path::Path::new(path).is_absolute())
+            .unwrap_or_else(|| "/usr/bin/python3".to_owned())
     }
 
     fn sample_python_environment_descriptor() -> PythonEnvironmentDescriptor {
