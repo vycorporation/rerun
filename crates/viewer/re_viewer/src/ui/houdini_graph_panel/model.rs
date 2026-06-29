@@ -33,6 +33,7 @@ pub(crate) struct GraphDocument {
     pub geometry: Vec<Geometry>,
     pub recording_geometry: Vec<Geometry>,
     pub python_operator_declarations: Vec<PythonOperatorDeclaration>,
+    pub python_environment: PythonEnvironmentDescriptor,
 }
 
 const GENERATED_NODE_LANE_Y: f32 = 0.82;
@@ -87,6 +88,7 @@ impl GraphDocument {
                     kind: NodeKind::Source,
                     layout_position: GraphPoint::new(0.0, 0.5),
                     generated: None,
+                    python_operator: None,
                     evaluation: NodeEvaluation::clean(),
                     participates_in_output: true,
                     parameter: NodeParameter::scalar(
@@ -102,6 +104,7 @@ impl GraphDocument {
                     kind: NodeKind::Filter,
                     layout_position: GraphPoint::new(0.33, 0.5),
                     generated: None,
+                    python_operator: None,
                     evaluation: NodeEvaluation::clean(),
                     participates_in_output: true,
                     parameter: NodeParameter::attribute_rule(
@@ -119,6 +122,7 @@ impl GraphDocument {
                     kind: NodeKind::Style,
                     layout_position: GraphPoint::new(0.66, 0.5),
                     generated: None,
+                    python_operator: None,
                     evaluation: NodeEvaluation::clean(),
                     participates_in_output: true,
                     parameter: NodeParameter::scalar(
@@ -134,6 +138,7 @@ impl GraphDocument {
                     kind: NodeKind::Output,
                     layout_position: GraphPoint::new(1.0, 0.5),
                     generated: None,
+                    python_operator: None,
                     evaluation: NodeEvaluation::clean(),
                     participates_in_output: true,
                     parameter: NodeParameter::scalar(
@@ -188,6 +193,7 @@ impl GraphDocument {
             geometry,
             recording_geometry: Vec::new(),
             python_operator_declarations: Vec::new(),
+            python_environment: PythonEnvironmentDescriptor::default(),
         }
     }
 
@@ -415,6 +421,63 @@ impl GraphDocument {
         true
     }
 
+    #[allow(dead_code)]
+    pub fn add_python_operator_node(&mut self, declaration_id: impl Into<String>) -> usize {
+        let declaration_id = declaration_id.into();
+        let instance_id = format!(
+            "python_operator_{}",
+            self.nodes
+                .iter()
+                .filter(|node| node.kind == NodeKind::PythonOperator)
+                .count()
+                + 1
+        );
+        let insert_index = self
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .unwrap_or(self.nodes.len());
+        let node = GraphNode::python_operator(instance_id, declaration_id);
+        self.nodes.insert(insert_index, node);
+        insert_index
+    }
+
+    fn python_operator_dependency_status(
+        &self,
+        declaration_id: Option<&str>,
+    ) -> PythonOperatorDependencyStatus {
+        let Some(declaration_id) = declaration_id else {
+            return PythonOperatorDependencyStatus::DeclarationMissing;
+        };
+        if !self
+            .python_operator_declarations
+            .iter()
+            .any(|declaration| declaration.operator_id == declaration_id)
+        {
+            return PythonOperatorDependencyStatus::DeclarationMissing;
+        }
+
+        match self.python_environment.lock_status {
+            PythonEnvironmentStatus::Missing => PythonOperatorDependencyStatus::MissingEnvironment,
+            PythonEnvironmentStatus::Unlocked => PythonOperatorDependencyStatus::StaleEnvironment,
+            PythonEnvironmentStatus::Resolving | PythonEnvironmentStatus::Locked => {
+                PythonOperatorDependencyStatus::ResolvingEnvironment
+            }
+            PythonEnvironmentStatus::Ready
+                if self.python_environment.dependency_health.is_healthy() =>
+            {
+                PythonOperatorDependencyStatus::Ready
+            }
+            PythonEnvironmentStatus::Ready | PythonEnvironmentStatus::Failed => {
+                PythonOperatorDependencyStatus::FailedEnvironment
+            }
+            PythonEnvironmentStatus::Stale => PythonOperatorDependencyStatus::StaleEnvironment,
+            PythonEnvironmentStatus::Disabled => {
+                PythonOperatorDependencyStatus::DisabledEnvironment
+            }
+        }
+    }
+
     pub fn pipeline_stages(&self) -> Vec<PipelineStage> {
         let source_count = self.active_geometry().len();
         let filtered_count = self
@@ -587,6 +650,7 @@ impl GraphDocument {
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
                 warnings: Vec::new(),
+                python_operator: None,
             },
             NodeKind::Filter => NodeInfo {
                 kind: node.kind,
@@ -611,6 +675,7 @@ impl GraphDocument {
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
                 warnings: filter_warnings,
+                python_operator: None,
             },
             NodeKind::Style => NodeInfo {
                 kind: node.kind,
@@ -635,7 +700,64 @@ impl GraphDocument {
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
                 warnings: style_warnings,
+                python_operator: None,
             },
+            NodeKind::PythonOperator => {
+                let python_operator = node.python_operator.as_ref()?;
+                let declaration = self
+                    .python_operator_declarations
+                    .iter()
+                    .find(|declaration| declaration.operator_id == python_operator.declaration_id);
+                let dependency_status = self.python_operator_dependency_status(
+                    declaration.map(|declaration| declaration.operator_id.as_str()),
+                );
+                let warnings = match dependency_status {
+                    PythonOperatorDependencyStatus::Ready => Vec::new(),
+                    _ => vec![dependency_status.summary().to_owned()],
+                };
+                NodeInfo {
+                    kind: node.kind,
+                    role: node.kind.role(),
+                    input_count: declaration.map_or(0, |declaration| declaration.inputs.len()),
+                    output_count: declaration.map_or(0, |declaration| declaration.outputs.len()),
+                    status: match dependency_status {
+                        PythonOperatorDependencyStatus::Ready => NodeStatus::Healthy,
+                        PythonOperatorDependencyStatus::FailedEnvironment
+                        | PythonOperatorDependencyStatus::DeclarationMissing => NodeStatus::Failed,
+                        _ => NodeStatus::Warning,
+                    },
+                    data_kind: "Python geometry operator",
+                    record_count: 0,
+                    bounds: None,
+                    provenance: Some(self.source.metadata.provenance),
+                    attributes: declaration.map_or_else(Vec::new, |declaration| {
+                        declaration.dependencies.requirements.clone()
+                    }),
+                    parameter: node.parameter.clone(),
+                    summary: "Python operator is graph-visible but execution is deferred to the trusted project environment lane.",
+                    source_metadata: None,
+                    source_error: None,
+                    style: None,
+                    generated: node.generated,
+                    evaluation: node.evaluation.clone(),
+                    warnings,
+                    python_operator: Some(PythonOperatorNodeInfo {
+                        declaration_id: python_operator.declaration_id.clone(),
+                        display_name: declaration
+                            .map(|declaration| declaration.display_name.clone())
+                            .unwrap_or_else(|| "Missing declaration".to_owned()),
+                        version: declaration
+                            .map(|declaration| declaration.version.clone())
+                            .unwrap_or_else(|| "unknown".to_owned()),
+                        dependency_status,
+                        dependency_summary: dependency_status.summary().to_owned(),
+                        requirements: declaration.map_or_else(Vec::new, |declaration| {
+                            declaration.dependencies.requirements.clone()
+                        }),
+                        provenance_summary: python_operator.provenance_summary.clone(),
+                    }),
+                }
+            }
             NodeKind::Output => NodeInfo {
                 kind: node.kind,
                 role: node.kind.role(),
@@ -655,6 +777,7 @@ impl GraphDocument {
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
                 warnings: Vec::new(),
+                python_operator: None,
             },
         })
     }
@@ -1551,6 +1674,8 @@ struct HoudiniGraphSidecar {
     recording_geometry: Vec<Geometry>,
     #[serde(default)]
     python_operator_declarations: Vec<PythonOperatorDeclaration>,
+    #[serde(default)]
+    python_environment: PythonEnvironmentDescriptor,
 }
 
 impl HoudiniGraphSidecar {
@@ -1576,6 +1701,7 @@ impl HoudiniGraphSidecar {
                     parameter_value: node.parameter.value,
                     parameter_rule: node.parameter.rule_spec.clone(),
                     generated: node.generated,
+                    python_operator: node.python_operator.clone(),
                 })
                 .collect(),
             layers: graph
@@ -1593,6 +1719,7 @@ impl HoudiniGraphSidecar {
             demo_geometry: graph.geometry.clone(),
             recording_geometry: graph.recording_geometry.clone(),
             python_operator_declarations: graph.python_operator_declarations.clone(),
+            python_environment: graph.python_environment.clone(),
         }
     }
 
@@ -1617,13 +1744,20 @@ impl HoudiniGraphSidecar {
         graph.recording_geometry = self.recording_geometry;
         graph.style = self.style;
         graph.python_operator_declarations = self.python_operator_declarations;
+        graph.python_environment = self.python_environment;
 
         for node_snapshot in self.nodes {
-            if let Some(node) = graph
-                .nodes
-                .iter_mut()
-                .find(|node| node.kind == node_snapshot.kind)
-            {
+            let matching_node = graph.nodes.iter_mut().find(|node| {
+                node.kind == node_snapshot.kind
+                    && (node.kind != NodeKind::PythonOperator
+                        || node.python_operator.as_ref().and_then(|python_operator| {
+                            node_snapshot
+                                .python_operator
+                                .as_ref()
+                                .map(|snapshot| python_operator.instance_id == snapshot.instance_id)
+                        }) == Some(true))
+            });
+            if let Some(node) = matching_node {
                 node.layout_position = node_snapshot.layout_position.clamped_to_unit();
                 node.parameter.value = node_snapshot
                     .parameter_value
@@ -1632,6 +1766,9 @@ impl HoudiniGraphSidecar {
                     node.parameter.rule_spec = Some(parameter_rule);
                 }
                 node.generated = node_snapshot.generated;
+                node.python_operator = node_snapshot.python_operator;
+            } else if node_snapshot.kind == NodeKind::PythonOperator {
+                graph.nodes.push(node_snapshot.into_python_operator_node());
             }
         }
 
@@ -1671,6 +1808,29 @@ struct NodeSidecar {
     parameter_rule: Option<AttributeFilterRuleSpec>,
     #[serde(default)]
     generated: Option<GeneratedNodeInfo>,
+    #[serde(default)]
+    python_operator: Option<PythonOperatorNode>,
+}
+
+impl NodeSidecar {
+    fn into_python_operator_node(self) -> GraphNode {
+        GraphNode {
+            name: "Python Operator",
+            kind: NodeKind::PythonOperator,
+            layout_position: self.layout_position.clamped_to_unit(),
+            generated: self.generated,
+            python_operator: self.python_operator,
+            evaluation: NodeEvaluation::clean(),
+            participates_in_output: true,
+            parameter: NodeParameter::scalar(
+                "Run",
+                self.parameter_value.clamp(0.0, 1.0),
+                0.0..=1.0,
+                "Manual readiness placeholder for a graph-visible Python operator.",
+            ),
+            info: "Runs trusted project Python against typed graph inputs once execution is enabled.",
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -1706,10 +1866,48 @@ pub(crate) struct GraphNode {
     pub kind: NodeKind,
     pub layout_position: GraphPoint,
     pub generated: Option<GeneratedNodeInfo>,
+    pub python_operator: Option<PythonOperatorNode>,
     pub evaluation: NodeEvaluation,
     pub participates_in_output: bool,
     pub parameter: NodeParameter,
     pub info: &'static str,
+}
+
+impl GraphNode {
+    fn python_operator(instance_id: String, declaration_id: String) -> Self {
+        Self {
+            name: "Python Operator",
+            kind: NodeKind::PythonOperator,
+            layout_position: GraphPoint::new(0.5, 0.5),
+            generated: None,
+            python_operator: Some(PythonOperatorNode {
+                instance_id,
+                declaration_id,
+                provenance_summary: None,
+            }),
+            evaluation: NodeEvaluation {
+                state: EvaluationState::Manual,
+                manual: true,
+                message: Some("Python execution is not enabled for this node yet.".to_owned()),
+            },
+            participates_in_output: true,
+            parameter: NodeParameter::scalar(
+                "Run",
+                0.0,
+                0.0..=1.0,
+                "Manual readiness placeholder for a graph-visible Python operator.",
+            ),
+            info: "Runs trusted project Python against typed graph inputs once execution is enabled.",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonOperatorNode {
+    #[serde(default)]
+    pub instance_id: String,
+    pub declaration_id: String,
+    pub provenance_summary: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1860,6 +2058,137 @@ pub(crate) enum PythonOperatorCapability {
     Network,
     Subprocess,
     Gpu,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonEnvironmentDescriptor {
+    pub environment_id: String,
+    pub python_version_requirement: String,
+    pub requirements_source: PythonRequirementsSource,
+    pub lock_status: PythonEnvironmentStatus,
+    pub lock_digest: Option<String>,
+    pub environment_path: Option<String>,
+    pub resolver: PythonEnvironmentResolver,
+    pub last_health_check: Option<String>,
+    pub last_failure_summary: Option<String>,
+    pub dependency_health: PythonDependencyHealth,
+}
+
+impl Default for PythonEnvironmentDescriptor {
+    fn default() -> Self {
+        Self {
+            environment_id: "project-python".to_owned(),
+            python_version_requirement: ">=3.11,<3.13".to_owned(),
+            requirements_source: PythonRequirementsSource::ProjectLocal,
+            lock_status: PythonEnvironmentStatus::Missing,
+            lock_digest: None,
+            environment_path: Some(".houdini/python/envs/project-python".to_owned()),
+            resolver: PythonEnvironmentResolver {
+                tool: "uv".to_owned(),
+                version: None,
+            },
+            last_health_check: None,
+            last_failure_summary: None,
+            dependency_health: PythonDependencyHealth::default(),
+        }
+    }
+}
+
+impl PythonEnvironmentDescriptor {
+    pub fn status_summary(&self) -> String {
+        match self.lock_status {
+            PythonEnvironmentStatus::Missing => {
+                "Project Python environment is not configured.".to_owned()
+            }
+            PythonEnvironmentStatus::Unlocked => {
+                "Python requirements exist but no lock digest has been recorded.".to_owned()
+            }
+            PythonEnvironmentStatus::Resolving => {
+                "uv is resolving the project Python environment.".to_owned()
+            }
+            PythonEnvironmentStatus::Locked => {
+                "Python lock exists but the environment has not been verified.".to_owned()
+            }
+            PythonEnvironmentStatus::Ready => {
+                "Project Python environment is ready for trusted operator execution.".to_owned()
+            }
+            PythonEnvironmentStatus::Stale => {
+                "Python environment is stale because requirements or lock inputs changed."
+                    .to_owned()
+            }
+            PythonEnvironmentStatus::Failed => self
+                .last_failure_summary
+                .clone()
+                .unwrap_or_else(|| "Python environment validation failed.".to_owned()),
+            PythonEnvironmentStatus::Disabled => "Project Python execution is disabled.".to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum PythonEnvironmentStatus {
+    Missing,
+    Unlocked,
+    Resolving,
+    Locked,
+    Ready,
+    Stale,
+    Failed,
+    Disabled,
+}
+
+impl PythonEnvironmentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "Missing",
+            Self::Unlocked => "Unlocked",
+            Self::Resolving => "Resolving",
+            Self::Locked => "Locked",
+            Self::Ready => "Ready",
+            Self::Stale => "Stale",
+            Self::Failed => "Failed",
+            Self::Disabled => "Disabled",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum PythonRequirementsSource {
+    ProjectLocal,
+    GeneratedFromOperators,
+    PyprojectFragment { path: String },
+}
+
+impl PythonRequirementsSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ProjectLocal => "Project-local",
+            Self::GeneratedFromOperators => "Generated from operators",
+            Self::PyprojectFragment { .. } => "pyproject fragment",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonEnvironmentResolver {
+    pub tool: String,
+    pub version: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonDependencyHealth {
+    pub package_count: usize,
+    pub missing_packages: Vec<String>,
+    pub conflicts: Vec<String>,
+    pub failed_imports: Vec<String>,
+}
+
+impl PythonDependencyHealth {
+    pub fn is_healthy(&self) -> bool {
+        self.missing_packages.is_empty()
+            && self.conflicts.is_empty()
+            && self.failed_imports.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -2041,6 +2370,7 @@ pub(crate) enum NodeKind {
     Source,
     Filter,
     Style,
+    PythonOperator,
     Output,
 }
 
@@ -2050,6 +2380,7 @@ impl NodeKind {
             Self::Source => "Source",
             Self::Filter => "Filter",
             Self::Style => "Style",
+            Self::PythonOperator => "Python Operator",
             Self::Output => "Output",
         }
     }
@@ -2059,6 +2390,7 @@ impl NodeKind {
             Self::Source => "Read",
             Self::Filter => "Cull",
             Self::Style => "Style",
+            Self::PythonOperator => "Compute",
             Self::Output => "Publish",
         }
     }
@@ -2083,6 +2415,60 @@ pub(crate) struct NodeInfo {
     pub generated: Option<GeneratedNodeInfo>,
     pub evaluation: NodeEvaluation,
     pub warnings: Vec<String>,
+    pub python_operator: Option<PythonOperatorNodeInfo>,
+}
+
+pub(crate) struct PythonOperatorNodeInfo {
+    pub declaration_id: String,
+    pub display_name: String,
+    pub version: String,
+    pub dependency_status: PythonOperatorDependencyStatus,
+    pub dependency_summary: String,
+    pub requirements: Vec<String>,
+    pub provenance_summary: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PythonOperatorDependencyStatus {
+    DeclarationMissing,
+    MissingEnvironment,
+    ResolvingEnvironment,
+    Ready,
+    StaleEnvironment,
+    FailedEnvironment,
+    DisabledEnvironment,
+}
+
+impl PythonOperatorDependencyStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeclarationMissing => "Declaration missing",
+            Self::MissingEnvironment => "Environment missing",
+            Self::ResolvingEnvironment => "Environment resolving",
+            Self::Ready => "Ready",
+            Self::StaleEnvironment => "Environment stale",
+            Self::FailedEnvironment => "Environment failed",
+            Self::DisabledEnvironment => "Environment disabled",
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            Self::DeclarationMissing => "Python operator declaration is missing.",
+            Self::MissingEnvironment => "Project Python environment is not configured.",
+            Self::ResolvingEnvironment => {
+                "Project Python environment is resolving or locked but unverified."
+            }
+            Self::Ready => "Python operator dependencies are ready.",
+            Self::StaleEnvironment => {
+                "Project Python environment must be resolved before execution."
+            }
+            Self::FailedEnvironment => {
+                "Project Python environment has dependency or validation failures."
+            }
+            Self::DisabledEnvironment => "Project Python execution is disabled.",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2723,11 +3109,13 @@ mod tests {
         GeneratedNodeSource, Geometry, GeometryKind, GraphColor, GraphDocument, GraphNode,
         GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema, HoudiniGeometryRecord,
         HoudiniGeometrySchema, LayerKind, NodeEvaluation, NodeKind, NodeParameter,
-        NodeParameterKind, NodeStatus, PythonOperatorCapability, PythonOperatorDataKind,
-        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorEntryPoint,
-        PythonOperatorNumericRange, PythonOperatorParameterDeclaration,
-        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
-        PythonOperatorSource, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
+        NodeParameterKind, NodeStatus, PythonDependencyHealth, PythonEnvironmentDescriptor,
+        PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
+        PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
+        PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
+        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
+        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
+        PythonRequirementsSource, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
         ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
@@ -3313,6 +3701,7 @@ mod tests {
             kind: NodeKind::Filter,
             layout_position: GraphPoint::new(0.5, 0.1),
             generated: None,
+            python_operator: None,
             evaluation: NodeEvaluation {
                 state: EvaluationState::Stale,
                 manual: false,
@@ -3385,6 +3774,129 @@ mod tests {
         graph.complete_node_run(1);
         assert_eq!(graph.nodes[1].evaluation.state, EvaluationState::Clean);
         assert!(graph.nodes[1].evaluation.message.is_none());
+    }
+
+    #[test]
+    fn python_operator_node_reports_declaration_and_dependency_status() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        graph.python_environment = sample_python_environment_descriptor();
+        let node_index = graph.add_python_operator_node("vy.blur_curves");
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("python node info should exist");
+
+        assert_eq!(info.kind, NodeKind::PythonOperator);
+        assert_eq!(info.role, "Compute");
+        assert_eq!(info.input_count, 1);
+        assert_eq!(info.output_count, 1);
+        assert_eq!(info.status, NodeStatus::Healthy);
+        assert_eq!(info.evaluation.state, EvaluationState::Manual);
+        let python = info
+            .python_operator
+            .expect("python operator info should exist");
+        assert_eq!(python.declaration_id, "vy.blur_curves");
+        assert_eq!(python.display_name, "Blur curves");
+        assert_eq!(python.version, "0.1.0");
+        assert_eq!(
+            python.dependency_status,
+            PythonOperatorDependencyStatus::Ready
+        );
+        assert_eq!(python.requirements, vec!["numpy==2.0.0".to_owned()]);
+    }
+
+    #[test]
+    fn python_operator_node_dependency_status_tracks_environment_health() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        let node_index = graph.add_python_operator_node("vy.blur_curves");
+
+        let missing = graph
+            .selected_node_info(node_index)
+            .expect("python node info should exist")
+            .python_operator
+            .expect("python operator info should exist")
+            .dependency_status;
+        assert_eq!(missing, PythonOperatorDependencyStatus::MissingEnvironment);
+
+        graph.python_environment = sample_python_environment_descriptor();
+        graph
+            .python_environment
+            .dependency_health
+            .failed_imports
+            .push("numpy".to_owned());
+        let failed = graph
+            .selected_node_info(node_index)
+            .expect("python node info should exist")
+            .python_operator
+            .expect("python operator info should exist")
+            .dependency_status;
+
+        assert_eq!(failed, PythonOperatorDependencyStatus::FailedEnvironment);
+    }
+
+    #[test]
+    fn python_operator_nodes_round_trip_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .python_operator_declarations
+            .push(sample_python_operator_declaration());
+        let node_index = graph.add_python_operator_node("vy.blur_curves");
+        let second_node_index = graph.add_python_operator_node("vy.blur_curves");
+        graph.set_node_layout_position(node_index, GraphPoint::new(0.52, 0.42));
+        graph.set_node_layout_position(second_node_index, GraphPoint::new(0.62, 0.43));
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        let restored_python_nodes = restored
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::PythonOperator)
+            .collect::<Vec<_>>();
+        assert_eq!(restored_python_nodes.len(), 2);
+        assert_eq!(
+            restored_python_nodes[0]
+                .python_operator
+                .as_ref()
+                .expect("python operator payload should restore")
+                .declaration_id,
+            "vy.blur_curves"
+        );
+        assert_eq!(
+            restored_python_nodes[0]
+                .python_operator
+                .as_ref()
+                .expect("python operator payload should restore")
+                .instance_id,
+            "python_operator_1"
+        );
+        assert_eq!(
+            restored_python_nodes[1]
+                .python_operator
+                .as_ref()
+                .expect("python operator payload should restore")
+                .instance_id,
+            "python_operator_2"
+        );
+        assert_eq!(
+            restored_python_nodes[0].layout_position,
+            GraphPoint::new(0.52, 0.42)
+        );
+        assert_eq!(
+            restored_python_nodes[1].layout_position,
+            GraphPoint::new(0.62, 0.43)
+        );
+        assert_eq!(
+            restored.graph_layout().edges.len(),
+            restored.nodes.len() - 1
+        );
     }
 
     #[test]
@@ -4005,6 +4517,68 @@ mod tests {
     }
 
     #[test]
+    fn python_environment_descriptor_round_trips_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        graph.python_environment = sample_python_environment_descriptor();
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(restored.python_environment, graph.python_environment);
+        assert!(json.contains("python_environment"));
+        assert!(json.contains("uv"));
+        assert!(json.contains("lock:abc123"));
+    }
+
+    #[test]
+    fn sidecar_without_python_environment_still_uses_missing_project_default() {
+        let graph = GraphDocument::sample();
+        let mut value =
+            serde_json::from_str::<serde_json::Value>(&graph.to_sidecar_json().unwrap())
+                .expect("sidecar should be valid json");
+        value
+            .as_object_mut()
+            .expect("sidecar should be an object")
+            .remove("python_environment");
+        let json = serde_json::to_string_pretty(&value).unwrap();
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(
+            restored.python_environment.lock_status,
+            PythonEnvironmentStatus::Missing
+        );
+        assert_eq!(
+            restored.python_environment.environment_path.as_deref(),
+            Some(".houdini/python/envs/project-python")
+        );
+        assert_eq!(restored.python_environment.resolver.tool, "uv");
+    }
+
+    #[test]
+    fn python_environment_descriptor_does_not_default_to_global_python() {
+        let graph = GraphDocument::sample();
+
+        let environment_path = graph
+            .python_environment
+            .environment_path
+            .as_deref()
+            .expect("default environment should have an app-managed project path");
+        assert!(environment_path.starts_with(".houdini/python/envs/"));
+        assert!(!environment_path.starts_with("/usr/bin"));
+        assert_eq!(
+            graph.python_environment.status_summary(),
+            "Project Python environment is not configured."
+        );
+        assert_eq!(
+            graph.python_environment.requirements_source,
+            PythonRequirementsSource::ProjectLocal
+        );
+    }
+
+    #[test]
     fn sidecar_json_does_not_persist_adaptive_export_polyline() {
         let mut graph = GraphDocument::sample();
         graph
@@ -4069,6 +4643,29 @@ mod tests {
             },
             capabilities: vec![PythonOperatorCapability::FileRead],
             help: "Smooths curve control points without mutating viewer state.".to_owned(),
+        }
+    }
+
+    fn sample_python_environment_descriptor() -> PythonEnvironmentDescriptor {
+        PythonEnvironmentDescriptor {
+            environment_id: "project-python".to_owned(),
+            python_version_requirement: ">=3.11,<3.13".to_owned(),
+            requirements_source: PythonRequirementsSource::GeneratedFromOperators,
+            lock_status: PythonEnvironmentStatus::Ready,
+            lock_digest: Some("lock:abc123".to_owned()),
+            environment_path: Some(".houdini/python/envs/project-python".to_owned()),
+            resolver: PythonEnvironmentResolver {
+                tool: "uv".to_owned(),
+                version: Some("0.7.0".to_owned()),
+            },
+            last_health_check: Some("2026-06-28T23:30:00Z".to_owned()),
+            last_failure_summary: None,
+            dependency_health: PythonDependencyHealth {
+                package_count: 3,
+                missing_packages: Vec::new(),
+                conflicts: Vec::new(),
+                failed_imports: Vec::new(),
+            },
         }
     }
 

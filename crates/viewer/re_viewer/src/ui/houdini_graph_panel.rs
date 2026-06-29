@@ -10,7 +10,8 @@ pub(crate) mod model;
 
 use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState, GeometryBounds,
-    GraphDocument, GraphPoint, GraphStyle, LayerKind, NodeStatus, SourceMetadata,
+    GraphDocument, GraphPoint, GraphStyle, LayerKind, NodeStatus, PythonEnvironmentStatus,
+    PythonOperatorDependencyStatus, SourceMetadata,
 };
 
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
@@ -132,6 +133,7 @@ impl HoudiniGraphPanel {
             self.render_benchmark_ui(ui, &mut graph);
             self.graph_document_ui(ui, &mut graph);
             self.recording_export_ui(ui, &graph);
+            self.python_environment_ui(ui, &graph);
             ui.add_space(6.0);
             let export_polyline_points = graph.prepared_export_point_count();
             ui.label(format!(
@@ -208,6 +210,94 @@ impl HoudiniGraphPanel {
         }
         if let Some(status) = &self.parquet_status {
             ui.weak(status);
+        }
+    }
+
+    fn python_environment_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
+        let environment = &graph.python_environment;
+        ui.add_space(6.0);
+        ui.strong("Python Environment");
+        egui::Grid::new("houdini_python_environment_status")
+            .num_columns(2)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                ui.weak("Status");
+                ui.colored_label(
+                    python_environment_status_color(ui, environment.lock_status),
+                    environment.lock_status.as_str(),
+                );
+                ui.end_row();
+
+                ui.weak("Python");
+                ui.label(&environment.python_version_requirement);
+                ui.end_row();
+
+                ui.weak("Requirements");
+                ui.label(environment.requirements_source.as_str());
+                ui.end_row();
+
+                ui.weak("Resolver");
+                ui.label(format!(
+                    "{} {}",
+                    environment.resolver.tool,
+                    environment
+                        .resolver
+                        .version
+                        .as_deref()
+                        .unwrap_or("version pending")
+                ));
+                ui.end_row();
+
+                ui.weak("Lock");
+                ui.label(environment.lock_digest.as_deref().unwrap_or("none"));
+                ui.end_row();
+
+                ui.weak("Environment path");
+                ui.label(
+                    environment
+                        .environment_path
+                        .as_deref()
+                        .unwrap_or("not created"),
+                );
+                ui.end_row();
+
+                ui.weak("Packages");
+                ui.label(environment.dependency_health.package_count.to_string());
+                ui.end_row();
+
+                ui.weak("Health");
+                ui.label(
+                    if environment.lock_status != PythonEnvironmentStatus::Ready {
+                        "not checked"
+                    } else if environment.dependency_health.is_healthy() {
+                        "healthy"
+                    } else {
+                        "needs attention"
+                    },
+                );
+                ui.end_row();
+
+                if !environment.dependency_health.missing_packages.is_empty() {
+                    ui.weak("Missing packages");
+                    ui.label(format_list(&environment.dependency_health.missing_packages));
+                    ui.end_row();
+                }
+
+                if !environment.dependency_health.conflicts.is_empty() {
+                    ui.weak("Conflicts");
+                    ui.label(format_list(&environment.dependency_health.conflicts));
+                    ui.end_row();
+                }
+
+                if !environment.dependency_health.failed_imports.is_empty() {
+                    ui.weak("Failed imports");
+                    ui.label(format_list(&environment.dependency_health.failed_imports));
+                    ui.end_row();
+                }
+            });
+        ui.weak(environment.status_summary());
+        if environment.lock_status == PythonEnvironmentStatus::Failed {
+            ui.weak("Resolve or repair the project environment before running Python operators.");
         }
     }
 
@@ -624,8 +714,41 @@ impl HoudiniGraphPanel {
                         ui.label(format_style(style));
                         ui.end_row();
                     }
+
+                    if let Some(python_operator) = &info.python_operator {
+                        ui.weak("Operator");
+                        ui.label(format!(
+                            "{} ({})",
+                            python_operator.display_name, python_operator.declaration_id
+                        ));
+                        ui.end_row();
+
+                        ui.weak("Version");
+                        ui.label(&python_operator.version);
+                        ui.end_row();
+
+                        ui.weak("Dependencies");
+                        ui.colored_label(
+                            python_operator_dependency_color(ui, python_operator.dependency_status),
+                            python_operator.dependency_status.as_str(),
+                        );
+                        ui.end_row();
+
+                        ui.weak("Requirements");
+                        ui.label(format_list(&python_operator.requirements));
+                        ui.end_row();
+
+                        if let Some(provenance) = &python_operator.provenance_summary {
+                            ui.weak("Python provenance");
+                            ui.label(provenance);
+                            ui.end_row();
+                        }
+                    }
                 });
             ui.label(info.summary);
+            if let Some(python_operator) = &info.python_operator {
+                ui.weak(&python_operator.dependency_summary);
+            }
             for warning in &info.warnings {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
             }
@@ -866,6 +989,32 @@ fn evaluation_color(ui: &Ui, state: EvaluationState) -> Color32 {
         EvaluationState::Stale | EvaluationState::Manual => ui.visuals().warn_fg_color,
         EvaluationState::Running => ui.visuals().selection.stroke.color,
         EvaluationState::Failed => ui.visuals().error_fg_color,
+    }
+}
+
+fn python_environment_status_color(ui: &Ui, status: PythonEnvironmentStatus) -> Color32 {
+    match status {
+        PythonEnvironmentStatus::Ready => ui.visuals().text_color(),
+        PythonEnvironmentStatus::Resolving | PythonEnvironmentStatus::Locked => {
+            ui.visuals().selection.stroke.color
+        }
+        PythonEnvironmentStatus::Missing
+        | PythonEnvironmentStatus::Unlocked
+        | PythonEnvironmentStatus::Stale
+        | PythonEnvironmentStatus::Disabled => ui.visuals().warn_fg_color,
+        PythonEnvironmentStatus::Failed => ui.visuals().error_fg_color,
+    }
+}
+
+fn python_operator_dependency_color(ui: &Ui, status: PythonOperatorDependencyStatus) -> Color32 {
+    match status {
+        PythonOperatorDependencyStatus::Ready => ui.visuals().text_color(),
+        PythonOperatorDependencyStatus::ResolvingEnvironment => ui.visuals().selection.stroke.color,
+        PythonOperatorDependencyStatus::DeclarationMissing
+        | PythonOperatorDependencyStatus::FailedEnvironment => ui.visuals().error_fg_color,
+        PythonOperatorDependencyStatus::MissingEnvironment
+        | PythonOperatorDependencyStatus::StaleEnvironment
+        | PythonOperatorDependencyStatus::DisabledEnvironment => ui.visuals().warn_fg_color,
     }
 }
 
