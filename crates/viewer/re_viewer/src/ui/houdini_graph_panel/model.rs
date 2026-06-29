@@ -92,6 +92,8 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.0, 0.5),
                     generated: None,
                     python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
                     evaluation: NodeEvaluation::clean(),
                     participates_in_output: true,
                     parameter: NodeParameter::scalar(
@@ -108,6 +110,8 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.33, 0.5),
                     generated: None,
                     python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
                     evaluation: NodeEvaluation::clean(),
                     participates_in_output: true,
                     parameter: NodeParameter::attribute_rule(
@@ -126,6 +130,8 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.66, 0.5),
                     generated: None,
                     python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
                     evaluation: NodeEvaluation::clean(),
                     participates_in_output: true,
                     parameter: NodeParameter::scalar(
@@ -142,6 +148,8 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(1.0, 0.5),
                     generated: None,
                     python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
                     evaluation: NodeEvaluation::clean(),
                     participates_in_output: true,
                     parameter: NodeParameter::scalar(
@@ -443,6 +451,48 @@ impl GraphDocument {
             .position(|node| node.kind == NodeKind::Output)
             .unwrap_or(self.nodes.len());
         let node = GraphNode::python_operator(instance_id, declaration_id);
+        self.nodes.insert(insert_index, node);
+        insert_index
+    }
+
+    #[allow(dead_code)]
+    pub fn add_procedural_asset_node(&mut self, asset_id: impl Into<String>) -> usize {
+        let asset_id = asset_id.into();
+        let instance_id = format!(
+            "asset_{}",
+            self.nodes
+                .iter()
+                .filter(|node| node.kind == NodeKind::ProceduralAsset)
+                .count()
+                + 1
+        );
+        let insert_index = self
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .unwrap_or(self.nodes.len());
+        let node = GraphNode::procedural_asset(instance_id, asset_id);
+        self.nodes.insert(insert_index, node);
+        insert_index
+    }
+
+    #[allow(dead_code)]
+    pub fn add_native_operator_node(&mut self, operator_id: impl Into<String>) -> usize {
+        let operator_id = operator_id.into();
+        let instance_id = format!(
+            "native_operator_{}",
+            self.nodes
+                .iter()
+                .filter(|node| node.kind == NodeKind::NativeOperator)
+                .count()
+                + 1
+        );
+        let insert_index = self
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .unwrap_or(self.nodes.len());
+        let node = GraphNode::native_operator(instance_id, operator_id);
         self.nodes.insert(insert_index, node);
         insert_index
     }
@@ -943,6 +993,8 @@ impl GraphDocument {
                 evaluation: node.evaluation.clone(),
                 warnings: Vec::new(),
                 python_operator: None,
+                procedural_asset: None,
+                native_operator: None,
             },
             NodeKind::Filter => NodeInfo {
                 kind: node.kind,
@@ -968,6 +1020,8 @@ impl GraphDocument {
                 evaluation: node.evaluation.clone(),
                 warnings: filter_warnings,
                 python_operator: None,
+                procedural_asset: None,
+                native_operator: None,
             },
             NodeKind::Style => NodeInfo {
                 kind: node.kind,
@@ -993,6 +1047,8 @@ impl GraphDocument {
                 evaluation: node.evaluation.clone(),
                 warnings: style_warnings,
                 python_operator: None,
+                procedural_asset: None,
+                native_operator: None,
             },
             NodeKind::PythonOperator => {
                 let python_operator = node.python_operator.as_ref()?;
@@ -1053,6 +1109,173 @@ impl GraphDocument {
                             .map(PythonOperatorCacheKey::summary),
                         last_failure_summary: python_operator.last_failure_summary.clone(),
                     }),
+                    procedural_asset: None,
+                    native_operator: None,
+                }
+            }
+            NodeKind::ProceduralAsset => {
+                let asset_node = node.procedural_asset.as_ref()?;
+                let declaration = self
+                    .procedural_asset_declarations
+                    .iter()
+                    .find(|declaration| declaration.asset_id == asset_node.asset_id);
+                let version_status = declaration
+                    .map_or(OperatorVersionStatus::MissingDeclaration, |_| {
+                        asset_node.version_status
+                    });
+                let warnings = match version_status {
+                    OperatorVersionStatus::Current => Vec::new(),
+                    _ => vec![format!("Asset version status: {}", version_status.as_str())],
+                };
+                NodeInfo {
+                    kind: node.kind,
+                    role: node.kind.role(),
+                    input_count: declaration.map_or(0, |declaration| declaration.inputs.len()),
+                    output_count: declaration.map_or(0, |declaration| declaration.outputs.len()),
+                    status: match version_status {
+                        OperatorVersionStatus::Current => NodeStatus::Healthy,
+                        OperatorVersionStatus::MissingDeclaration
+                        | OperatorVersionStatus::Incompatible => NodeStatus::Failed,
+                        OperatorVersionStatus::NewerAvailable => NodeStatus::Warning,
+                    },
+                    data_kind: "Procedural asset",
+                    record_count: self.visible_output_count(),
+                    bounds: self.output_bounds(),
+                    provenance: Some(self.source.metadata.provenance),
+                    attributes: self.source.metadata.attribute_names.clone(),
+                    parameter: node.parameter.clone(),
+                    summary: "Procedural asset instance wraps a typed graph subgraph without depending on viewer state.",
+                    source_metadata: None,
+                    source_error: None,
+                    style: None,
+                    generated: node.generated,
+                    evaluation: node.evaluation.clone(),
+                    warnings,
+                    python_operator: None,
+                    procedural_asset: Some(ProceduralAssetNodeInfo {
+                        asset_id: asset_node.asset_id.clone(),
+                        display_name: declaration
+                            .map(|declaration| declaration.display_name.clone())
+                            .unwrap_or_else(|| "Missing asset declaration".to_owned()),
+                        version: declaration
+                            .map(|declaration| declaration.version.clone())
+                            .unwrap_or_else(|| "unknown".to_owned()),
+                        description: declaration
+                            .map(|declaration| declaration.description.clone())
+                            .unwrap_or_default(),
+                        labels: declaration
+                            .map(|declaration| declaration.labels.clone())
+                            .unwrap_or_default(),
+                        promoted_parameters: declaration
+                            .map(|declaration| {
+                                declaration
+                                    .promoted_parameters
+                                    .iter()
+                                    .map(|parameter| parameter.name.clone())
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        input_bindings: asset_node.input_bindings.clone(),
+                        output_summary: asset_node.output_summary.clone(),
+                        version_status,
+                    }),
+                    native_operator: None,
+                }
+            }
+            NodeKind::NativeOperator => {
+                let native_node = node.native_operator.as_ref()?;
+                let declaration = self
+                    .native_operator_declarations
+                    .iter()
+                    .find(|declaration| declaration.operator_id == native_node.operator_id);
+                let version_status = declaration
+                    .map_or(OperatorVersionStatus::MissingDeclaration, |_| {
+                        native_node.version_status
+                    });
+                let warnings = match version_status {
+                    OperatorVersionStatus::Current => Vec::new(),
+                    _ => vec![format!(
+                        "Native operator version status: {}",
+                        version_status.as_str()
+                    )],
+                };
+                NodeInfo {
+                    kind: node.kind,
+                    role: node.kind.role(),
+                    input_count: declaration.map_or(0, |declaration| declaration.inputs.len()),
+                    output_count: declaration.map_or(0, |declaration| declaration.outputs.len()),
+                    status: match version_status {
+                        OperatorVersionStatus::Current => NodeStatus::Healthy,
+                        OperatorVersionStatus::MissingDeclaration
+                        | OperatorVersionStatus::Incompatible => NodeStatus::Failed,
+                        OperatorVersionStatus::NewerAvailable => NodeStatus::Warning,
+                    },
+                    data_kind: "Trusted native operator",
+                    record_count: self.visible_output_count(),
+                    bounds: self.output_bounds(),
+                    provenance: Some(self.source.metadata.provenance),
+                    attributes: self.source.metadata.attribute_names.clone(),
+                    parameter: node.parameter.clone(),
+                    summary: "Native operator node is graph-visible; loading and execution are handled by the trusted native lane.",
+                    source_metadata: None,
+                    source_error: None,
+                    style: None,
+                    generated: node.generated,
+                    evaluation: node.evaluation.clone(),
+                    warnings,
+                    python_operator: None,
+                    procedural_asset: None,
+                    native_operator: Some(NativeOperatorNodeInfo {
+                        operator_id: native_node.operator_id.clone(),
+                        display_name: declaration
+                            .map(|declaration| declaration.display_name.clone())
+                            .unwrap_or_else(|| "Missing native declaration".to_owned()),
+                        version: declaration
+                            .map(|declaration| declaration.version.clone())
+                            .unwrap_or_else(|| "unknown".to_owned()),
+                        host_compatibility_version: declaration
+                            .map(|declaration| declaration.host_compatibility_version.clone())
+                            .unwrap_or_else(|| "unknown".to_owned()),
+                        inputs: declaration
+                            .map(|declaration| port_names(&declaration.inputs))
+                            .unwrap_or_default(),
+                        outputs: declaration
+                            .map(|declaration| port_names(&declaration.outputs))
+                            .unwrap_or_default(),
+                        parameters: declaration
+                            .map(|declaration| {
+                                declaration
+                                    .parameters
+                                    .iter()
+                                    .map(|parameter| parameter.name.clone())
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        capabilities: declaration
+                            .map(|declaration| {
+                                declaration
+                                    .capabilities
+                                    .iter()
+                                    .map(|capability| format!("{capability:?}"))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        provenance_summary: declaration
+                            .map(|declaration| declaration.provenance.summary())
+                            .unwrap_or_else(|| "none".to_owned()),
+                        failure_modes: declaration
+                            .map(|declaration| {
+                                declaration
+                                    .failure_modes
+                                    .iter()
+                                    .map(NativeOperatorFailureMode::summary)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        version_status,
+                        last_valid_cache_key: native_node.last_valid_cache_key.clone(),
+                        last_failure_summary: native_node.last_failure_summary.clone(),
+                    }),
                 }
             }
             NodeKind::Output => NodeInfo {
@@ -1075,6 +1298,8 @@ impl GraphDocument {
                 evaluation: node.evaluation.clone(),
                 warnings: Vec::new(),
                 python_operator: None,
+                procedural_asset: None,
+                native_operator: None,
             },
         })
     }
@@ -2003,6 +2228,8 @@ impl HoudiniGraphSidecar {
                     parameter_rule: node.parameter.rule_spec.clone(),
                     generated: node.generated,
                     python_operator: node.python_operator.clone(),
+                    procedural_asset: node.procedural_asset.clone(),
+                    native_operator: node.native_operator.clone(),
                 })
                 .collect(),
             layers: graph
@@ -2054,13 +2281,7 @@ impl HoudiniGraphSidecar {
         for node_snapshot in self.nodes {
             let matching_node = graph.nodes.iter_mut().find(|node| {
                 node.kind == node_snapshot.kind
-                    && (node.kind != NodeKind::PythonOperator
-                        || node.python_operator.as_ref().and_then(|python_operator| {
-                            node_snapshot
-                                .python_operator
-                                .as_ref()
-                                .map(|snapshot| python_operator.instance_id == snapshot.instance_id)
-                        }) == Some(true))
+                    && node_matches_snapshot_identity(node, &node_snapshot)
             });
             if let Some(node) = matching_node {
                 node.layout_position = node_snapshot.layout_position.clamped_to_unit();
@@ -2072,8 +2293,10 @@ impl HoudiniGraphSidecar {
                 }
                 node.generated = node_snapshot.generated;
                 node.python_operator = node_snapshot.python_operator;
-            } else if node_snapshot.kind == NodeKind::PythonOperator {
-                graph.nodes.push(node_snapshot.into_python_operator_node());
+                node.procedural_asset = node_snapshot.procedural_asset;
+                node.native_operator = node_snapshot.native_operator;
+            } else if node_snapshot.is_instance_node() {
+                graph.nodes.push(node_snapshot.into_instance_node());
             }
         }
 
@@ -2115,16 +2338,44 @@ struct NodeSidecar {
     generated: Option<GeneratedNodeInfo>,
     #[serde(default)]
     python_operator: Option<PythonOperatorNode>,
+    #[serde(default)]
+    procedural_asset: Option<ProceduralAssetInstanceNode>,
+    #[serde(default)]
+    native_operator: Option<NativeOperatorNode>,
 }
 
 impl NodeSidecar {
-    fn into_python_operator_node(self) -> GraphNode {
+    fn is_instance_node(&self) -> bool {
+        matches!(
+            self.kind,
+            NodeKind::PythonOperator | NodeKind::ProceduralAsset | NodeKind::NativeOperator
+        )
+    }
+
+    fn into_instance_node(self) -> GraphNode {
+        let (name, info) = match self.kind {
+            NodeKind::PythonOperator => (
+                "Python Operator",
+                "Runs trusted project Python against typed graph inputs once execution is enabled.",
+            ),
+            NodeKind::ProceduralAsset => (
+                "Asset",
+                "Runs a graph-backed procedural asset without calling viewer APIs.",
+            ),
+            NodeKind::NativeOperator => (
+                "Native Operator",
+                "Runs a trusted native operator once a loader is available.",
+            ),
+            _ => ("Graph Node", "Restored graph node."),
+        };
         GraphNode {
-            name: "Python Operator",
-            kind: NodeKind::PythonOperator,
+            name,
+            kind: self.kind,
             layout_position: self.layout_position.clamped_to_unit(),
             generated: self.generated,
             python_operator: self.python_operator,
+            procedural_asset: self.procedural_asset,
+            native_operator: self.native_operator,
             evaluation: NodeEvaluation::clean(),
             participates_in_output: true,
             parameter: NodeParameter::scalar(
@@ -2133,8 +2384,38 @@ impl NodeSidecar {
                 0.0..=1.0,
                 "Manual readiness placeholder for a graph-visible Python operator.",
             ),
-            info: "Runs trusted project Python against typed graph inputs once execution is enabled.",
+            info,
         }
+    }
+}
+
+fn node_matches_snapshot_identity(node: &GraphNode, snapshot: &NodeSidecar) -> bool {
+    match node.kind {
+        NodeKind::PythonOperator => {
+            node.python_operator.as_ref().and_then(|python_operator| {
+                snapshot
+                    .python_operator
+                    .as_ref()
+                    .map(|snapshot| python_operator.instance_id == snapshot.instance_id)
+            }) == Some(true)
+        }
+        NodeKind::ProceduralAsset => {
+            node.procedural_asset.as_ref().and_then(|asset| {
+                snapshot
+                    .procedural_asset
+                    .as_ref()
+                    .map(|snapshot| asset.instance_id == snapshot.instance_id)
+            }) == Some(true)
+        }
+        NodeKind::NativeOperator => {
+            node.native_operator.as_ref().and_then(|native| {
+                snapshot
+                    .native_operator
+                    .as_ref()
+                    .map(|snapshot| native.instance_id == snapshot.instance_id)
+            }) == Some(true)
+        }
+        _ => true,
     }
 }
 
@@ -2172,6 +2453,8 @@ pub(crate) struct GraphNode {
     pub layout_position: GraphPoint,
     pub generated: Option<GeneratedNodeInfo>,
     pub python_operator: Option<PythonOperatorNode>,
+    pub procedural_asset: Option<ProceduralAssetInstanceNode>,
+    pub native_operator: Option<NativeOperatorNode>,
     pub evaluation: NodeEvaluation,
     pub participates_in_output: bool,
     pub parameter: NodeParameter,
@@ -2193,6 +2476,8 @@ impl GraphNode {
                 provenance: None,
                 last_failure_summary: None,
             }),
+            procedural_asset: None,
+            native_operator: None,
             evaluation: NodeEvaluation {
                 state: EvaluationState::Manual,
                 manual: true,
@@ -2206,6 +2491,63 @@ impl GraphNode {
                 "Manual readiness placeholder for a graph-visible Python operator.",
             ),
             info: "Runs trusted project Python against typed graph inputs once execution is enabled.",
+        }
+    }
+
+    fn procedural_asset(instance_id: String, asset_id: String) -> Self {
+        Self {
+            name: "Asset",
+            kind: NodeKind::ProceduralAsset,
+            layout_position: GraphPoint::new(0.5, 0.5),
+            generated: None,
+            python_operator: None,
+            procedural_asset: Some(ProceduralAssetInstanceNode {
+                instance_id,
+                asset_id,
+                input_bindings: vec![HoudiniNodeBinding {
+                    port_name: "geometry".to_owned(),
+                    source_summary: "previous output".to_owned(),
+                }],
+                output_summary: None,
+                version_status: OperatorVersionStatus::Current,
+            }),
+            native_operator: None,
+            evaluation: NodeEvaluation::clean(),
+            participates_in_output: true,
+            parameter: NodeParameter::scalar(
+                "Bypass",
+                0.0,
+                0.0..=1.0,
+                "Asset node readiness placeholder.",
+            ),
+            info: "Runs a graph-backed procedural asset without calling viewer APIs.",
+        }
+    }
+
+    fn native_operator(instance_id: String, operator_id: String) -> Self {
+        Self {
+            name: "Native Operator",
+            kind: NodeKind::NativeOperator,
+            layout_position: GraphPoint::new(0.5, 0.5),
+            generated: None,
+            python_operator: None,
+            procedural_asset: None,
+            native_operator: Some(NativeOperatorNode {
+                instance_id,
+                operator_id,
+                version_status: OperatorVersionStatus::Current,
+                last_valid_cache_key: None,
+                last_failure_summary: None,
+            }),
+            evaluation: NodeEvaluation::clean(),
+            participates_in_output: true,
+            parameter: NodeParameter::scalar(
+                "Bypass",
+                0.0,
+                0.0..=1.0,
+                "Native operator readiness placeholder.",
+            ),
+            info: "Runs a trusted native operator once a loader is available.",
         }
     }
 }
@@ -2222,6 +2564,55 @@ pub(crate) struct PythonOperatorNode {
     pub provenance: Option<PythonOperatorProvenanceRecord>,
     #[serde(default)]
     pub last_failure_summary: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ProceduralAssetInstanceNode {
+    #[serde(default)]
+    pub instance_id: String,
+    pub asset_id: String,
+    #[serde(default)]
+    pub input_bindings: Vec<HoudiniNodeBinding>,
+    pub output_summary: Option<String>,
+    #[serde(default)]
+    pub version_status: OperatorVersionStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct NativeOperatorNode {
+    #[serde(default)]
+    pub instance_id: String,
+    pub operator_id: String,
+    #[serde(default)]
+    pub version_status: OperatorVersionStatus,
+    pub last_valid_cache_key: Option<String>,
+    pub last_failure_summary: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct HoudiniNodeBinding {
+    pub port_name: String,
+    pub source_summary: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum OperatorVersionStatus {
+    #[default]
+    Current,
+    NewerAvailable,
+    MissingDeclaration,
+    Incompatible,
+}
+
+impl OperatorVersionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "Current",
+            Self::NewerAvailable => "Newer available",
+            Self::MissingDeclaration => "Declaration missing",
+            Self::Incompatible => "Incompatible",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -2358,11 +2749,37 @@ pub(crate) struct NativeOperatorProvenance {
     pub vendor: Option<String>,
 }
 
+impl NativeOperatorProvenance {
+    fn summary(&self) -> String {
+        format!(
+            "repo {}, rev {}, build {}",
+            self.source_repository.as_deref().unwrap_or("unknown"),
+            self.source_revision.as_deref().unwrap_or("unknown"),
+            self.build_digest.as_deref().unwrap_or("unknown")
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct NativeOperatorFailureMode {
     pub code: String,
     pub summary: String,
     pub recoverable: bool,
+}
+
+impl NativeOperatorFailureMode {
+    fn summary(&self) -> String {
+        format!(
+            "{}: {} ({})",
+            self.code,
+            self.summary,
+            if self.recoverable {
+                "recoverable"
+            } else {
+                "fatal"
+            }
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -2927,6 +3344,13 @@ fn requirement_package_name(requirement: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn port_names(ports: &[HoudiniOperatorPort]) -> Vec<String> {
+    ports
+        .iter()
+        .map(|port| format!("{} ({:?})", port.name, port.data_kind))
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct GeneratedNodeInfo {
     pub source: GeneratedNodeSource,
@@ -3107,6 +3531,8 @@ pub(crate) enum NodeKind {
     Filter,
     Style,
     PythonOperator,
+    ProceduralAsset,
+    NativeOperator,
     Output,
 }
 
@@ -3117,6 +3543,8 @@ impl NodeKind {
             Self::Filter => "Filter",
             Self::Style => "Style",
             Self::PythonOperator => "Python Operator",
+            Self::ProceduralAsset => "Asset",
+            Self::NativeOperator => "Native Operator",
             Self::Output => "Output",
         }
     }
@@ -3127,6 +3555,8 @@ impl NodeKind {
             Self::Filter => "Cull",
             Self::Style => "Style",
             Self::PythonOperator => "Compute",
+            Self::ProceduralAsset => "Asset",
+            Self::NativeOperator => "Native",
             Self::Output => "Publish",
         }
     }
@@ -3152,6 +3582,8 @@ pub(crate) struct NodeInfo {
     pub evaluation: NodeEvaluation,
     pub warnings: Vec<String>,
     pub python_operator: Option<PythonOperatorNodeInfo>,
+    pub procedural_asset: Option<ProceduralAssetNodeInfo>,
+    pub native_operator: Option<NativeOperatorNodeInfo>,
 }
 
 pub(crate) struct PythonOperatorNodeInfo {
@@ -3163,6 +3595,34 @@ pub(crate) struct PythonOperatorNodeInfo {
     pub requirements: Vec<String>,
     pub provenance_summary: Option<String>,
     pub cache_key_summary: Option<String>,
+    pub last_failure_summary: Option<String>,
+}
+
+pub(crate) struct ProceduralAssetNodeInfo {
+    pub asset_id: String,
+    pub display_name: String,
+    pub version: String,
+    pub description: String,
+    pub labels: Vec<String>,
+    pub promoted_parameters: Vec<String>,
+    pub input_bindings: Vec<HoudiniNodeBinding>,
+    pub output_summary: Option<String>,
+    pub version_status: OperatorVersionStatus,
+}
+
+pub(crate) struct NativeOperatorNodeInfo {
+    pub operator_id: String,
+    pub display_name: String,
+    pub version: String,
+    pub host_compatibility_version: String,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    pub parameters: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub provenance_summary: String,
+    pub failure_modes: Vec<String>,
+    pub version_status: OperatorVersionStatus,
+    pub last_valid_cache_key: Option<String>,
     pub last_failure_summary: Option<String>,
 }
 
@@ -3850,9 +4310,9 @@ mod tests {
         HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
         NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
         NativeOperatorImplementation, NativeOperatorProvenance, NodeEvaluation, NodeKind,
-        NodeParameter, NodeParameterKind, NodeStatus, ProceduralAssetDeclaration,
-        ProceduralAssetSource, ProceduralAssetSubgraphReference, PythonDependencyHealth,
-        PythonEnvironmentDescriptor, PythonEnvironmentResolveState,
+        NodeParameter, NodeParameterKind, NodeStatus, OperatorVersionStatus,
+        ProceduralAssetDeclaration, ProceduralAssetSource, ProceduralAssetSubgraphReference,
+        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentResolveState,
         PythonEnvironmentResolveTrigger, PythonEnvironmentResolver, PythonEnvironmentStatus,
         PythonOperatorCapability, PythonOperatorDataKind, PythonOperatorDeclaration,
         PythonOperatorDependencies, PythonOperatorDependencyStatus, PythonOperatorEntryPoint,
@@ -4446,6 +4906,8 @@ mod tests {
             layout_position: GraphPoint::new(0.5, 0.1),
             generated: None,
             python_operator: None,
+            procedural_asset: None,
+            native_operator: None,
             evaluation: NodeEvaluation {
                 state: EvaluationState::Stale,
                 manual: false,
@@ -5715,6 +6177,165 @@ mod tests {
                 .any(|port| port.data_kind.preserves_native_cubic_bezier())
         );
         assert!(asset.wrapped_subgraph.captures_native_cubic_bezier);
+    }
+
+    #[test]
+    fn procedural_asset_instance_node_reports_asset_inspection_data() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        let node_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        graph.mark_node_stale(node_index);
+        graph.demand_output_evaluation();
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("asset node info should exist");
+
+        assert_eq!(info.kind, NodeKind::ProceduralAsset);
+        assert_eq!(info.role, "Asset");
+        assert_eq!(info.status, NodeStatus::Healthy);
+        assert_eq!(info.evaluation.state, EvaluationState::Cached);
+        let asset = info
+            .procedural_asset
+            .expect("asset inspector info should exist");
+        assert_eq!(asset.asset_id, "vy.asset.curve_cleanup");
+        assert_eq!(asset.display_name, "Curve cleanup");
+        assert_eq!(asset.version, "0.1.0");
+        assert_eq!(asset.version_status, OperatorVersionStatus::Current);
+        assert_eq!(
+            asset.promoted_parameters,
+            vec!["minimum_score", "layer_name"]
+        );
+        assert_eq!(asset.input_bindings[0].port_name, "geometry");
+        assert!(info.python_operator.is_none());
+        assert!(info.native_operator.is_none());
+    }
+
+    #[test]
+    fn procedural_asset_missing_declaration_reports_failed_version_status() {
+        let mut graph = GraphDocument::sample();
+        let node_index = graph.add_procedural_asset_node("vy.asset.missing");
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("asset node info should exist");
+
+        assert_eq!(info.status, NodeStatus::Failed);
+        assert_eq!(
+            info.procedural_asset
+                .expect("asset info should exist")
+                .version_status,
+            OperatorVersionStatus::MissingDeclaration
+        );
+    }
+
+    #[test]
+    fn native_operator_node_reports_native_inspection_data() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        graph.set_node_manual(node_index, true);
+        graph.request_node_run(node_index);
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist");
+
+        assert_eq!(info.kind, NodeKind::NativeOperator);
+        assert_eq!(info.role, "Native");
+        assert_eq!(info.status, NodeStatus::Healthy);
+        assert_eq!(info.evaluation.state, EvaluationState::Running);
+        let native = info
+            .native_operator
+            .expect("native inspector info should exist");
+        assert_eq!(native.operator_id, "vy.native.simplify_curves");
+        assert_eq!(native.display_name, "Simplify curves");
+        assert_eq!(native.version_status, OperatorVersionStatus::Current);
+        assert_eq!(native.inputs, vec!["geometry (GeometryTable)".to_owned()]);
+        assert!(native.capabilities.contains(&"GeometryRead".to_owned()));
+        assert!(native.provenance_summary.contains("vycorporation/rerun"));
+        assert!(native.failure_modes[0].contains("invalid_geometry"));
+        assert!(info.procedural_asset.is_none());
+        assert!(info.python_operator.is_none());
+    }
+
+    #[test]
+    fn native_operator_failure_preserves_last_valid_cache_key() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        graph.nodes[node_index]
+            .native_operator
+            .as_mut()
+            .expect("native payload should exist")
+            .last_valid_cache_key = Some("native-cache:ok".to_owned());
+
+        graph.fail_node_run(node_index, "native operator crashed");
+
+        let native = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist")
+            .native_operator
+            .expect("native info should exist");
+        assert_eq!(
+            native.last_valid_cache_key.as_deref(),
+            Some("native-cache:ok")
+        );
+        assert_eq!(native.last_failure_summary, None);
+    }
+
+    #[test]
+    fn asset_and_native_nodes_round_trip_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        let asset_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        let native_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        graph.set_node_layout_position(asset_index, GraphPoint::new(0.48, 0.41));
+        graph.set_node_layout_position(native_index, GraphPoint::new(0.58, 0.43));
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        let asset = restored
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::ProceduralAsset)
+            .expect("asset node should restore");
+        let native = restored
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::NativeOperator)
+            .expect("native node should restore");
+        assert_eq!(
+            asset
+                .procedural_asset
+                .as_ref()
+                .expect("asset payload should restore")
+                .instance_id,
+            "asset_1"
+        );
+        assert_eq!(
+            native
+                .native_operator
+                .as_ref()
+                .expect("native payload should restore")
+                .instance_id,
+            "native_operator_1"
+        );
+        assert_eq!(asset.layout_position, GraphPoint::new(0.48, 0.41));
+        assert_eq!(native.layout_position, GraphPoint::new(0.58, 0.43));
     }
 
     #[test]

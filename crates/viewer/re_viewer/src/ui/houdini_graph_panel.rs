@@ -10,8 +10,9 @@ pub(crate) mod model;
 
 use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState, GeometryBounds,
-    GraphDocument, GraphPoint, GraphStyle, LayerKind, NodeStatus, PythonEnvironmentResolveTrigger,
-    PythonEnvironmentStatus, PythonOperatorDependencyStatus, SourceMetadata,
+    GraphDocument, GraphPoint, GraphStyle, HoudiniNodeBinding, LayerKind, NodeStatus,
+    PythonEnvironmentResolveTrigger, PythonEnvironmentStatus, PythonOperatorDependencyStatus,
+    SourceMetadata,
 };
 
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
@@ -785,6 +786,99 @@ impl HoudiniGraphPanel {
                             ui.end_row();
                         }
                     }
+
+                    if let Some(asset) = &info.procedural_asset {
+                        ui.weak("Asset");
+                        ui.label(format!("{} ({})", asset.display_name, asset.asset_id));
+                        ui.end_row();
+
+                        ui.weak("Version");
+                        ui.label(format!(
+                            "{} / {}",
+                            asset.version,
+                            asset.version_status.as_str()
+                        ));
+                        ui.end_row();
+
+                        ui.weak("Labels");
+                        ui.label(format_list(&asset.labels));
+                        ui.end_row();
+
+                        ui.weak("Description");
+                        ui.label(&asset.description);
+                        ui.end_row();
+
+                        ui.weak("Promoted");
+                        ui.label(format_list(&asset.promoted_parameters));
+                        ui.end_row();
+
+                        ui.weak("Bindings");
+                        ui.label(format_bindings(&asset.input_bindings));
+                        ui.end_row();
+
+                        if let Some(output_summary) = &asset.output_summary {
+                            ui.weak("Asset output");
+                            ui.label(output_summary);
+                            ui.end_row();
+                        }
+                    }
+
+                    if let Some(native_operator) = &info.native_operator {
+                        ui.weak("Native");
+                        ui.label(format!(
+                            "{} ({})",
+                            native_operator.display_name, native_operator.operator_id
+                        ));
+                        ui.end_row();
+
+                        ui.weak("Version");
+                        ui.label(format!(
+                            "{} / {}",
+                            native_operator.version,
+                            native_operator.version_status.as_str()
+                        ));
+                        ui.end_row();
+
+                        ui.weak("Host");
+                        ui.label(&native_operator.host_compatibility_version);
+                        ui.end_row();
+
+                        ui.weak("Inputs");
+                        ui.label(format_list(&native_operator.inputs));
+                        ui.end_row();
+
+                        ui.weak("Outputs");
+                        ui.label(format_list(&native_operator.outputs));
+                        ui.end_row();
+
+                        ui.weak("Parameters");
+                        ui.label(format_list(&native_operator.parameters));
+                        ui.end_row();
+
+                        ui.weak("Capabilities");
+                        ui.label(format_list(&native_operator.capabilities));
+                        ui.end_row();
+
+                        ui.weak("Provenance");
+                        ui.label(&native_operator.provenance_summary);
+                        ui.end_row();
+
+                        ui.weak("Failure modes");
+                        ui.label(format_list(&native_operator.failure_modes));
+                        ui.end_row();
+
+                        if let Some(cache_key) = &native_operator.last_valid_cache_key {
+                            ui.weak("Last valid cache");
+                            ui.label(cache_key);
+                            ui.end_row();
+                        }
+
+                        if let Some(last_failure) = &native_operator.last_failure_summary {
+                            ui.weak("Last failure");
+                            ui.label(last_failure);
+                            ui.end_row();
+                        }
+                    }
                 });
             ui.label(info.summary);
             if let Some(python_operator) = &info.python_operator {
@@ -1064,6 +1158,18 @@ fn format_list(values: &[String]) -> String {
         "none".to_owned()
     } else {
         values.join(", ")
+    }
+}
+
+fn format_bindings(bindings: &[HoudiniNodeBinding]) -> String {
+    if bindings.is_empty() {
+        "none".to_owned()
+    } else {
+        bindings
+            .iter()
+            .map(|binding| format!("{} <- {}", binding.port_name, binding.source_summary))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
