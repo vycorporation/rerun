@@ -886,6 +886,10 @@ impl HoudiniGraphPanel {
                         ui.label(&native_operator.host_compatibility_version);
                         ui.end_row();
 
+                        ui.weak("Load");
+                        ui.label(native_operator.load_status.as_str());
+                        ui.end_row();
+
                         ui.weak("Inputs");
                         ui.label(format_list(&native_operator.inputs));
                         ui.end_row();

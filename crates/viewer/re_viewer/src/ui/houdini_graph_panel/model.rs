@@ -36,10 +36,12 @@ pub(crate) struct GraphDocument {
     pub python_operator_declarations: Vec<PythonOperatorDeclaration>,
     pub procedural_asset_declarations: Vec<ProceduralAssetDeclaration>,
     pub native_operator_declarations: Vec<NativeOperatorDeclaration>,
+    pub native_operator_trust: NativeOperatorTrustPolicy,
     pub python_environment: PythonEnvironmentDescriptor,
 }
 
 const GENERATED_NODE_LANE_Y: f32 = 0.82;
+const NATIVE_OPERATOR_HOST_COMPATIBILITY_VERSION: &str = "re_viewer-houdini-graph-0.1";
 
 impl GraphDocument {
     pub fn sample() -> Self {
@@ -206,6 +208,7 @@ impl GraphDocument {
             python_operator_declarations: Vec::new(),
             procedural_asset_declarations: Vec::new(),
             native_operator_declarations: Vec::new(),
+            native_operator_trust: NativeOperatorTrustPolicy::default(),
             python_environment: PythonEnvironmentDescriptor::default(),
         }
     }
@@ -607,6 +610,59 @@ impl GraphDocument {
         let node = GraphNode::native_operator(instance_id, operator_id);
         self.nodes.insert(insert_index, node);
         insert_index
+    }
+
+    fn native_operator_load_status(&self, operator_id: Option<&str>) -> NativeOperatorLoadStatus {
+        let Some(operator_id) = operator_id else {
+            return NativeOperatorLoadStatus::DeclarationMissing;
+        };
+        let Some(declaration) = self
+            .native_operator_declarations
+            .iter()
+            .find(|declaration| declaration.operator_id == operator_id)
+        else {
+            return NativeOperatorLoadStatus::DeclarationMissing;
+        };
+        if !self.native_operator_trust.project_trusted
+            && !self
+                .native_operator_trust
+                .enabled_operator_ids
+                .iter()
+                .any(|enabled| enabled == operator_id)
+        {
+            return NativeOperatorLoadStatus::TrustRequired;
+        }
+        if declaration.host_compatibility_version != NATIVE_OPERATOR_HOST_COMPATIBILITY_VERSION {
+            return NativeOperatorLoadStatus::HostIncompatible;
+        }
+        if declaration.provenance.build_digest.is_none() {
+            return NativeOperatorLoadStatus::ImplementationDigestMissing;
+        }
+        if declaration.capabilities.iter().any(|capability| {
+            !self
+                .native_operator_trust
+                .granted_capabilities
+                .contains(capability)
+        }) {
+            return NativeOperatorLoadStatus::MissingCapabilityGrant;
+        }
+        NativeOperatorLoadStatus::Ready
+    }
+
+    fn block_native_operator_run(&self, node_index: usize) -> Option<NativeOperatorLoadStatus> {
+        let node = self.nodes.get(node_index)?;
+        let native_operator = node.native_operator.as_ref()?;
+        let load_status = self.native_operator_load_status(Some(&native_operator.operator_id));
+        (load_status != NativeOperatorLoadStatus::Ready).then_some(load_status)
+    }
+
+    fn apply_native_operator_block(node: &mut GraphNode, load_status: NativeOperatorLoadStatus) {
+        node.evaluation.state = EvaluationState::Manual;
+        node.evaluation.manual = true;
+        node.evaluation.message = Some(load_status.summary().to_owned());
+        if let Some(native_operator) = node.native_operator.as_mut() {
+            native_operator.last_failure_summary = Some(load_status.summary().to_owned());
+        }
     }
 
     #[allow(dead_code)]
@@ -1018,6 +1074,11 @@ impl GraphDocument {
                 Self::apply_python_operator_block(node, dependency_status);
                 continue;
             }
+            if let Some(load_status) = self.block_native_operator_run(index) {
+                let node = &mut self.nodes[index];
+                Self::apply_native_operator_block(node, load_status);
+                continue;
+            }
 
             let node = &mut self.nodes[index];
             if !node.participates_in_output || node.evaluation.manual {
@@ -1037,6 +1098,12 @@ impl GraphDocument {
         if let Some(dependency_status) = self.block_python_operator_run(index) {
             if let Some(node) = self.nodes.get_mut(index) {
                 Self::apply_python_operator_block(node, dependency_status);
+            }
+            return;
+        }
+        if let Some(load_status) = self.block_native_operator_run(index) {
+            if let Some(node) = self.nodes.get_mut(index) {
+                Self::apply_native_operator_block(node, load_status);
             }
             return;
         }
@@ -1303,24 +1370,25 @@ impl GraphDocument {
                     .map_or(OperatorVersionStatus::MissingDeclaration, |_| {
                         native_node.version_status
                     });
-                let warnings = match version_status {
+                let load_status = self.native_operator_load_status(
+                    declaration.map(|declaration| declaration.operator_id.as_str()),
+                );
+                let mut warnings = match version_status {
                     OperatorVersionStatus::Current => Vec::new(),
                     _ => vec![format!(
                         "Native operator version status: {}",
                         version_status.as_str()
                     )],
                 };
+                if load_status != NativeOperatorLoadStatus::Ready {
+                    warnings.push(load_status.summary().to_owned());
+                }
                 NodeInfo {
                     kind: node.kind,
                     role: node.kind.role(),
                     input_count: declaration.map_or(0, |declaration| declaration.inputs.len()),
                     output_count: declaration.map_or(0, |declaration| declaration.outputs.len()),
-                    status: match version_status {
-                        OperatorVersionStatus::Current => NodeStatus::Healthy,
-                        OperatorVersionStatus::MissingDeclaration
-                        | OperatorVersionStatus::Incompatible => NodeStatus::Failed,
-                        OperatorVersionStatus::NewerAvailable => NodeStatus::Warning,
-                    },
+                    status: native_operator_node_status(version_status, load_status),
                     data_kind: "Trusted native operator",
                     record_count: self.visible_output_count(),
                     bounds: self.output_bounds(),
@@ -1384,6 +1452,7 @@ impl GraphDocument {
                             })
                             .unwrap_or_default(),
                         version_status,
+                        load_status,
                         last_valid_cache_key: native_node.last_valid_cache_key.clone(),
                         last_failure_summary: native_node.last_failure_summary.clone(),
                     }),
@@ -2312,6 +2381,8 @@ struct HoudiniGraphSidecar {
     #[serde(default)]
     native_operator_declarations: Vec<NativeOperatorDeclaration>,
     #[serde(default)]
+    native_operator_trust: NativeOperatorTrustPolicy,
+    #[serde(default)]
     python_environment: PythonEnvironmentDescriptor,
 }
 
@@ -2360,6 +2431,7 @@ impl HoudiniGraphSidecar {
             python_operator_declarations: graph.python_operator_declarations.clone(),
             procedural_asset_declarations: graph.procedural_asset_declarations.clone(),
             native_operator_declarations: graph.native_operator_declarations.clone(),
+            native_operator_trust: graph.native_operator_trust.clone(),
             python_environment: graph.python_environment.clone(),
         }
     }
@@ -2387,6 +2459,7 @@ impl HoudiniGraphSidecar {
         graph.python_operator_declarations = self.python_operator_declarations;
         graph.procedural_asset_declarations = self.procedural_asset_declarations;
         graph.native_operator_declarations = self.native_operator_declarations;
+        graph.native_operator_trust = self.native_operator_trust;
         graph.python_environment = self.python_environment;
 
         for node_snapshot in self.nodes {
@@ -3537,6 +3610,30 @@ fn port_names(ports: &[HoudiniOperatorPort]) -> Vec<String> {
         .collect()
 }
 
+fn native_operator_node_status(
+    version_status: OperatorVersionStatus,
+    load_status: NativeOperatorLoadStatus,
+) -> NodeStatus {
+    match load_status {
+        NativeOperatorLoadStatus::Ready => match version_status {
+            OperatorVersionStatus::Current => NodeStatus::Healthy,
+            OperatorVersionStatus::NewerAvailable => NodeStatus::Warning,
+            OperatorVersionStatus::MissingDeclaration | OperatorVersionStatus::Incompatible => {
+                NodeStatus::Failed
+            }
+        },
+        NativeOperatorLoadStatus::TrustRequired
+        | NativeOperatorLoadStatus::MissingCapabilityGrant => NodeStatus::Warning,
+        NativeOperatorLoadStatus::DeclarationMissing
+        | NativeOperatorLoadStatus::HostIncompatible
+        | NativeOperatorLoadStatus::ImplementationDigestMissing
+        | NativeOperatorLoadStatus::LoadFailed
+        | NativeOperatorLoadStatus::RuntimeFailed
+        | NativeOperatorLoadStatus::TimedOut
+        | NativeOperatorLoadStatus::OutputSchemaMismatch => NodeStatus::Failed,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct GeneratedNodeInfo {
     pub source: GeneratedNodeSource,
@@ -3809,8 +3906,76 @@ pub(crate) struct NativeOperatorNodeInfo {
     pub provenance_summary: String,
     pub failure_modes: Vec<String>,
     pub version_status: OperatorVersionStatus,
+    pub load_status: NativeOperatorLoadStatus,
     pub last_valid_cache_key: Option<String>,
     pub last_failure_summary: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeOperatorLoadStatus {
+    DeclarationMissing,
+    TrustRequired,
+    HostIncompatible,
+    ImplementationDigestMissing,
+    MissingCapabilityGrant,
+    Ready,
+    #[allow(dead_code)]
+    LoadFailed,
+    #[allow(dead_code)]
+    RuntimeFailed,
+    #[allow(dead_code)]
+    TimedOut,
+    #[allow(dead_code)]
+    OutputSchemaMismatch,
+}
+
+impl NativeOperatorLoadStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeclarationMissing => "Declaration missing",
+            Self::TrustRequired => "Trust required",
+            Self::HostIncompatible => "Host incompatible",
+            Self::ImplementationDigestMissing => "Implementation digest missing",
+            Self::MissingCapabilityGrant => "Missing capability grant",
+            Self::Ready => "Ready",
+            Self::LoadFailed => "Load failed",
+            Self::RuntimeFailed => "Runtime failed",
+            Self::TimedOut => "Timed out",
+            Self::OutputSchemaMismatch => "Output schema mismatch",
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            Self::DeclarationMissing => "Native operator declaration is missing.",
+            Self::TrustRequired => {
+                "Project trust or explicit operator enablement is required before loading native code."
+            }
+            Self::HostIncompatible => {
+                "Native operator host compatibility version does not match this viewer."
+            }
+            Self::ImplementationDigestMissing => {
+                "Native operator implementation digest is missing."
+            }
+            Self::MissingCapabilityGrant => {
+                "Native operator declares capabilities that have not been granted."
+            }
+            Self::Ready => "Native operator is trusted and ready to load.",
+            Self::LoadFailed => "Native operator load failed.",
+            Self::RuntimeFailed => "Native operator runtime failed.",
+            Self::TimedOut => "Native operator execution timed out.",
+            Self::OutputSchemaMismatch => {
+                "Native operator output schema did not match Houdini geometry."
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct NativeOperatorTrustPolicy {
+    pub project_trusted: bool,
+    pub enabled_operator_ids: Vec<String>,
+    pub granted_capabilities: Vec<NativeOperatorCapability>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4496,19 +4661,19 @@ mod tests {
         HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
         HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
         NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
-        NativeOperatorImplementation, NativeOperatorProvenance, NodeEvaluation, NodeKind,
-        NodeParameter, NodeParameterKind, NodeStatus, OperatorVersionStatus,
-        ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot, ProceduralAssetSource,
-        ProceduralAssetSubgraphReference, PythonDependencyHealth, PythonEnvironmentDescriptor,
-        PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
-        PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
-        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorDependencyStatus,
-        PythonOperatorEntryPoint, PythonOperatorNumericRange, PythonOperatorOutputCounts,
-        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
-        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
-        PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
-        RerunSceneDebugItem, RerunSceneItem, SourceProvenance, ViewerGeometry,
-        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorProvenance,
+        NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind, NodeStatus,
+        OperatorVersionStatus, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
+        ProceduralAssetSource, ProceduralAssetSubgraphReference, PythonDependencyHealth,
+        PythonEnvironmentDescriptor, PythonEnvironmentResolveState,
+        PythonEnvironmentResolveTrigger, PythonEnvironmentResolver, PythonEnvironmentStatus,
+        PythonOperatorCapability, PythonOperatorDataKind, PythonOperatorDeclaration,
+        PythonOperatorDependencies, PythonOperatorDependencyStatus, PythonOperatorEntryPoint,
+        PythonOperatorNumericRange, PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
+        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
+        PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
+        PythonRequirementsSource, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
+        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -6502,6 +6667,7 @@ mod tests {
         graph
             .native_operator_declarations
             .push(sample_native_operator_declaration());
+        trust_sample_native_operator(&mut graph);
         let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
         graph.set_node_manual(node_index, true);
         graph.request_node_run(node_index);
@@ -6520,6 +6686,7 @@ mod tests {
         assert_eq!(native.operator_id, "vy.native.simplify_curves");
         assert_eq!(native.display_name, "Simplify curves");
         assert_eq!(native.version_status, OperatorVersionStatus::Current);
+        assert_eq!(native.load_status, NativeOperatorLoadStatus::Ready);
         assert_eq!(native.inputs, vec!["geometry (GeometryTable)".to_owned()]);
         assert!(native.capabilities.contains(&"GeometryRead".to_owned()));
         assert!(native.provenance_summary.contains("vycorporation/rerun"));
@@ -6553,6 +6720,86 @@ mod tests {
             Some("native-cache:ok")
         );
         assert_eq!(native.last_failure_summary, None);
+    }
+
+    #[test]
+    fn native_operator_requires_trust_before_run() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+
+        graph.request_node_run(node_index);
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist");
+        let native = info.native_operator.expect("native info should exist");
+        assert_eq!(info.status, NodeStatus::Warning);
+        assert_eq!(native.load_status, NativeOperatorLoadStatus::TrustRequired);
+        assert_eq!(info.evaluation.state, EvaluationState::Manual);
+        assert_eq!(
+            info.evaluation.message.as_deref(),
+            Some(
+                "Project trust or explicit operator enablement is required before loading native code."
+            )
+        );
+    }
+
+    #[test]
+    fn native_operator_checks_capability_grants_and_host_compatibility() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        graph.native_operator_trust.project_trusted = true;
+        graph.native_operator_trust.granted_capabilities =
+            vec![NativeOperatorCapability::GeometryRead];
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        let missing_grant = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist")
+            .native_operator
+            .expect("native info should exist")
+            .load_status;
+        assert_eq!(
+            missing_grant,
+            NativeOperatorLoadStatus::MissingCapabilityGrant
+        );
+
+        graph.native_operator_trust.granted_capabilities =
+            sample_native_operator_declaration().capabilities;
+        graph.native_operator_declarations[0].host_compatibility_version = "old-host".to_owned();
+        let incompatible = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist")
+            .native_operator
+            .expect("native info should exist")
+            .load_status;
+        assert_eq!(incompatible, NativeOperatorLoadStatus::HostIncompatible);
+    }
+
+    #[test]
+    fn native_operator_requires_implementation_digest() {
+        let mut graph = GraphDocument::sample();
+        let mut declaration = sample_native_operator_declaration();
+        declaration.provenance.build_digest = None;
+        graph.native_operator_declarations.push(declaration);
+        trust_sample_native_operator(&mut graph);
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+
+        let load_status = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist")
+            .native_operator
+            .expect("native info should exist")
+            .load_status;
+
+        assert_eq!(
+            load_status,
+            NativeOperatorLoadStatus::ImplementationDigestMissing
+        );
     }
 
     #[test]
@@ -6836,6 +7083,14 @@ mod tests {
                 "Trusted native operator declaration only; loading happens in a later issue."
                     .to_owned(),
         }
+    }
+
+    fn trust_sample_native_operator(graph: &mut GraphDocument) {
+        graph.native_operator_trust.project_trusted = true;
+        graph.native_operator_trust.enabled_operator_ids =
+            vec!["vy.native.simplify_curves".to_owned()];
+        graph.native_operator_trust.granted_capabilities =
+            sample_native_operator_declaration().capabilities;
     }
 
     fn geometry_port(name: &str, help: &str) -> HoudiniOperatorPort {
