@@ -836,6 +836,55 @@ impl GraphDocument {
         )
     }
 
+    pub fn reference_consumers_for_node(
+        &self,
+        target_node_index: usize,
+    ) -> Vec<ReferenceConsumerInfo> {
+        let Some(target_node) = self.nodes.get(target_node_index) else {
+            return Vec::new();
+        };
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.reference_input.is_some())
+            .flat_map(|(reference_node_index, reference_node)| {
+                self.reference_input_resolutions(reference_node_index)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(move |entry| {
+                        entry.resolution.target.graph_id == MAIN_GRAPH_ID
+                            && entry.resolution.target.node_id == target_node.node_id
+                            && entry.resolution.target.output_name == PRIMARY_GEOMETRY_OUTPUT
+                    })
+                    .map(move |entry| ReferenceConsumerInfo {
+                        reference_node_index,
+                        reference_node_id: reference_node.node_id.clone(),
+                        reference_node_name: reference_node.name.clone(),
+                        target_output_name: entry.resolution.target.output_name,
+                        readable_source_path: entry.resolution.readable_path,
+                        enabled: entry.enabled,
+                        status: entry.resolution.status,
+                        diagnostic: entry.resolution.diagnostic,
+                    })
+            })
+            .collect()
+    }
+
+    pub fn reference_output_change_warning_for_node(
+        &self,
+        target_node_index: usize,
+    ) -> Option<ReferenceOutputChangeWarning> {
+        let target_node = self.nodes.get(target_node_index)?;
+        let affected_references = self.reference_consumers_for_node(target_node_index);
+        (!affected_references.is_empty()).then(|| ReferenceOutputChangeWarning {
+            target_node_index,
+            target_node_id: target_node.node_id.clone(),
+            target_node_name: target_node.name.clone(),
+            output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            affected_references,
+        })
+    }
+
     pub fn reference_coordinate_repair_summary(&self, node_index: usize) -> Option<String> {
         self.reference_input_resolutions(node_index)?
             .into_iter()
@@ -2164,6 +2213,8 @@ impl GraphDocument {
         let source_metadata = self.source.metadata.clone();
         let filter_warnings = self.filter_rule_warning().into_iter().collect::<Vec<_>>();
         let style_warnings = self.style_warnings();
+        let reference_consumers = self.reference_consumers_for_node(index);
+        let reference_output_warning = self.reference_output_change_warning_for_node(index);
 
         Some(match node.kind {
             NodeKind::Source => NodeInfo {
@@ -2189,6 +2240,8 @@ impl GraphDocument {
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
                 warnings: Vec::new(),
+                reference_consumers: reference_consumers.clone(),
+                reference_output_warning: reference_output_warning.clone(),
                 null_operator: None,
                 reference_input: None,
                 python_operator: None,
@@ -2218,6 +2271,8 @@ impl GraphDocument {
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
                 warnings: filter_warnings,
+                reference_consumers: reference_consumers.clone(),
+                reference_output_warning: reference_output_warning.clone(),
                 null_operator: None,
                 reference_input: None,
                 python_operator: None,
@@ -2247,6 +2302,8 @@ impl GraphDocument {
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
                 warnings: style_warnings,
+                reference_consumers: reference_consumers.clone(),
+                reference_output_warning: reference_output_warning.clone(),
                 null_operator: None,
                 reference_input: None,
                 python_operator: None,
@@ -2274,6 +2331,8 @@ impl GraphDocument {
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
                     warnings: Vec::new(),
+                    reference_consumers: reference_consumers.clone(),
+                    reference_output_warning: reference_output_warning.clone(),
                     null_operator: Some(NullOperatorNodeInfo {
                         convention: contract.convention,
                         input_kind: contract.input_kind,
@@ -2327,6 +2386,8 @@ impl GraphDocument {
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
                     warnings,
+                    reference_consumers: reference_consumers.clone(),
+                    reference_output_warning: reference_output_warning.clone(),
                     null_operator: None,
                     reference_input: Some(ReferenceInputNodeInfo {
                         target: primary.resolution.target.clone(),
@@ -2342,11 +2403,13 @@ impl GraphDocument {
                                 readable_path: entry.resolution.readable_path,
                                 status: entry.resolution.status,
                                 enabled: entry.enabled,
+                                target_node_index: entry.resolution.target_node_index,
                                 output_kind: entry.resolution.output_kind,
                                 coordinate_contract: entry.resolution.coordinate_contract,
                                 expected_coordinate_contract: entry.expected_coordinate_contract,
                                 record_count: entry.resolution.record_count,
                                 source_provenance: entry.resolution.source_provenance,
+                                diagnostic: entry.resolution.diagnostic,
                                 provenance: entry.provenance,
                             })
                             .collect(),
@@ -2382,6 +2445,8 @@ impl GraphDocument {
                         "Projection contract: {}",
                         projection.repair_summary
                     )],
+                    reference_consumers: reference_consumers.clone(),
+                    reference_output_warning: reference_output_warning.clone(),
                     null_operator: None,
                     reference_input: None,
                     python_operator: None,
@@ -2428,6 +2493,8 @@ impl GraphDocument {
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
                     warnings,
+                    reference_consumers: reference_consumers.clone(),
+                    reference_output_warning: reference_output_warning.clone(),
                     null_operator: None,
                     reference_input: None,
                     python_operator: Some(PythonOperatorNodeInfo {
@@ -2492,6 +2559,8 @@ impl GraphDocument {
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
                     warnings,
+                    reference_consumers: reference_consumers.clone(),
+                    reference_output_warning: reference_output_warning.clone(),
                     null_operator: None,
                     reference_input: None,
                     python_operator: None,
@@ -2570,6 +2639,8 @@ impl GraphDocument {
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
                     warnings,
+                    reference_consumers: reference_consumers.clone(),
+                    reference_output_warning: reference_output_warning.clone(),
                     null_operator: None,
                     reference_input: None,
                     python_operator: None,
@@ -2652,6 +2723,8 @@ impl GraphDocument {
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
                 warnings: Vec::new(),
+                reference_consumers,
+                reference_output_warning,
                 null_operator: None,
                 reference_input: None,
                 python_operator: None,
@@ -5733,11 +5806,34 @@ pub(crate) struct NodeInfo {
     pub generated: Option<GeneratedNodeInfo>,
     pub evaluation: NodeEvaluation,
     pub warnings: Vec<String>,
+    pub reference_consumers: Vec<ReferenceConsumerInfo>,
+    pub reference_output_warning: Option<ReferenceOutputChangeWarning>,
     pub null_operator: Option<NullOperatorNodeInfo>,
     pub reference_input: Option<ReferenceInputNodeInfo>,
     pub python_operator: Option<PythonOperatorNodeInfo>,
     pub procedural_asset: Option<ProceduralAssetNodeInfo>,
     pub native_operator: Option<NativeOperatorNodeInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReferenceConsumerInfo {
+    pub reference_node_index: usize,
+    pub reference_node_id: String,
+    pub reference_node_name: String,
+    pub target_output_name: String,
+    pub readable_source_path: String,
+    pub enabled: bool,
+    pub status: ReferenceDiagnosticStatus,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReferenceOutputChangeWarning {
+    pub target_node_index: usize,
+    pub target_node_id: String,
+    pub target_node_name: String,
+    pub output_name: String,
+    pub affected_references: Vec<ReferenceConsumerInfo>,
 }
 
 pub(crate) struct NullOperatorNodeInfo {
@@ -5765,11 +5861,13 @@ pub(crate) struct ReferenceTargetNodeInfo {
     pub readable_path: String,
     pub status: ReferenceDiagnosticStatus,
     pub enabled: bool,
+    pub target_node_index: Option<usize>,
     pub output_kind: Option<HoudiniDataKind>,
     pub coordinate_contract: Option<SubstrateCoordinateContract>,
     pub expected_coordinate_contract: Option<SubstrateCoordinateContract>,
     pub record_count: usize,
     pub source_provenance: Option<SourceProvenance>,
+    pub diagnostic: Option<String>,
     pub provenance: ReferenceTargetProvenance,
 }
 
@@ -7313,6 +7411,74 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn referenced_outputs_expose_consumers_and_delete_warnings() {
+        let mut graph = GraphDocument::sample();
+        let null_index = graph.add_null_operator_node("OUT_A");
+        let reference_index = graph
+            .add_reference_input_node(null_index)
+            .expect("null output should be referenceable");
+
+        let source_info = graph
+            .selected_node_info(null_index)
+            .expect("referenced output should have node info");
+        let warning = graph
+            .reference_output_change_warning_for_node(null_index)
+            .expect("referenced output should warn before output changes");
+
+        assert_eq!(source_info.reference_consumers.len(), 1);
+        assert_eq!(
+            source_info.reference_consumers[0].reference_node_index,
+            reference_index
+        );
+        assert_eq!(
+            source_info.reference_consumers[0].status,
+            ReferenceDiagnosticStatus::Resolved
+        );
+        assert_eq!(warning.target_node_name, "OUT_A");
+        assert_eq!(warning.affected_references.len(), 1);
+        assert_eq!(
+            warning.affected_references[0].reference_node_index,
+            reference_index
+        );
+    }
+
+    #[test]
+    fn reference_targets_expose_navigation_indices_and_diagnostics() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        let second_target_node_id = graph.nodes[second_null_index].node_id.clone();
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+        assert!(
+            graph.set_reference_target_enabled(reference_index, &second_target_node_id, false,)
+        );
+        graph
+            .remove_node(second_null_index)
+            .expect("disabled target node should be removable");
+        let reference_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::ReferenceInput)
+            .expect("reference node should still exist");
+
+        let info = graph
+            .selected_node_info(reference_index)
+            .expect("reference node should have info")
+            .reference_input
+            .expect("reference info should exist");
+
+        assert_eq!(info.targets[0].target_node_index, Some(first_null_index));
+        assert!(info.targets.iter().any(|target| {
+            !target.enabled
+                && target.status == ReferenceDiagnosticStatus::MissingNode
+                && target.diagnostic.as_deref() == Some("Reference target node is missing.")
+        }));
     }
 
     #[test]

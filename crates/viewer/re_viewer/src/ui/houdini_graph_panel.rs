@@ -807,7 +807,7 @@ impl HoudiniGraphPanel {
         response
     }
 
-    fn node_info_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
+    fn node_info_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) {
         if let Some(info) = graph.selected_node_info(self.selected_node) {
             egui::Grid::new("houdini_graph_node_info")
                 .num_columns(2)
@@ -1011,6 +1011,22 @@ impl HoudiniGraphPanel {
                             );
                             ui.end_row();
 
+                            if let Some(diagnostic) = &target.diagnostic {
+                                ui.weak("Target diagnostic");
+                                ui.colored_label(ui.visuals().warn_fg_color, diagnostic);
+                                ui.end_row();
+                            }
+
+                            if let Some(target_node_index) = target.target_node_index {
+                                ui.weak("Target navigation");
+                                ui.push_id(("jump_source", index), |ui| {
+                                    if ui.button("Jump source").clicked() {
+                                        self.selected_node = target_node_index;
+                                    }
+                                });
+                                ui.end_row();
+                            }
+
                             ui.weak("Target coordinates");
                             ui.label(
                                 target
@@ -1027,6 +1043,54 @@ impl HoudiniGraphPanel {
                                 ui.end_row();
                             }
                         }
+                    }
+
+                    if !info.reference_consumers.is_empty() {
+                        ui.weak("Reference consumers");
+                        ui.label(format!("{} consumer(s)", info.reference_consumers.len()));
+                        ui.end_row();
+
+                        for consumer in &info.reference_consumers {
+                            ui.weak("Consumer");
+                            ui.horizontal(|ui| {
+                                ui.label(format!(
+                                    "{} [{} / {}] -> {}",
+                                    consumer.reference_node_name,
+                                    if consumer.enabled { "enabled" } else { "disabled" },
+                                    consumer.status.as_str(),
+                                    consumer.target_output_name
+                                ));
+                                ui.push_id(
+                                    ("jump_consumer", consumer.reference_node_index),
+                                    |ui| {
+                                        if ui.button("Jump consumer").clicked() {
+                                            self.selected_node = consumer.reference_node_index;
+                                        }
+                                    },
+                                );
+                            });
+                            ui.end_row();
+
+                            if let Some(diagnostic) = &consumer.diagnostic {
+                                ui.weak("Consumer diagnostic");
+                                ui.colored_label(ui.visuals().warn_fg_color, diagnostic);
+                                ui.end_row();
+                            }
+                        }
+                    }
+
+                    if let Some(warning) = &info.reference_output_warning {
+                        ui.weak("Output warning");
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            format!(
+                                "Changing or deleting {}:{} affects {} reference(s)",
+                                warning.target_node_name,
+                                warning.output_name,
+                                warning.affected_references.len()
+                            ),
+                        );
+                        ui.end_row();
                     }
 
                     if let Some(python_operator) = &info.python_operator {
