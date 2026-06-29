@@ -44,6 +44,8 @@ pub(crate) struct GraphDocument {
 
 const GENERATED_NODE_LANE_Y: f32 = 0.82;
 const NATIVE_OPERATOR_HOST_COMPATIBILITY_VERSION: &str = "re_viewer-houdini-graph-0.1";
+const MAIN_GRAPH_ID: &str = "main";
+const PRIMARY_GEOMETRY_OUTPUT: &str = "geometry";
 
 impl GraphDocument {
     pub fn sample() -> Self {
@@ -91,11 +93,13 @@ impl GraphDocument {
             )),
             nodes: vec![
                 GraphNode {
+                    node_id: "source.main".to_owned(),
                     name: "Source".to_owned(),
                     kind: NodeKind::Source,
                     layout_position: GraphPoint::new(0.0, 0.5),
                     generated: None,
                     null_operator: None,
+                    reference_input: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -110,11 +114,13 @@ impl GraphDocument {
                     info: "Loads polygon and cubic Bezier records.",
                 },
                 GraphNode {
+                    node_id: "filter.main".to_owned(),
                     name: "Filter".to_owned(),
                     kind: NodeKind::Filter,
                     layout_position: GraphPoint::new(0.33, 0.5),
                     generated: None,
                     null_operator: None,
+                    reference_input: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -131,11 +137,13 @@ impl GraphDocument {
                     info: "Filters features by sample score.",
                 },
                 GraphNode {
+                    node_id: "style.main".to_owned(),
                     name: "Style".to_owned(),
                     kind: NodeKind::Style,
                     layout_position: GraphPoint::new(0.66, 0.5),
                     generated: None,
                     null_operator: None,
+                    reference_input: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -150,11 +158,13 @@ impl GraphDocument {
                     info: "Assigns visual parameters before viewer output.",
                 },
                 GraphNode {
+                    node_id: "output.rerun".to_owned(),
                     name: "Rerun Output".to_owned(),
                     kind: NodeKind::Output,
                     layout_position: GraphPoint::new(1.0, 0.5),
                     generated: None,
                     null_operator: None,
+                    reference_input: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -466,6 +476,7 @@ impl GraphDocument {
             .position(|node| node.kind == NodeKind::Output)
             .unwrap_or(self.nodes.len());
         let mut node = GraphNode::null_operator(name);
+        node.node_id = self.unique_node_id("null");
         node.layout_position = GraphPoint::new(0.82, 0.5);
         self.nodes.insert(insert_index, node);
         insert_index
@@ -483,6 +494,160 @@ impl GraphDocument {
                 return name;
             }
             suffix += 1;
+        }
+    }
+
+    fn unique_node_id(&self, prefix: &str) -> String {
+        let mut suffix = 1;
+        loop {
+            let node_id = format!("{prefix}.{suffix}");
+            if !self.node_id_is_reserved(&node_id) {
+                return node_id;
+            }
+            suffix += 1;
+        }
+    }
+
+    fn node_id_is_reserved(&self, node_id: &str) -> bool {
+        self.nodes.iter().any(|node| node.node_id == node_id)
+            || self.nodes.iter().any(|node| {
+                node.reference_input
+                    .as_ref()
+                    .is_some_and(|reference| reference.target.node_id == node_id)
+            })
+    }
+
+    #[allow(dead_code)]
+    pub fn add_reference_input_node(&mut self, target_node_index: usize) -> Option<usize> {
+        let target = self.reference_target_for_node(target_node_index)?;
+        let insert_index = self
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .unwrap_or(self.nodes.len());
+        let mut node = GraphNode::reference_input(self.unique_node_id("reference_input"), target);
+        node.layout_position = GraphPoint::new(0.88, 0.5);
+        self.nodes.insert(insert_index, node);
+        Some(insert_index)
+    }
+
+    pub fn reference_target_for_node(
+        &self,
+        target_node_index: usize,
+    ) -> Option<ReferenceTargetIdentity> {
+        let node = self.nodes.get(target_node_index)?;
+        self.node_primary_output_kind(node.kind)?;
+        Some(ReferenceTargetIdentity {
+            graph_id: MAIN_GRAPH_ID.to_owned(),
+            node_id: node.node_id.clone(),
+            output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+        })
+    }
+
+    fn node_primary_output_kind(&self, kind: NodeKind) -> Option<HoudiniDataKind> {
+        match kind {
+            NodeKind::Source
+            | NodeKind::Filter
+            | NodeKind::Style
+            | NodeKind::Null
+            | NodeKind::PythonOperator
+            | NodeKind::ProceduralAsset
+            | NodeKind::NativeOperator => Some(HoudiniDataKind::GeometryTable),
+            NodeKind::ReferenceInput | NodeKind::Output => None,
+        }
+    }
+
+    pub fn resolve_reference_target(
+        &self,
+        target: &ReferenceTargetIdentity,
+    ) -> ReferenceTargetResolution {
+        if target.graph_id != MAIN_GRAPH_ID {
+            return ReferenceTargetResolution::diagnostic(
+                target,
+                ReferenceDiagnosticStatus::DisallowedBoundary,
+                "Reference target is outside the current project graph.",
+            );
+        }
+
+        let Some((target_node_index, target_node)) = self
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, node)| node.node_id == target.node_id)
+        else {
+            return ReferenceTargetResolution::diagnostic(
+                target,
+                ReferenceDiagnosticStatus::MissingNode,
+                "Reference target node is missing.",
+            );
+        };
+
+        if target.output_name != PRIMARY_GEOMETRY_OUTPUT {
+            return ReferenceTargetResolution::diagnostic(
+                target,
+                ReferenceDiagnosticStatus::MissingOutput,
+                "Reference target output is missing.",
+            );
+        }
+
+        let Some(output_kind) = self.node_primary_output_kind(target_node.kind) else {
+            return ReferenceTargetResolution::diagnostic(
+                target,
+                ReferenceDiagnosticStatus::MissingOutput,
+                "Reference target node does not expose a compatible geometry output.",
+            );
+        };
+
+        ReferenceTargetResolution {
+            target: target.clone(),
+            status: ReferenceDiagnosticStatus::Resolved,
+            readable_path: readable_reference_path(target_node, &target.output_name),
+            target_node_index: Some(target_node_index),
+            output_kind: Some(output_kind),
+            record_count: self.node_output_record_count_for_index(target_node_index),
+            source_provenance: Some(self.source.metadata.provenance),
+            diagnostic: None,
+        }
+    }
+
+    pub fn reference_input_resolution(
+        &self,
+        node_index: usize,
+    ) -> Option<ReferenceTargetResolution> {
+        let node = self.nodes.get(node_index)?;
+        let reference_input = node.reference_input.as_ref()?;
+        Some(self.resolve_reference_target(&reference_input.target))
+    }
+
+    #[allow(dead_code)]
+    pub fn remove_node(&mut self, index: usize) -> Option<GraphNode> {
+        if self.nodes.get(index)?.kind == NodeKind::Output {
+            return None;
+        }
+        Some(self.nodes.remove(index))
+    }
+
+    pub fn mark_reference_inputs_stale_for_target_index(&mut self, target_index: usize) {
+        let Some(target_node_id) = self
+            .nodes
+            .get(target_index)
+            .map(|node| node.node_id.clone())
+        else {
+            return;
+        };
+        self.mark_reference_inputs_stale_for_target_node_id(&target_node_id);
+    }
+
+    fn mark_reference_inputs_stale_for_target_node_id(&mut self, target_node_id: &str) {
+        for node in &mut self.nodes {
+            let Some(reference_input) = node.reference_input.as_ref() else {
+                continue;
+            };
+            if reference_input.target.node_id == target_node_id {
+                node.evaluation.state = EvaluationState::Stale;
+                node.evaluation.message =
+                    Some("Referenced output changed; reference input is stale.".to_owned());
+            }
         }
     }
 
@@ -509,13 +674,26 @@ impl GraphDocument {
     fn pass_through_input_count_for_node(&self, node_index: usize) -> usize {
         self.nodes
             .iter()
+            .enumerate()
             .take(node_index)
             .rev()
-            .find(|node| node.participates_in_output)
+            .find(|(_, node)| node.participates_in_output)
             .map_or_else(
                 || self.active_geometry().len(),
-                |node| self.node_output_record_count(node.kind),
+                |(index, _)| self.node_output_record_count_for_index(index),
             )
+    }
+
+    fn node_output_record_count_for_index(&self, node_index: usize) -> usize {
+        let Some(node) = self.nodes.get(node_index) else {
+            return 0;
+        };
+        if node.kind == NodeKind::ReferenceInput {
+            return self
+                .reference_input_resolution(node_index)
+                .map_or(0, |resolution| resolution.record_count);
+        }
+        self.node_output_record_count(node.kind)
     }
 
     fn node_output_record_count(&self, kind: NodeKind) -> usize {
@@ -534,6 +712,7 @@ impl GraphDocument {
             | NodeKind::PythonOperator
             | NodeKind::ProceduralAsset
             | NodeKind::NativeOperator => filtered_count,
+            NodeKind::ReferenceInput => 0,
             NodeKind::Output => self.visible_output_count(),
         }
     }
@@ -1286,15 +1465,38 @@ impl GraphDocument {
                         .as_ref()
                         .map(|cache_key| cache_key.key_digest.clone())
                         .unwrap_or_else(|| format!("{}:uncached", native_operator.instance_id))
-                } else {
+                } else if let Some(reference_input) = &node.reference_input {
+                    let resolution = self.resolve_reference_target(&reference_input.target);
                     stable_digest(&serde_json::json!({
                         "kind": node.kind.as_str(),
-                        "parameter": node.parameter.value,
-                        "rule": &node.parameter.rule_spec,
+                        "node_id": &node.node_id,
+                        "target": &reference_input.target,
+                        "target_status": resolution.status.as_str(),
+                        "target_cache_key": resolution
+                            .target_node_index
+                            .map(|target_index| self.node_cache_key_material(target_index)),
                     }))
+                } else {
+                    self.node_cache_key_material_for_node(node)
                 }
             })
             .collect()
+    }
+
+    fn node_cache_key_material(&self, node_index: usize) -> String {
+        self.nodes
+            .get(node_index)
+            .map(|node| self.node_cache_key_material_for_node(node))
+            .unwrap_or_else(|| format!("missing-node-{node_index}"))
+    }
+
+    fn node_cache_key_material_for_node(&self, node: &GraphNode) -> String {
+        stable_digest(&serde_json::json!({
+            "node_id": &node.node_id,
+            "kind": node.kind.as_str(),
+            "parameter": node.parameter.value,
+            "rule": &node.parameter.rule_spec,
+        }))
     }
 
     fn block_python_operator_run(
@@ -1359,6 +1561,20 @@ impl GraphDocument {
         }
     }
 
+    fn reference_input_diagnostic(&self, node_index: usize) -> Option<ReferenceTargetResolution> {
+        let resolution = self.reference_input_resolution(node_index)?;
+        (resolution.status != ReferenceDiagnosticStatus::Resolved).then_some(resolution)
+    }
+
+    fn apply_reference_input_diagnostic(
+        node: &mut GraphNode,
+        resolution: ReferenceTargetResolution,
+    ) {
+        node.evaluation.state = EvaluationState::Failed;
+        node.evaluation.manual = true;
+        node.evaluation.message = resolution.diagnostic;
+    }
+
     pub fn pipeline_stages(&self) -> Vec<PipelineStage> {
         self.nodes
             .iter()
@@ -1377,13 +1593,16 @@ impl GraphDocument {
         PipelineStage {
             name: node.name.clone(),
             input_count,
-            output_count: self.node_output_record_count(node.kind),
+            output_count: self.node_output_record_count_for_index(index),
             note: match node.kind {
                 NodeKind::Source => "Loaded native graph geometry.".to_owned(),
                 NodeKind::Filter => "Applied minimum score threshold.".to_owned(),
                 NodeKind::Style => "Prepared stroke scale for viewer output.".to_owned(),
                 NodeKind::Null => {
                     "Typed pass-through anchor; geometry, provenance, and evaluation flow are unchanged.".to_owned()
+                }
+                NodeKind::ReferenceInput => {
+                    "Live one-way reference to a compatible graph output.".to_owned()
                 }
                 NodeKind::PythonOperator => "Deferred graph-visible Python operator.".to_owned(),
                 NodeKind::ProceduralAsset => {
@@ -1438,6 +1657,7 @@ impl GraphDocument {
             node.evaluation.state = EvaluationState::Stale;
             node.evaluation.message = None;
         }
+        self.mark_reference_inputs_stale_for_target_index(index);
     }
 
     pub fn set_node_manual(&mut self, index: usize, manual: bool) {
@@ -1454,6 +1674,11 @@ impl GraphDocument {
 
     pub fn demand_output_evaluation(&mut self) {
         for index in 0..self.nodes.len() {
+            if let Some(resolution) = self.reference_input_diagnostic(index) {
+                let node = &mut self.nodes[index];
+                Self::apply_reference_input_diagnostic(node, resolution);
+                continue;
+            }
             if let Some(dependency_status) = self.block_python_operator_run(index) {
                 let node = &mut self.nodes[index];
                 Self::apply_python_operator_block(node, dependency_status);
@@ -1480,6 +1705,12 @@ impl GraphDocument {
     }
 
     pub fn request_node_run(&mut self, index: usize) {
+        if let Some(resolution) = self.reference_input_diagnostic(index) {
+            if let Some(node) = self.nodes.get_mut(index) {
+                Self::apply_reference_input_diagnostic(node, resolution);
+            }
+            return;
+        }
         if let Some(dependency_status) = self.block_python_operator_run(index) {
             if let Some(node) = self.nodes.get_mut(index) {
                 Self::apply_python_operator_block(node, dependency_status);
@@ -1557,6 +1788,7 @@ impl GraphDocument {
                 evaluation: node.evaluation.clone(),
                 warnings: Vec::new(),
                 null_operator: None,
+                reference_input: None,
                 python_operator: None,
                 procedural_asset: None,
                 native_operator: None,
@@ -1585,6 +1817,7 @@ impl GraphDocument {
                 evaluation: node.evaluation.clone(),
                 warnings: filter_warnings,
                 null_operator: None,
+                reference_input: None,
                 python_operator: None,
                 procedural_asset: None,
                 native_operator: None,
@@ -1613,6 +1846,7 @@ impl GraphDocument {
                 evaluation: node.evaluation.clone(),
                 warnings: style_warnings,
                 null_operator: None,
+                reference_input: None,
                 python_operator: None,
                 procedural_asset: None,
                 native_operator: None,
@@ -1644,6 +1878,61 @@ impl GraphDocument {
                         output_kind: contract.output_kind,
                         preserves_record_identity: contract.preserves_record_identity,
                         preserves_source_provenance: contract.preserves_source_provenance,
+                    }),
+                    reference_input: None,
+                    python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
+                }
+            }
+            NodeKind::ReferenceInput => {
+                let resolution = self.reference_input_resolution(index)?;
+                let warnings = if resolution.status == ReferenceDiagnosticStatus::Resolved {
+                    Vec::new()
+                } else {
+                    vec![
+                        resolution
+                            .diagnostic
+                            .clone()
+                            .unwrap_or_else(|| resolution.status.as_str().to_owned()),
+                    ]
+                };
+                NodeInfo {
+                    kind: node.kind,
+                    role: node.kind.role(),
+                    input_count: usize::from(
+                        resolution.status == ReferenceDiagnosticStatus::Resolved,
+                    ),
+                    output_count: resolution.record_count,
+                    status: if warnings.is_empty() {
+                        NodeStatus::Healthy
+                    } else {
+                        NodeStatus::Failed
+                    },
+                    data_kind: "Referenced geometry table",
+                    record_count: resolution.record_count,
+                    bounds: (resolution.status == ReferenceDiagnosticStatus::Resolved)
+                        .then(|| self.filtered_bounds())
+                        .flatten(),
+                    provenance: resolution.source_provenance,
+                    attributes: self.source.metadata.attribute_names.clone(),
+                    parameter: node.parameter.clone(),
+                    summary: "Reference input imports one compatible graph output by stable identity. It is live, one-way, and does not copy source data.",
+                    source_metadata: None,
+                    source_error: None,
+                    style: None,
+                    generated: node.generated,
+                    evaluation: node.evaluation.clone(),
+                    warnings,
+                    null_operator: None,
+                    reference_input: Some(ReferenceInputNodeInfo {
+                        target: resolution.target,
+                        readable_path: resolution.readable_path,
+                        status: resolution.status,
+                        output_kind: resolution.output_kind,
+                        source_provenance: resolution.source_provenance,
+                        preserves_source_data: true,
+                        applies_hidden_transform: false,
                     }),
                     python_operator: None,
                     procedural_asset: None,
@@ -1690,6 +1979,7 @@ impl GraphDocument {
                     evaluation: node.evaluation.clone(),
                     warnings,
                     null_operator: None,
+                    reference_input: None,
                     python_operator: Some(PythonOperatorNodeInfo {
                         declaration_id: python_operator.declaration_id.clone(),
                         display_name: declaration
@@ -1753,6 +2043,7 @@ impl GraphDocument {
                     evaluation: node.evaluation.clone(),
                     warnings,
                     null_operator: None,
+                    reference_input: None,
                     python_operator: None,
                     procedural_asset: Some(ProceduralAssetNodeInfo {
                         asset_id: asset_node.asset_id.clone(),
@@ -1826,6 +2117,7 @@ impl GraphDocument {
                     evaluation: node.evaluation.clone(),
                     warnings,
                     null_operator: None,
+                    reference_input: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: Some(NativeOperatorNodeInfo {
@@ -1907,6 +2199,7 @@ impl GraphDocument {
                 evaluation: node.evaluation.clone(),
                 warnings: Vec::new(),
                 null_operator: None,
+                reference_input: None,
                 python_operator: None,
                 procedural_asset: None,
                 native_operator: None,
@@ -2901,6 +3194,7 @@ impl HoudiniGraphSidecar {
                 .nodes
                 .iter()
                 .map(|node| NodeSidecar {
+                    node_id: node.node_id.clone(),
                     name: node.name.clone(),
                     kind: node.kind,
                     layout_position: node.layout_position,
@@ -2908,6 +3202,7 @@ impl HoudiniGraphSidecar {
                     parameter_rule: node.parameter.rule_spec.clone(),
                     generated: node.generated,
                     null_operator: node.null_operator.clone(),
+                    reference_input: node.reference_input.clone(),
                     python_operator: node.python_operator.clone(),
                     procedural_asset: node.procedural_asset.clone(),
                     native_operator: node.native_operator.clone(),
@@ -2974,8 +3269,12 @@ impl HoudiniGraphSidecar {
                 if let Some(parameter_rule) = node_snapshot.parameter_rule {
                     node.parameter.rule_spec = Some(parameter_rule);
                 }
+                if !node_snapshot.node_id.is_empty() {
+                    node.node_id = node_snapshot.node_id;
+                }
                 node.generated = node_snapshot.generated;
                 node.python_operator = node_snapshot.python_operator;
+                node.reference_input = node_snapshot.reference_input;
                 node.procedural_asset = node_snapshot.procedural_asset;
                 node.native_operator = node_snapshot.native_operator;
             } else if node_snapshot.is_instance_node() {
@@ -3016,6 +3315,8 @@ struct GraphSourceSidecar {
 #[derive(serde::Deserialize, serde::Serialize)]
 struct NodeSidecar {
     #[serde(default)]
+    node_id: String,
+    #[serde(default)]
     name: String,
     kind: NodeKind,
     layout_position: GraphPoint,
@@ -3026,6 +3327,8 @@ struct NodeSidecar {
     generated: Option<GeneratedNodeInfo>,
     #[serde(default)]
     null_operator: Option<NullOperatorNode>,
+    #[serde(default)]
+    reference_input: Option<ReferenceInputNode>,
     #[serde(default)]
     python_operator: Option<PythonOperatorNode>,
     #[serde(default)]
@@ -3039,6 +3342,7 @@ impl NodeSidecar {
         matches!(
             self.kind,
             NodeKind::Null
+                | NodeKind::ReferenceInput
                 | NodeKind::PythonOperator
                 | NodeKind::ProceduralAsset
                 | NodeKind::NativeOperator
@@ -3063,9 +3367,22 @@ impl NodeSidecar {
                 "Null",
                 "Passes typed geometry through unchanged as a visible graph anchor.",
             ),
+            NodeKind::ReferenceInput => (
+                "Reference Input",
+                "Imports one compatible graph output as a live one-way dependency.",
+            ),
             _ => ("Graph Node", "Restored graph node."),
         };
         GraphNode {
+            node_id: if self.node_id.is_empty() {
+                stable_digest(&serde_json::json!({
+                    "kind": self.kind,
+                    "name": &self.name,
+                    "position": self.layout_position,
+                }))
+            } else {
+                self.node_id
+            },
             name: if self.name.is_empty() {
                 name.to_owned()
             } else {
@@ -3075,6 +3392,7 @@ impl NodeSidecar {
             layout_position: self.layout_position.clamped_to_unit(),
             generated: self.generated,
             null_operator: self.null_operator,
+            reference_input: self.reference_input,
             python_operator: self.python_operator,
             procedural_asset: self.procedural_asset,
             native_operator: self.native_operator,
@@ -3093,7 +3411,13 @@ impl NodeSidecar {
 
 fn node_matches_snapshot_identity(node: &GraphNode, snapshot: &NodeSidecar) -> bool {
     match node.kind {
-        NodeKind::Null => node.name == snapshot.name,
+        NodeKind::Null | NodeKind::ReferenceInput => {
+            if snapshot.node_id.is_empty() {
+                node.name == snapshot.name
+            } else {
+                node.node_id == snapshot.node_id
+            }
+        }
         NodeKind::PythonOperator => {
             node.python_operator.as_ref().and_then(|python_operator| {
                 snapshot
@@ -3120,6 +3444,10 @@ fn node_matches_snapshot_identity(node: &GraphNode, snapshot: &NodeSidecar) -> b
         }
         _ => true,
     }
+}
+
+fn readable_reference_path(node: &GraphNode, output_name: &str) -> String {
+    format!("{MAIN_GRAPH_ID}/{}:{output_name}", node.name)
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -3151,11 +3479,13 @@ impl LayerSidecar {
 }
 
 pub(crate) struct GraphNode {
+    pub node_id: String,
     pub name: String,
     pub kind: NodeKind,
     pub layout_position: GraphPoint,
     pub generated: Option<GeneratedNodeInfo>,
     pub null_operator: Option<NullOperatorNode>,
+    pub reference_input: Option<ReferenceInputNode>,
     pub python_operator: Option<PythonOperatorNode>,
     pub procedural_asset: Option<ProceduralAssetInstanceNode>,
     pub native_operator: Option<NativeOperatorNode>,
@@ -3168,6 +3498,7 @@ pub(crate) struct GraphNode {
 impl GraphNode {
     fn null_operator(name: String) -> Self {
         Self {
+            node_id: String::new(),
             name,
             kind: NodeKind::Null,
             layout_position: GraphPoint::new(0.5, 0.5),
@@ -3176,6 +3507,7 @@ impl GraphNode {
                 input_kind: HoudiniDataKind::GeometryTable,
                 output_kind: HoudiniDataKind::GeometryTable,
             }),
+            reference_input: None,
             python_operator: None,
             procedural_asset: None,
             native_operator: None,
@@ -3191,13 +3523,39 @@ impl GraphNode {
         }
     }
 
+    fn reference_input(node_id: String, target: ReferenceTargetIdentity) -> Self {
+        Self {
+            node_id,
+            name: "Reference Input".to_owned(),
+            kind: NodeKind::ReferenceInput,
+            layout_position: GraphPoint::new(0.5, 0.5),
+            generated: None,
+            null_operator: None,
+            reference_input: Some(ReferenceInputNode { target }),
+            python_operator: None,
+            procedural_asset: None,
+            native_operator: None,
+            evaluation: NodeEvaluation::clean(),
+            participates_in_output: true,
+            parameter: NodeParameter::scalar(
+                "Live reference",
+                1.0,
+                0.0..=1.0,
+                "Live one-way reference; does not copy source data or apply hidden transforms.",
+            ),
+            info: "Imports one compatible graph output by stable identity while showing a readable path.",
+        }
+    }
+
     fn python_operator(instance_id: String, declaration_id: String) -> Self {
         Self {
+            node_id: instance_id.clone(),
             name: "Python Operator".to_owned(),
             kind: NodeKind::PythonOperator,
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             null_operator: None,
+            reference_input: None,
             python_operator: Some(PythonOperatorNode {
                 instance_id,
                 declaration_id,
@@ -3226,11 +3584,13 @@ impl GraphNode {
 
     fn procedural_asset(instance_id: String, asset_id: String, instance_version: String) -> Self {
         Self {
+            node_id: instance_id.clone(),
             name: "Asset".to_owned(),
             kind: NodeKind::ProceduralAsset,
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             null_operator: None,
+            reference_input: None,
             python_operator: None,
             procedural_asset: Some(ProceduralAssetInstanceNode {
                 instance_id,
@@ -3258,11 +3618,13 @@ impl GraphNode {
 
     fn native_operator(instance_id: String, operator_id: String) -> Self {
         Self {
+            node_id: instance_id.clone(),
             name: "Native Operator".to_owned(),
             kind: NodeKind::NativeOperator,
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             null_operator: None,
+            reference_input: None,
             python_operator: None,
             procedural_asset: None,
             native_operator: Some(NativeOperatorNode {
@@ -3292,6 +3654,71 @@ impl GraphNode {
 pub(crate) struct NullOperatorNode {
     pub input_kind: HoudiniDataKind,
     pub output_kind: HoudiniDataKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ReferenceInputNode {
+    pub target: ReferenceTargetIdentity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ReferenceTargetIdentity {
+    pub graph_id: String,
+    pub node_id: String,
+    pub output_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReferenceTargetResolution {
+    pub target: ReferenceTargetIdentity,
+    pub status: ReferenceDiagnosticStatus,
+    pub readable_path: String,
+    pub target_node_index: Option<usize>,
+    pub output_kind: Option<HoudiniDataKind>,
+    pub record_count: usize,
+    pub source_provenance: Option<SourceProvenance>,
+    pub diagnostic: Option<String>,
+}
+
+impl ReferenceTargetResolution {
+    fn diagnostic(
+        target: &ReferenceTargetIdentity,
+        status: ReferenceDiagnosticStatus,
+        message: &'static str,
+    ) -> Self {
+        Self {
+            target: target.clone(),
+            status,
+            readable_path: format!(
+                "{}/{}:{}",
+                target.graph_id, target.node_id, target.output_name
+            ),
+            target_node_index: None,
+            output_kind: None,
+            record_count: 0,
+            source_provenance: None,
+            diagnostic: Some(message.to_owned()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReferenceDiagnosticStatus {
+    Resolved,
+    MissingNode,
+    MissingOutput,
+    DisallowedBoundary,
+}
+
+impl ReferenceDiagnosticStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolved => "Resolved",
+            Self::MissingNode => "Missing node",
+            Self::MissingOutput => "Missing output",
+            Self::DisallowedBoundary => "Disallowed boundary",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4626,6 +5053,7 @@ pub(crate) enum NodeKind {
     Filter,
     Style,
     Null,
+    ReferenceInput,
     PythonOperator,
     ProceduralAsset,
     NativeOperator,
@@ -4639,6 +5067,7 @@ impl NodeKind {
             Self::Filter => "Filter",
             Self::Style => "Style",
             Self::Null => "Null",
+            Self::ReferenceInput => "Reference Input",
             Self::PythonOperator => "Python Operator",
             Self::ProceduralAsset => "Asset",
             Self::NativeOperator => "Native Operator",
@@ -4652,6 +5081,7 @@ impl NodeKind {
             Self::Filter => "Cull",
             Self::Style => "Style",
             Self::Null => "Anchor",
+            Self::ReferenceInput => "Reference",
             Self::PythonOperator => "Compute",
             Self::ProceduralAsset => "Asset",
             Self::NativeOperator => "Native",
@@ -4680,6 +5110,7 @@ pub(crate) struct NodeInfo {
     pub evaluation: NodeEvaluation,
     pub warnings: Vec<String>,
     pub null_operator: Option<NullOperatorNodeInfo>,
+    pub reference_input: Option<ReferenceInputNodeInfo>,
     pub python_operator: Option<PythonOperatorNodeInfo>,
     pub procedural_asset: Option<ProceduralAssetNodeInfo>,
     pub native_operator: Option<NativeOperatorNodeInfo>,
@@ -4691,6 +5122,16 @@ pub(crate) struct NullOperatorNodeInfo {
     pub output_kind: HoudiniDataKind,
     pub preserves_record_identity: bool,
     pub preserves_source_provenance: bool,
+}
+
+pub(crate) struct ReferenceInputNodeInfo {
+    pub target: ReferenceTargetIdentity,
+    pub readable_path: String,
+    pub status: ReferenceDiagnosticStatus,
+    pub output_kind: Option<HoudiniDataKind>,
+    pub source_provenance: Option<SourceProvenance>,
+    pub preserves_source_data: bool,
+    pub applies_hidden_transform: bool,
 }
 
 pub(crate) struct PythonOperatorNodeInfo {
@@ -5500,8 +5941,9 @@ mod tests {
         PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
         PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
         PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
-        PythonRequirementsSource, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
-        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        PythonRequirementsSource, ReferenceDiagnosticStatus, RerunSceneDebugItem, RerunSceneItem,
+        SourceProvenance, ViewerGeometry, load_cubic_bezier_parquet,
+        load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -5961,6 +6403,191 @@ mod tests {
     }
 
     #[test]
+    fn reference_input_targets_null_by_stable_identity_and_readable_path() {
+        let mut graph = GraphDocument::sample();
+        let null_index = graph.add_null_operator_node("OUT_CURVES");
+        let target_node_id = graph.nodes[null_index].node_id.clone();
+
+        let reference_index = graph
+            .add_reference_input_node(null_index)
+            .expect("null output should be a compatible reference target");
+        let resolution = graph
+            .reference_input_resolution(reference_index)
+            .expect("reference node should resolve its target");
+
+        assert_eq!(graph.nodes[reference_index].kind, NodeKind::ReferenceInput);
+        assert_eq!(resolution.status, ReferenceDiagnosticStatus::Resolved);
+        assert_eq!(resolution.target.node_id, target_node_id);
+        assert_eq!(
+            resolution.target.output_name,
+            super::PRIMARY_GEOMETRY_OUTPUT
+        );
+        assert_eq!(resolution.readable_path, "main/OUT_CURVES:geometry");
+        assert_eq!(resolution.output_kind, Some(HoudiniDataKind::GeometryTable));
+        assert_eq!(resolution.record_count, graph.visible_output_count());
+        assert_eq!(
+            resolution.source_provenance,
+            Some(SourceProvenance::DemoFallback)
+        );
+
+        let info = graph
+            .selected_node_info(reference_index)
+            .expect("reference node should have node info");
+        let reference_info = info
+            .reference_input
+            .expect("reference node info should expose the target");
+        assert_eq!(info.kind, NodeKind::ReferenceInput);
+        assert_eq!(info.status, NodeStatus::Healthy);
+        assert_eq!(reference_info.status, ReferenceDiagnosticStatus::Resolved);
+        assert!(reference_info.preserves_source_data);
+        assert!(!reference_info.applies_hidden_transform);
+    }
+
+    #[test]
+    fn reference_input_survives_target_rename_and_move_by_identity() {
+        let mut graph = GraphDocument::sample();
+        let null_index = graph.add_null_operator_node("OUT_ORIGINAL");
+        let reference_index = graph
+            .add_reference_input_node(null_index)
+            .expect("null output should be a compatible reference target");
+        let target = graph.nodes[reference_index]
+            .reference_input
+            .as_ref()
+            .expect("reference input should exist")
+            .target
+            .clone();
+
+        graph.nodes[null_index].name = "OUT_RENAMED".to_owned();
+        graph.set_node_layout_position(null_index, GraphPoint::new(0.25, 0.25));
+
+        let resolution = graph.resolve_reference_target(&target);
+
+        assert_eq!(resolution.status, ReferenceDiagnosticStatus::Resolved);
+        assert_eq!(resolution.target.node_id, target.node_id);
+        assert_eq!(resolution.readable_path, "main/OUT_RENAMED:geometry");
+    }
+
+    #[test]
+    fn reference_input_reports_missing_target_without_rebinding_by_name() {
+        let mut graph = GraphDocument::sample();
+        let null_index = graph.add_null_operator_node("OUT_GEO");
+        let reference_index = graph
+            .add_reference_input_node(null_index)
+            .expect("null output should be a compatible reference target");
+        let target = graph.nodes[reference_index]
+            .reference_input
+            .as_ref()
+            .expect("reference input should exist")
+            .target
+            .clone();
+
+        graph
+            .remove_node(null_index)
+            .expect("test null should be removable");
+        graph.add_null_operator_node("OUT_GEO");
+
+        let resolution = graph.resolve_reference_target(&target);
+
+        assert_eq!(resolution.status, ReferenceDiagnosticStatus::MissingNode);
+        assert_eq!(resolution.record_count, 0);
+        assert!(resolution.diagnostic.is_some());
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|node| node.kind == NodeKind::Null && node.name == "OUT_GEO")
+        );
+    }
+
+    #[test]
+    fn reference_input_reports_missing_output_and_disallowed_boundary() {
+        let mut graph = GraphDocument::sample();
+        let null_index = graph.add_null_operator_node("OUT_GEO");
+        let reference_index = graph
+            .add_reference_input_node(null_index)
+            .expect("null output should be a compatible reference target");
+        let mut target = graph.nodes[reference_index]
+            .reference_input
+            .as_ref()
+            .expect("reference input should exist")
+            .target
+            .clone();
+
+        target.output_name = "missing".to_owned();
+        assert_eq!(
+            graph.resolve_reference_target(&target).status,
+            ReferenceDiagnosticStatus::MissingOutput
+        );
+
+        target.output_name = super::PRIMARY_GEOMETRY_OUTPUT.to_owned();
+        target.graph_id = "other_project".to_owned();
+        assert_eq!(
+            graph.resolve_reference_target(&target).status,
+            ReferenceDiagnosticStatus::DisallowedBoundary
+        );
+    }
+
+    #[test]
+    fn reference_input_becomes_stale_when_upstream_target_changes() {
+        let mut graph = GraphDocument::sample();
+        let null_index = graph.add_null_operator_node("OUT_GEO");
+        let reference_index = graph
+            .add_reference_input_node(null_index)
+            .expect("null output should be a compatible reference target");
+
+        graph.mark_node_stale(null_index);
+
+        assert_eq!(
+            graph.nodes[reference_index].evaluation.state,
+            EvaluationState::Stale
+        );
+        assert!(
+            graph.nodes[reference_index]
+                .evaluation
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("Referenced output changed"))
+        );
+    }
+
+    #[test]
+    fn reference_input_round_trips_stable_target_identity_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        let null_index = graph.add_null_operator_node("OUT_SERIALIZED");
+        let reference_index = graph
+            .add_reference_input_node(null_index)
+            .expect("null output should be a compatible reference target");
+        let target = graph.nodes[reference_index]
+            .reference_input
+            .as_ref()
+            .expect("reference input should exist")
+            .target
+            .clone();
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        let restored_reference_index = restored
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::ReferenceInput)
+            .expect("restored graph should include reference node");
+        let restored_resolution = restored
+            .reference_input_resolution(restored_reference_index)
+            .expect("restored reference should resolve");
+
+        assert_eq!(
+            restored_resolution.status,
+            ReferenceDiagnosticStatus::Resolved
+        );
+        assert_eq!(restored_resolution.target, target);
+        assert_eq!(
+            restored_resolution.readable_path,
+            "main/OUT_SERIALIZED:geometry"
+        );
+    }
+
+    #[test]
     fn attribute_table_rows_report_visible_native_output_records() {
         let graph = GraphDocument::sample();
         let rows = graph.attribute_table_rows(&AttributeTableQuery::default());
@@ -6175,11 +6802,13 @@ mod tests {
     fn output_demand_evaluates_stale_connected_nodes_only() {
         let mut graph = GraphDocument::sample();
         graph.nodes.push(GraphNode {
+            node_id: "scratch.filter".to_owned(),
             name: "Scratch Filter".to_owned(),
             kind: NodeKind::Filter,
             layout_position: GraphPoint::new(0.5, 0.1),
             generated: None,
             null_operator: None,
+            reference_input: None,
             python_operator: None,
             procedural_asset: None,
             native_operator: None,

@@ -120,13 +120,19 @@ impl HoudiniGraphPanel {
 
             ui.add_space(8.0);
             ui.strong("Parameters");
+            let mut selected_parameter_changed = false;
             if let Some(node) = graph.nodes.get_mut(self.selected_node) {
                 ui.label(node.info);
-                ui.add(
-                    Slider::new(&mut node.parameter.value, node.parameter.range.clone())
-                        .text(node.parameter.name),
-                )
-                .on_hover_text(node.parameter.help);
+                selected_parameter_changed = ui
+                    .add(
+                        Slider::new(&mut node.parameter.value, node.parameter.range.clone())
+                            .text(node.parameter.name),
+                    )
+                    .on_hover_text(node.parameter.help)
+                    .changed();
+            }
+            if selected_parameter_changed {
+                graph.mark_reference_inputs_stale_for_target_index(self.selected_node);
             }
             self.evaluation_controls_ui(ui, &mut graph);
 
@@ -583,6 +589,11 @@ impl HoudiniGraphPanel {
                 let index = graph.add_null_operator_node("OUT_MAIN");
                 self.selected_node = index;
             }
+            if ui.button("Reference Selected").clicked()
+                && let Some(index) = graph.add_reference_input_node(self.selected_node)
+            {
+                self.selected_node = index;
+            }
             if ui.button("Duplicate Polygons").clicked() {
                 graph.duplicate_layer_view(LayerKind::Polygons, "Polygons Copy");
             }
@@ -897,6 +908,51 @@ impl HoudiniGraphPanel {
                             "records: {}, provenance: {}",
                             null_operator.preserves_record_identity,
                             null_operator.preserves_source_provenance
+                        ));
+                        ui.end_row();
+                    }
+
+                    if let Some(reference_input) = &info.reference_input {
+                        ui.weak("Target");
+                        ui.label(&reference_input.readable_path);
+                        ui.end_row();
+
+                        ui.weak("Target status");
+                        ui.colored_label(
+                            status_color(ui, info.status),
+                            reference_input.status.as_str(),
+                        );
+                        ui.end_row();
+
+                        ui.weak("Target id");
+                        ui.label(format!(
+                            "{}/{}:{}",
+                            reference_input.target.graph_id,
+                            reference_input.target.node_id,
+                            reference_input.target.output_name
+                        ));
+                        ui.end_row();
+
+                        ui.weak("Target data");
+                        ui.label(
+                            reference_input
+                                .output_kind
+                                .map(|kind| format!("{kind:?}"))
+                                .unwrap_or_else(|| "missing".to_owned()),
+                        );
+                        ui.end_row();
+
+                        if let Some(provenance) = reference_input.source_provenance {
+                            ui.weak("Target provenance");
+                            ui.label(provenance.as_str());
+                            ui.end_row();
+                        }
+
+                        ui.weak("Reference mode");
+                        ui.label(format!(
+                            "copy: {}, hidden transform: {}",
+                            !reference_input.preserves_source_data,
+                            reference_input.applies_hidden_transform
                         ));
                         ui.end_row();
                     }
