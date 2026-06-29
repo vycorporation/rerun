@@ -1078,12 +1078,23 @@ impl HoudiniGraphPanel {
 
                         ui.weak("Version");
                         ui.label(format!(
-                            "instance {} / current {} / {}",
+                            "instance {} / current {} / {} / {}",
                             asset.instance_version,
                             asset.current_version.as_deref().unwrap_or("missing"),
-                            asset.version_status.as_str()
+                            asset.version_status.as_str(),
+                            if asset.contents_unlocked {
+                                "unlocked"
+                            } else {
+                                "matched"
+                            }
                         ));
                         ui.end_row();
+
+                        if let Some(local_graph_id) = &asset.local_graph_id {
+                            ui.weak("Local graph");
+                            ui.label(local_graph_id);
+                            ui.end_row();
+                        }
 
                         ui.weak("Labels");
                         ui.label(format_list(&asset.labels));

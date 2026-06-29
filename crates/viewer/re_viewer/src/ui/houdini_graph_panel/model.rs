@@ -695,6 +695,20 @@ impl GraphDocument {
         target: &ReferenceTargetIdentity,
     ) -> ReferenceTargetResolution {
         if target.graph_id != MAIN_GRAPH_ID {
+            if let Some(resolution) = self.resolve_unlocked_asset_internal_target(target) {
+                return resolution;
+            }
+            if self
+                .procedural_asset_declarations
+                .iter()
+                .any(|declaration| declaration.wrapped_subgraph.graph_id == target.graph_id)
+            {
+                return ReferenceTargetResolution::diagnostic(
+                    target,
+                    ReferenceDiagnosticStatus::AssetPrivateInternal,
+                    "Matched procedural asset internals are private; reference the asset boundary output or unlock the instance for local editing.",
+                );
+            }
             return ReferenceTargetResolution::diagnostic(
                 target,
                 ReferenceDiagnosticStatus::DisallowedBoundary,
@@ -742,6 +756,42 @@ impl GraphDocument {
             source_provenance: Some(self.source.metadata.provenance),
             diagnostic: None,
         }
+    }
+
+    fn resolve_unlocked_asset_internal_target(
+        &self,
+        target: &ReferenceTargetIdentity,
+    ) -> Option<ReferenceTargetResolution> {
+        let (asset_node_index, asset_node) =
+            self.nodes.iter().enumerate().find_map(|(index, node)| {
+                let asset = node.procedural_asset.as_ref()?;
+                (asset.contents_unlocked
+                    && target.graph_id == unlocked_asset_graph_id(&asset.instance_id))
+                .then_some((index, node))
+            })?;
+
+        if target.output_name != PRIMARY_GEOMETRY_OUTPUT {
+            return Some(ReferenceTargetResolution::diagnostic(
+                target,
+                ReferenceDiagnosticStatus::MissingOutput,
+                "Unlocked asset internal target output is missing.",
+            ));
+        }
+
+        Some(ReferenceTargetResolution {
+            target: target.clone(),
+            status: ReferenceDiagnosticStatus::Resolved,
+            readable_path: format!(
+                "{}/{}:{}",
+                asset_node.name, target.node_id, target.output_name
+            ),
+            target_node_index: Some(asset_node_index),
+            output_kind: Some(HoudiniDataKind::GeometryTable),
+            coordinate_contract: asset_node.coordinate_contract.clone(),
+            record_count: self.node_output_record_count_for_index(asset_node_index),
+            source_provenance: Some(self.source.metadata.provenance),
+            diagnostic: None,
+        })
     }
 
     #[allow(dead_code)]
@@ -1142,6 +1192,41 @@ impl GraphDocument {
                 );
             }
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn set_procedural_asset_contents_unlocked(
+        &mut self,
+        node_index: usize,
+        contents_unlocked: bool,
+    ) -> bool {
+        let Some(node) = self.nodes.get_mut(node_index) else {
+            return false;
+        };
+        let Some(asset_node) = node.procedural_asset.as_mut() else {
+            return false;
+        };
+        if asset_node.contents_unlocked == contents_unlocked {
+            return false;
+        }
+
+        asset_node.contents_unlocked = contents_unlocked;
+        node.evaluation.state = EvaluationState::Stale;
+        node.evaluation.message = if contents_unlocked {
+            Some("Asset contents unlocked for local internal references.".to_owned())
+        } else {
+            Some("Asset contents matched to the pinned definition.".to_owned())
+        };
+        true
+    }
+
+    #[allow(dead_code)]
+    pub fn unlocked_asset_graph_id_for_node(&self, node_index: usize) -> Option<String> {
+        self.nodes
+            .get(node_index)?
+            .procedural_asset
+            .as_ref()
+            .map(|asset| unlocked_asset_graph_id(&asset.instance_id))
     }
 
     fn promotable_asset_parameters(&self) -> Vec<HoudiniParameterDeclaration> {
@@ -2417,6 +2502,10 @@ impl GraphDocument {
                             .unwrap_or_else(|| "Missing asset declaration".to_owned()),
                         instance_version: asset_node.instance_version.clone(),
                         current_version: declaration.map(|declaration| declaration.version.clone()),
+                        contents_unlocked: asset_node.contents_unlocked,
+                        local_graph_id: asset_node
+                            .contents_unlocked
+                            .then(|| unlocked_asset_graph_id(&asset_node.instance_id)),
                         description: declaration
                             .map(|declaration| declaration.description.clone())
                             .unwrap_or_default(),
@@ -3834,6 +3923,10 @@ fn readable_reference_path(node: &GraphNode, output_name: &str) -> String {
     format!("{MAIN_GRAPH_ID}/{}:{output_name}", node.name)
 }
 
+fn unlocked_asset_graph_id(instance_id: &str) -> String {
+    format!("{instance_id}.local_edit_graph")
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 struct LayerSidecar {
     #[serde(default)]
@@ -4018,6 +4111,7 @@ impl GraphNode {
                 instance_id,
                 asset_id,
                 instance_version,
+                contents_unlocked: false,
                 input_bindings: vec![HoudiniNodeBinding {
                     port_name: "geometry".to_owned(),
                     source_summary: "previous output".to_owned(),
@@ -4227,6 +4321,7 @@ pub(crate) enum ReferenceDiagnosticStatus {
     MissingNode,
     MissingOutput,
     DisallowedBoundary,
+    AssetPrivateInternal,
     CoordinateContractMissing,
     CoordinateIncompatibleRepairable,
 }
@@ -4238,6 +4333,7 @@ impl ReferenceDiagnosticStatus {
             Self::MissingNode => "Missing node",
             Self::MissingOutput => "Missing output",
             Self::DisallowedBoundary => "Disallowed boundary",
+            Self::AssetPrivateInternal => "Asset private internal",
             Self::CoordinateContractMissing => "Coordinate contract missing",
             Self::CoordinateIncompatibleRepairable => "Coordinate repair available",
         }
@@ -4307,6 +4403,8 @@ pub(crate) struct ProceduralAssetInstanceNode {
     pub asset_id: String,
     #[serde(default)]
     pub instance_version: String,
+    #[serde(default)]
+    pub contents_unlocked: bool,
     #[serde(default)]
     pub input_bindings: Vec<HoudiniNodeBinding>,
     pub output_summary: Option<String>,
@@ -5692,6 +5790,8 @@ pub(crate) struct ProceduralAssetNodeInfo {
     pub display_name: String,
     pub instance_version: String,
     pub current_version: Option<String>,
+    pub contents_unlocked: bool,
+    pub local_graph_id: Option<String>,
     pub description: String,
     pub labels: Vec<String>,
     pub promoted_parameters: Vec<String>,
@@ -6472,7 +6572,7 @@ mod tests {
         NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
         NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
         NativeOperatorProvenance, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
-        NodeStatus, OperatorVersionStatus, ProceduralAssetDeclaration,
+        NodeStatus, OperatorVersionStatus, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
         ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
         PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
         PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
@@ -6482,7 +6582,8 @@ mod tests {
         PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
         PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
         PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
-        PythonRequirementsSource, ReferenceDiagnosticStatus, RerunSceneDebugItem, RerunSceneItem,
+        PythonRequirementsSource, ReferenceDiagnosticStatus, ReferenceTargetEntry,
+        ReferenceTargetIdentity, ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem,
         SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
         ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
@@ -6501,6 +6602,35 @@ mod tests {
             origin: SubstrateOrigin::BottomLeft,
             y_axis: SubstrateYAxis::Up,
         }
+    }
+
+    fn add_reference_node_for_target(
+        graph: &mut GraphDocument,
+        target: ReferenceTargetIdentity,
+    ) -> usize {
+        let provenance = ReferenceTargetProvenance {
+            source_graph_id: target.graph_id.clone(),
+            source_node_id: target.node_id.clone(),
+            source_node_name: target.node_id.clone(),
+            source_output_name: target.output_name.clone(),
+            source_data_kind: HoudiniDataKind::GeometryTable,
+        };
+        let mut node = GraphNode::reference_input(
+            graph.unique_node_id("reference_input"),
+            ReferenceTargetEntry {
+                target,
+                enabled: true,
+                provenance,
+            },
+        );
+        node.layout_position = GraphPoint::new(0.88, 0.62);
+        let insert_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .unwrap_or(graph.nodes.len());
+        graph.nodes.insert(insert_index, node);
+        insert_index
     }
 
     #[test]
@@ -9171,6 +9301,147 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(asset.input_bindings[0].port_name, "geometry");
         assert!(info.python_operator.is_none());
         assert!(info.native_operator.is_none());
+    }
+
+    #[test]
+    fn matched_asset_private_internals_are_not_external_reference_targets() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        let private_graph_id = graph.procedural_asset_declarations[0]
+            .wrapped_subgraph
+            .graph_id
+            .clone();
+        let reference_index = add_reference_node_for_target(
+            &mut graph,
+            ReferenceTargetIdentity {
+                graph_id: private_graph_id,
+                node_id: "OUT_INTERNAL".to_owned(),
+                output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            },
+        );
+
+        let info = graph
+            .selected_node_info(reference_index)
+            .expect("reference info should exist");
+        let reference_info = info.reference_input.expect("reference input should exist");
+
+        assert_eq!(info.status, NodeStatus::Failed);
+        assert_eq!(
+            reference_info.status,
+            ReferenceDiagnosticStatus::AssetPrivateInternal
+        );
+        assert!(
+            info.warnings[0].contains("private")
+                && info.warnings[0].contains("asset boundary output")
+        );
+    }
+
+    #[test]
+    fn procedural_asset_boundary_output_is_referenceable() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        let asset_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        let reference_index = graph
+            .add_reference_input_node(asset_index)
+            .expect("asset boundary output should be referenceable");
+
+        let info = graph
+            .selected_node_info(reference_index)
+            .expect("reference info should exist");
+        let reference_info = info.reference_input.expect("reference input should exist");
+
+        assert_eq!(info.status, NodeStatus::Healthy);
+        assert_eq!(reference_info.status, ReferenceDiagnosticStatus::Resolved);
+        assert_eq!(
+            reference_info.target.node_id,
+            graph.nodes[asset_index].node_id
+        );
+        assert_eq!(
+            reference_info.output_kind,
+            Some(HoudiniDataKind::GeometryTable)
+        );
+    }
+
+    #[test]
+    fn internal_out_nulls_require_asset_interface_exposure() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        let private_graph_id = graph.procedural_asset_declarations[0]
+            .wrapped_subgraph
+            .graph_id
+            .clone();
+        let reference_index = add_reference_node_for_target(
+            &mut graph,
+            ReferenceTargetIdentity {
+                graph_id: private_graph_id,
+                node_id: "OUT_MAIN".to_owned(),
+                output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            },
+        );
+
+        let info = graph
+            .selected_node_info(reference_index)
+            .expect("reference info should exist");
+
+        assert_eq!(info.status, NodeStatus::Failed);
+        assert!(
+            info.reference_input
+                .expect("reference input should exist")
+                .targets
+                .iter()
+                .any(|target| target.status == ReferenceDiagnosticStatus::AssetPrivateInternal)
+        );
+    }
+
+    #[test]
+    fn unlocked_asset_instance_allows_local_internal_references() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        let asset_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        assert!(graph.set_procedural_asset_contents_unlocked(asset_index, true));
+        let local_graph_id = graph
+            .unlocked_asset_graph_id_for_node(asset_index)
+            .expect("unlocked asset should expose local graph id");
+        let reference_index = add_reference_node_for_target(
+            &mut graph,
+            ReferenceTargetIdentity {
+                graph_id: local_graph_id.clone(),
+                node_id: "OUT_INTERNAL".to_owned(),
+                output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            },
+        );
+
+        let asset_info = graph
+            .selected_node_info(asset_index)
+            .expect("asset info should exist")
+            .procedural_asset
+            .expect("asset node info should exist");
+        let reference_info = graph
+            .selected_node_info(reference_index)
+            .expect("reference info should exist");
+
+        assert!(asset_info.contents_unlocked);
+        assert_eq!(
+            asset_info.local_graph_id.as_deref(),
+            Some(local_graph_id.as_str())
+        );
+        assert_eq!(reference_info.status, NodeStatus::Healthy);
+        assert_eq!(
+            reference_info
+                .reference_input
+                .expect("reference input should exist")
+                .status,
+            ReferenceDiagnosticStatus::Resolved
+        );
     }
 
     #[test]
