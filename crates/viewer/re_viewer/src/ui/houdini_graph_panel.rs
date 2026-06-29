@@ -64,6 +64,9 @@ pub(crate) struct HoudiniGraphPanel {
     asset_description: String,
     asset_help: String,
     asset_status: Option<String>,
+    python_uv_executable_path: String,
+    python_existing_environment_path: String,
+    python_create_environment_path: String,
 }
 
 impl Default for HoudiniGraphPanel {
@@ -88,6 +91,9 @@ impl Default for HoudiniGraphPanel {
             asset_description: "Project-local graph asset.".to_owned(),
             asset_help: "Created from the current Houdini graph.".to_owned(),
             asset_status: None,
+            python_uv_executable_path: String::new(),
+            python_existing_environment_path: String::new(),
+            python_create_environment_path: String::new(),
         }
     }
 }
@@ -200,6 +206,32 @@ impl HoudiniGraphPanel {
         });
     }
 
+    fn sync_python_environment_inputs(&mut self, graph: &GraphDocument) {
+        if self.python_uv_executable_path.is_empty() {
+            self.python_uv_executable_path = graph
+                .python_environment
+                .resolver
+                .executable_path
+                .clone()
+                .unwrap_or_default();
+        }
+        if self.python_existing_environment_path.is_empty() {
+            self.python_existing_environment_path = graph
+                .python_environment
+                .paths
+                .existing_environment_path
+                .clone()
+                .unwrap_or_default();
+        }
+        if self.python_create_environment_path.is_empty() {
+            self.python_create_environment_path = graph
+                .python_environment
+                .paths
+                .create_environment_path
+                .clone();
+        }
+    }
+
     fn parquet_import_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         ui.horizontal(|ui| {
             if ui.button("Load Sample").clicked() {
@@ -223,7 +255,8 @@ impl HoudiniGraphPanel {
         }
     }
 
-    fn python_environment_ui(&self, ui: &mut Ui, graph: &mut GraphDocument) {
+    fn python_environment_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        self.sync_python_environment_inputs(graph);
         let environment = &graph.python_environment;
         ui.add_space(6.0);
         ui.strong("Python Environment");
@@ -258,6 +291,20 @@ impl HoudiniGraphPanel {
                 ));
                 ui.end_row();
 
+                ui.weak("uv executable");
+                ui.label(
+                    environment
+                        .resolver
+                        .executable_path
+                        .as_deref()
+                        .unwrap_or("not configured"),
+                );
+                ui.end_row();
+
+                ui.weak("Environment mode");
+                ui.label(environment.paths.mode.as_str());
+                ui.end_row();
+
                 ui.weak("Lock");
                 ui.label(environment.lock_digest.as_deref().unwrap_or("none"));
                 ui.end_row();
@@ -269,6 +316,20 @@ impl HoudiniGraphPanel {
                         .as_deref()
                         .unwrap_or("not created"),
                 );
+                ui.end_row();
+
+                ui.weak("Existing env");
+                ui.label(
+                    environment
+                        .paths
+                        .existing_environment_path
+                        .as_deref()
+                        .unwrap_or("none"),
+                );
+                ui.end_row();
+
+                ui.weak("Create target");
+                ui.label(&environment.paths.create_environment_path);
                 ui.end_row();
 
                 ui.weak("Packages");
@@ -305,12 +366,40 @@ impl HoudiniGraphPanel {
                     ui.end_row();
                 }
             });
-        ui.weak(environment.status_summary());
-        if environment.lock_status == PythonEnvironmentStatus::Failed {
+        ui.add_space(4.0);
+        egui::Grid::new("houdini_python_environment_paths")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.weak("uv path");
+                ui.text_edit_singleline(&mut self.python_uv_executable_path);
+                ui.end_row();
+
+                ui.weak("Existing env");
+                ui.text_edit_singleline(&mut self.python_existing_environment_path);
+                ui.end_row();
+
+                ui.weak("Create env at");
+                ui.text_edit_singleline(&mut self.python_create_environment_path);
+                ui.end_row();
+            });
+        ui.horizontal(|ui| {
+            if ui.button("Apply uv path").clicked() {
+                graph.configure_python_uv_executable_path(&self.python_uv_executable_path);
+            }
+            if ui.button("Use existing env").clicked() {
+                graph.select_existing_python_environment(&self.python_existing_environment_path);
+            }
+            if ui.button("Use create target").clicked() {
+                graph.select_python_environment_create_path(&self.python_create_environment_path);
+            }
+        });
+        ui.weak(graph.python_environment.status_summary());
+        if graph.python_environment.lock_status == PythonEnvironmentStatus::Failed {
             ui.weak("Resolve or repair the project environment before running Python operators.");
         }
 
-        if let Some(plan) = &environment.resolve_state.last_plan {
+        if let Some(plan) = &graph.python_environment.resolve_state.last_plan {
             ui.weak(format!(
                 "Resolve plan: {} requirement(s), {}",
                 plan.unique_requirement_count(),
@@ -321,7 +410,7 @@ impl HoudiniGraphPanel {
             }
         }
 
-        let resolving = environment.lock_status == PythonEnvironmentStatus::Resolving;
+        let resolving = graph.python_environment.lock_status == PythonEnvironmentStatus::Resolving;
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(!resolving, egui::Button::new("Resolve with uv"))

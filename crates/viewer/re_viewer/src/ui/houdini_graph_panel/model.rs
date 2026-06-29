@@ -841,7 +841,9 @@ impl GraphDocument {
             .then(|| PythonEnvironmentReadySnapshot {
                 lock_digest: self.python_environment.lock_digest.clone(),
                 resolver_version: self.python_environment.resolver.version.clone(),
+                resolver_executable_path: self.python_environment.resolver.executable_path.clone(),
                 environment_path: self.python_environment.environment_path.clone(),
+                paths: self.python_environment.paths.clone(),
                 dependency_health: self.python_environment.dependency_health.clone(),
                 last_health_check: self.python_environment.last_health_check.clone(),
             });
@@ -852,6 +854,7 @@ impl GraphDocument {
         self.python_environment.resolve_state.in_progress = Some(PythonEnvironmentResolveRun {
             trigger,
             resolver_tool: self.python_environment.resolver.tool.clone(),
+            resolver_executable_path: self.python_environment.resolver.executable_path.clone(),
             started_at: current_timestamp_millis(),
         });
         if previous_ready.is_some() {
@@ -862,6 +865,41 @@ impl GraphDocument {
     }
 
     #[allow(dead_code)]
+    pub fn configure_python_uv_executable_path(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        self.python_environment.resolver.executable_path =
+            (!path.trim().is_empty()).then(|| path.trim().to_owned());
+    }
+
+    #[allow(dead_code)]
+    pub fn select_existing_python_environment(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        let path = path.trim();
+        if path.is_empty() {
+            return;
+        }
+        self.python_environment.paths.mode = PythonEnvironmentPathMode::ExistingEnvironment;
+        self.python_environment.paths.existing_environment_path = Some(path.to_owned());
+        self.python_environment.environment_path = Some(path.to_owned());
+        self.python_environment.lock_status = PythonEnvironmentStatus::Locked;
+    }
+
+    #[allow(dead_code)]
+    pub fn select_python_environment_create_path(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        let path = path.trim();
+        if path.is_empty() {
+            return;
+        }
+        self.python_environment.paths.mode = PythonEnvironmentPathMode::CreateProjectLocal;
+        self.python_environment.paths.create_environment_path = path.to_owned();
+        self.python_environment.environment_path = Some(path.to_owned());
+        if self.python_environment.lock_status == PythonEnvironmentStatus::Missing {
+            self.python_environment.lock_status = PythonEnvironmentStatus::Unlocked;
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn complete_python_environment_resolve(
         &mut self,
         lock_digest: impl Into<String>,
@@ -869,10 +907,19 @@ impl GraphDocument {
         interpreter_path: impl Into<String>,
         package_count: usize,
     ) {
+        let interpreter_path = interpreter_path.into();
         self.python_environment.lock_status = PythonEnvironmentStatus::Ready;
         self.python_environment.lock_digest = Some(lock_digest.into());
         self.python_environment.resolver.version = Some(resolver_version.into());
-        self.python_environment.environment_path = Some(interpreter_path.into());
+        self.python_environment.environment_path = Some(interpreter_path.clone());
+        match self.python_environment.paths.mode {
+            PythonEnvironmentPathMode::ExistingEnvironment => {
+                self.python_environment.paths.existing_environment_path = Some(interpreter_path);
+            }
+            PythonEnvironmentPathMode::CreateProjectLocal => {
+                self.python_environment.paths.create_environment_path = interpreter_path;
+            }
+        }
         self.python_environment.last_health_check = Some(current_timestamp_millis().to_string());
         self.python_environment.last_failure_summary = None;
         self.python_environment.dependency_health = PythonDependencyHealth {
@@ -922,7 +969,10 @@ impl GraphDocument {
             self.python_environment.lock_status = PythonEnvironmentStatus::Ready;
             self.python_environment.lock_digest = previous_ready.lock_digest;
             self.python_environment.resolver.version = previous_ready.resolver_version;
+            self.python_environment.resolver.executable_path =
+                previous_ready.resolver_executable_path;
             self.python_environment.environment_path = previous_ready.environment_path;
+            self.python_environment.paths = previous_ready.paths;
             self.python_environment.dependency_health = previous_ready.dependency_health;
             self.python_environment.last_health_check = previous_ready.last_health_check;
             self.python_environment.last_failure_summary = None;
@@ -3229,6 +3279,7 @@ pub(crate) struct PythonDependencyIdentity {
     pub lock_digest: Option<String>,
     pub resolver_tool: String,
     pub resolver_version: Option<String>,
+    pub resolver_executable_path: Option<String>,
     pub interpreter_path: Option<String>,
 }
 
@@ -3683,6 +3734,8 @@ pub(crate) struct PythonEnvironmentDescriptor {
     pub lock_digest: Option<String>,
     pub environment_path: Option<String>,
     pub resolver: PythonEnvironmentResolver,
+    #[serde(default)]
+    pub paths: PythonEnvironmentPaths,
     pub last_health_check: Option<String>,
     pub last_failure_summary: Option<String>,
     pub dependency_health: PythonDependencyHealth,
@@ -3702,7 +3755,9 @@ impl Default for PythonEnvironmentDescriptor {
             resolver: PythonEnvironmentResolver {
                 tool: "uv".to_owned(),
                 version: None,
+                executable_path: Some(".houdini/tools/uv".to_owned()),
             },
+            paths: PythonEnvironmentPaths::default(),
             last_health_check: None,
             last_failure_summary: None,
             dependency_health: PythonDependencyHealth::default(),
@@ -3748,6 +3803,7 @@ impl PythonEnvironmentDescriptor {
             lock_digest: self.lock_digest.clone(),
             resolver_tool: self.resolver.tool.clone(),
             resolver_version: self.resolver.version.clone(),
+            resolver_executable_path: self.resolver.executable_path.clone(),
             interpreter_path: self.environment_path.clone(),
         }
     }
@@ -3806,6 +3862,41 @@ impl PythonRequirementsSource {
 pub(crate) struct PythonEnvironmentResolver {
     pub tool: String,
     pub version: Option<String>,
+    #[serde(default)]
+    pub executable_path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PythonEnvironmentPaths {
+    pub mode: PythonEnvironmentPathMode,
+    pub existing_environment_path: Option<String>,
+    pub create_environment_path: String,
+}
+
+impl Default for PythonEnvironmentPaths {
+    fn default() -> Self {
+        Self {
+            mode: PythonEnvironmentPathMode::CreateProjectLocal,
+            existing_environment_path: None,
+            create_environment_path: ".houdini/python/envs/project-python".to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum PythonEnvironmentPathMode {
+    ExistingEnvironment,
+    #[default]
+    CreateProjectLocal,
+}
+
+impl PythonEnvironmentPathMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExistingEnvironment => "existing environment",
+            Self::CreateProjectLocal => "create project-local environment",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -3856,6 +3947,7 @@ impl PythonEnvironmentResolveTrigger {
 pub(crate) struct PythonEnvironmentResolveRun {
     pub trigger: PythonEnvironmentResolveTrigger,
     pub resolver_tool: String,
+    pub resolver_executable_path: Option<String>,
     pub started_at: u128,
 }
 
@@ -3863,7 +3955,9 @@ pub(crate) struct PythonEnvironmentResolveRun {
 pub(crate) struct PythonEnvironmentReadySnapshot {
     pub lock_digest: Option<String>,
     pub resolver_version: Option<String>,
+    pub resolver_executable_path: Option<String>,
     pub environment_path: Option<String>,
+    pub paths: PythonEnvironmentPaths,
     pub dependency_health: PythonDependencyHealth,
     pub last_health_check: Option<String>,
 }
@@ -5147,11 +5241,12 @@ mod tests {
         NativeOperatorProvenance, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
         NodeStatus, OperatorVersionStatus, ProceduralAssetDeclaration,
         ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
-        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentResolveState,
-        PythonEnvironmentResolveTrigger, PythonEnvironmentResolver, PythonEnvironmentStatus,
-        PythonOperatorCapability, PythonOperatorDataKind, PythonOperatorDeclaration,
-        PythonOperatorDependencies, PythonOperatorDependencyStatus, PythonOperatorEntryPoint,
-        PythonOperatorNumericRange, PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
+        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
+        PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
+        PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
+        PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
+        PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
+        PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
         PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
         PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
         PythonRequirementsSource, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
@@ -7721,6 +7816,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(restored.python_environment, graph.python_environment);
         assert!(json.contains("python_environment"));
         assert!(json.contains("uv"));
+        assert!(json.contains(".houdini/tools/uv"));
         assert!(json.contains("lock:abc123"));
     }
 
@@ -7748,6 +7844,18 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             Some(".houdini/python/envs/project-python")
         );
         assert_eq!(restored.python_environment.resolver.tool, "uv");
+        assert_eq!(
+            restored
+                .python_environment
+                .resolver
+                .executable_path
+                .as_deref(),
+            Some(".houdini/tools/uv")
+        );
+        assert_eq!(
+            restored.python_environment.paths.create_environment_path,
+            ".houdini/python/envs/project-python"
+        );
     }
 
     #[test]
@@ -7762,12 +7870,88 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert!(environment_path.starts_with(".houdini/python/envs/"));
         assert!(!environment_path.starts_with("/usr/bin"));
         assert_eq!(
+            graph.python_environment.resolver.executable_path.as_deref(),
+            Some(".houdini/tools/uv")
+        );
+        assert_eq!(
+            graph.python_environment.paths.mode,
+            PythonEnvironmentPathMode::CreateProjectLocal
+        );
+        assert_eq!(
+            graph.python_environment.paths.create_environment_path,
+            ".houdini/python/envs/project-python"
+        );
+        assert_eq!(
             graph.python_environment.status_summary(),
             "Project Python environment is not configured."
         );
         assert_eq!(
             graph.python_environment.requirements_source,
             PythonRequirementsSource::ProjectLocal
+        );
+    }
+
+    #[test]
+    fn python_environment_paths_can_select_existing_environment() {
+        let mut graph = GraphDocument::sample();
+
+        graph.configure_python_uv_executable_path("/opt/uv/bin/uv");
+        graph.select_existing_python_environment(".venv");
+
+        assert_eq!(
+            graph.python_environment.resolver.executable_path.as_deref(),
+            Some("/opt/uv/bin/uv")
+        );
+        assert_eq!(
+            graph.python_environment.paths.mode,
+            PythonEnvironmentPathMode::ExistingEnvironment
+        );
+        assert_eq!(
+            graph
+                .python_environment
+                .paths
+                .existing_environment_path
+                .as_deref(),
+            Some(".venv")
+        );
+        assert_eq!(
+            graph.python_environment.environment_path.as_deref(),
+            Some(".venv")
+        );
+        assert_eq!(
+            graph.python_environment.lock_status,
+            PythonEnvironmentStatus::Locked
+        );
+    }
+
+    #[test]
+    fn python_environment_paths_can_choose_create_target() {
+        let mut graph = GraphDocument::sample();
+
+        graph.select_python_environment_create_path(".houdini/python/envs/experiment");
+
+        assert_eq!(
+            graph.python_environment.paths.mode,
+            PythonEnvironmentPathMode::CreateProjectLocal
+        );
+        assert_eq!(
+            graph.python_environment.paths.create_environment_path,
+            ".houdini/python/envs/experiment"
+        );
+        assert_eq!(
+            graph.python_environment.environment_path.as_deref(),
+            Some(".houdini/python/envs/experiment")
+        );
+        assert_eq!(
+            graph.python_environment.lock_status,
+            PythonEnvironmentStatus::Unlocked
+        );
+        assert!(
+            !graph
+                .python_environment
+                .environment_path
+                .as_deref()
+                .is_some_and(|path| path.starts_with("/usr/bin"))
         );
     }
 
@@ -7995,7 +8179,9 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             resolver: PythonEnvironmentResolver {
                 tool: "uv".to_owned(),
                 version: Some("0.7.0".to_owned()),
+                executable_path: Some(".houdini/tools/uv".to_owned()),
             },
+            paths: PythonEnvironmentPaths::default(),
             last_health_check: Some("2026-06-28T23:30:00Z".to_owned()),
             last_failure_summary: None,
             dependency_health: PythonDependencyHealth {
