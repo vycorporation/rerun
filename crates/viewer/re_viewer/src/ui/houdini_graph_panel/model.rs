@@ -98,8 +98,10 @@ impl GraphDocument {
                     kind: NodeKind::Source,
                     layout_position: GraphPoint::new(0.0, 0.5),
                     generated: None,
+                    coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
                     null_operator: None,
                     reference_input: None,
+                    substrate_projection: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -119,8 +121,10 @@ impl GraphDocument {
                     kind: NodeKind::Filter,
                     layout_position: GraphPoint::new(0.33, 0.5),
                     generated: None,
+                    coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
                     null_operator: None,
                     reference_input: None,
+                    substrate_projection: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -142,8 +146,10 @@ impl GraphDocument {
                     kind: NodeKind::Style,
                     layout_position: GraphPoint::new(0.66, 0.5),
                     generated: None,
+                    coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
                     null_operator: None,
                     reference_input: None,
+                    substrate_projection: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -163,8 +169,10 @@ impl GraphDocument {
                     kind: NodeKind::Output,
                     layout_position: GraphPoint::new(1.0, 0.5),
                     generated: None,
+                    coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
                     null_operator: None,
                     reference_input: None,
+                    substrate_projection: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -657,11 +665,29 @@ impl GraphDocument {
             | NodeKind::Filter
             | NodeKind::Style
             | NodeKind::Null
+            | NodeKind::SubstrateProjection
             | NodeKind::PythonOperator
             | NodeKind::ProceduralAsset
             | NodeKind::NativeOperator => Some(HoudiniDataKind::GeometryTable),
             NodeKind::ReferenceInput | NodeKind::Output => None,
         }
+    }
+
+    fn default_coordinate_contract_for_kind(kind: NodeKind) -> Option<SubstrateCoordinateContract> {
+        matches!(
+            kind,
+            NodeKind::Source
+                | NodeKind::Filter
+                | NodeKind::Style
+                | NodeKind::Null
+                | NodeKind::ReferenceInput
+                | NodeKind::SubstrateProjection
+                | NodeKind::PythonOperator
+                | NodeKind::ProceduralAsset
+                | NodeKind::NativeOperator
+                | NodeKind::Output
+        )
+        .then(SubstrateCoordinateContract::demo_byteplot)
     }
 
     pub fn resolve_reference_target(
@@ -711,6 +737,7 @@ impl GraphDocument {
             readable_path: readable_reference_path(target_node, &target.output_name),
             target_node_index: Some(target_node_index),
             output_kind: Some(output_kind),
+            coordinate_contract: target_node.coordinate_contract.clone(),
             record_count: self.node_output_record_count_for_index(target_node_index),
             source_provenance: Some(self.source.metadata.provenance),
             diagnostic: None,
@@ -734,17 +761,129 @@ impl GraphDocument {
     ) -> Option<Vec<ReferenceTargetEntryResolution>> {
         let node = self.nodes.get(node_index)?;
         let reference_input = node.reference_input.as_ref()?;
+        let raw_resolutions = reference_input
+            .targets
+            .iter()
+            .map(|entry| (entry, self.resolve_reference_target(&entry.target)))
+            .collect::<Vec<_>>();
+        let expected_coordinate_contract = raw_resolutions
+            .iter()
+            .filter(|(entry, _)| entry.enabled)
+            .find_map(|(_, resolution)| resolution.coordinate_contract.clone());
         Some(
-            reference_input
-                .targets
-                .iter()
-                .map(|entry| ReferenceTargetEntryResolution {
+            raw_resolutions
+                .into_iter()
+                .map(|(entry, resolution)| ReferenceTargetEntryResolution {
                     enabled: entry.enabled,
                     provenance: entry.provenance.clone(),
-                    resolution: self.resolve_reference_target(&entry.target),
+                    resolution: Self::with_coordinate_compatibility(
+                        resolution,
+                        expected_coordinate_contract.as_ref(),
+                    ),
+                    expected_coordinate_contract: expected_coordinate_contract.clone(),
                 })
                 .collect(),
         )
+    }
+
+    pub fn reference_coordinate_repair_summary(&self, node_index: usize) -> Option<String> {
+        self.reference_input_resolutions(node_index)?
+            .into_iter()
+            .find(|entry| {
+                entry.resolution.status
+                    == ReferenceDiagnosticStatus::CoordinateIncompatibleRepairable
+            })
+            .and_then(|entry| entry.resolution.diagnostic)
+    }
+
+    pub fn create_assisted_projection_for_first_repairable_reference_target(
+        &mut self,
+        reference_node_index: usize,
+    ) -> Option<usize> {
+        let repair = self
+            .reference_input_resolutions(reference_node_index)?
+            .into_iter()
+            .find(|entry| {
+                entry.resolution.status
+                    == ReferenceDiagnosticStatus::CoordinateIncompatibleRepairable
+            })?;
+        let from_contract = repair.resolution.coordinate_contract.clone()?;
+        let to_contract = repair.expected_coordinate_contract.clone()?;
+        let source_target = repair.resolution.target.clone();
+        let source_node_index = repair.resolution.target_node_index?;
+        let projection_node_id = self.unique_node_id("substrate_projection");
+        let projection_target = ReferenceTargetIdentity {
+            graph_id: MAIN_GRAPH_ID.to_owned(),
+            node_id: projection_node_id.clone(),
+            output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+        };
+        let repair_summary = from_contract.repair_summary_to(&to_contract);
+        let mut projection_node = GraphNode::substrate_projection(
+            projection_node_id,
+            SubstrateProjectionNode {
+                source_target: source_target.clone(),
+                from_contract,
+                to_contract,
+                repair_summary,
+            },
+        );
+        let source_position = self
+            .nodes
+            .get(source_node_index)
+            .map(|node| node.layout_position)
+            .unwrap_or(GraphPoint::new(0.5, 0.5));
+        projection_node.layout_position = GraphPoint::new(
+            ((source_position.x + 0.08).min(0.96)).max(0.04),
+            (source_position.y + 0.12).clamp(0.04, 0.96),
+        );
+
+        let insert_index = reference_node_index.min(self.nodes.len());
+        self.nodes.insert(insert_index, projection_node);
+        let reference_node = self.nodes.get_mut(reference_node_index + 1)?;
+        let reference_input = reference_node.reference_input.as_mut()?;
+        let target_entry = reference_input
+            .targets
+            .iter_mut()
+            .find(|entry| entry.target == source_target)?;
+        target_entry.target = projection_target;
+        reference_node.evaluation.state = EvaluationState::Stale;
+        reference_node.evaluation.message =
+            Some("Reference target repaired through a visible substrate projection.".to_owned());
+        Some(insert_index)
+    }
+
+    fn with_coordinate_compatibility(
+        mut resolution: ReferenceTargetResolution,
+        expected_coordinate_contract: Option<&SubstrateCoordinateContract>,
+    ) -> ReferenceTargetResolution {
+        if resolution.status != ReferenceDiagnosticStatus::Resolved {
+            return resolution;
+        }
+
+        let Some(coordinate_contract) = &resolution.coordinate_contract else {
+            resolution.status = ReferenceDiagnosticStatus::CoordinateContractMissing;
+            resolution.record_count = 0;
+            resolution.diagnostic = Some(
+                "Reference target has no substrate coordinate contract; fix metadata or disable the target.".to_owned(),
+            );
+            return resolution;
+        };
+
+        let Some(expected_coordinate_contract) = expected_coordinate_contract else {
+            return resolution;
+        };
+
+        if coordinate_contract == expected_coordinate_contract {
+            return resolution;
+        }
+
+        resolution.status = ReferenceDiagnosticStatus::CoordinateIncompatibleRepairable;
+        resolution.record_count = 0;
+        resolution.diagnostic = Some(format!(
+            "Reference target substrate coordinates differ from the enabled target set baseline; create a visible substrate projection or disable the target. {}",
+            coordinate_contract.repair_summary_to(expected_coordinate_contract),
+        ));
+        resolution
     }
 
     #[allow(dead_code)]
@@ -824,6 +963,12 @@ impl GraphDocument {
             return self
                 .reference_input_resolutions(node_index)
                 .map_or(0, |entries| {
+                    if entries.iter().any(|entry| {
+                        entry.enabled
+                            && entry.resolution.status != ReferenceDiagnosticStatus::Resolved
+                    }) {
+                        return 0;
+                    }
                     entries
                         .iter()
                         .filter(|entry| entry.enabled)
@@ -836,6 +981,14 @@ impl GraphDocument {
                         })
                         .sum()
                 });
+        }
+        if let Some(projection) = &node.substrate_projection {
+            let resolution = self.resolve_reference_target(&projection.source_target);
+            return if resolution.status == ReferenceDiagnosticStatus::Resolved {
+                resolution.record_count
+            } else {
+                0
+            };
         }
         self.node_output_record_count(node.kind)
     }
@@ -853,6 +1006,7 @@ impl GraphDocument {
             NodeKind::Filter
             | NodeKind::Style
             | NodeKind::Null
+            | NodeKind::SubstrateProjection
             | NodeKind::PythonOperator
             | NodeKind::ProceduralAsset
             | NodeKind::NativeOperator => filtered_count,
@@ -1620,6 +1774,7 @@ impl GraphDocument {
                                 "enabled": entry.enabled,
                                 "provenance": &entry.provenance,
                                 "target_status": resolution.status.as_str(),
+                                "coordinate_contract": &resolution.coordinate_contract,
                                 "target_cache_key": resolution
                                     .target_node_index
                                     .map(|target_index| self.node_cache_key_material(target_index)),
@@ -1761,6 +1916,10 @@ impl GraphDocument {
                 }
                 NodeKind::ReferenceInput => {
                     "Live one-way reference to a compatible graph output.".to_owned()
+                }
+                NodeKind::SubstrateProjection => {
+                    "Visible substrate coordinate projection; reference inputs do not hide transforms."
+                        .to_owned()
                 }
                 NodeKind::PythonOperator => "Deferred graph-visible Python operator.".to_owned(),
                 NodeKind::ProceduralAsset => {
@@ -2089,6 +2248,7 @@ impl GraphDocument {
                         readable_path: primary.resolution.readable_path.clone(),
                         status: primary.resolution.status,
                         output_kind: primary.resolution.output_kind,
+                        coordinate_contract: primary.resolution.coordinate_contract.clone(),
                         source_provenance: primary.resolution.source_provenance,
                         targets: target_entries
                             .into_iter()
@@ -2098,6 +2258,8 @@ impl GraphDocument {
                                 status: entry.resolution.status,
                                 enabled: entry.enabled,
                                 output_kind: entry.resolution.output_kind,
+                                coordinate_contract: entry.resolution.coordinate_contract,
+                                expected_coordinate_contract: entry.expected_coordinate_contract,
                                 record_count: entry.resolution.record_count,
                                 source_provenance: entry.resolution.source_provenance,
                                 provenance: entry.provenance,
@@ -2106,6 +2268,37 @@ impl GraphDocument {
                         preserves_source_data: true,
                         applies_hidden_transform: false,
                     }),
+                    python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
+                }
+            }
+            NodeKind::SubstrateProjection => {
+                let projection = node.substrate_projection.as_ref()?;
+                NodeInfo {
+                    kind: node.kind,
+                    role: node.kind.role(),
+                    input_count: 1,
+                    output_count: stage.output_count,
+                    status: NodeStatus::Healthy,
+                    data_kind: "Projected geometry table",
+                    record_count: stage.output_count,
+                    bounds: self.filtered_bounds(),
+                    provenance: Some(self.source.metadata.provenance),
+                    attributes: self.source.metadata.attribute_names.clone(),
+                    parameter: node.parameter.clone(),
+                    summary: "Substrate projection is a visible graph operator created by assisted repair.",
+                    source_metadata: None,
+                    source_error: None,
+                    style: None,
+                    generated: node.generated,
+                    evaluation: node.evaluation.clone(),
+                    warnings: vec![format!(
+                        "Projection contract: {}",
+                        projection.repair_summary
+                    )],
+                    null_operator: None,
+                    reference_input: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -3373,8 +3566,10 @@ impl HoudiniGraphSidecar {
                     parameter_value: node.parameter.value,
                     parameter_rule: node.parameter.rule_spec.clone(),
                     generated: node.generated,
+                    coordinate_contract: Some(node.coordinate_contract.clone()),
                     null_operator: node.null_operator.clone(),
                     reference_input: node.reference_input.clone(),
+                    substrate_projection: node.substrate_projection.clone(),
                     python_operator: node.python_operator.clone(),
                     procedural_asset: node.procedural_asset.clone(),
                     native_operator: node.native_operator.clone(),
@@ -3445,8 +3640,12 @@ impl HoudiniGraphSidecar {
                     node.node_id = node_snapshot.node_id;
                 }
                 node.generated = node_snapshot.generated;
+                node.coordinate_contract = node_snapshot.coordinate_contract.unwrap_or_else(|| {
+                    GraphDocument::default_coordinate_contract_for_kind(node.kind)
+                });
                 node.python_operator = node_snapshot.python_operator;
                 node.reference_input = node_snapshot.reference_input;
+                node.substrate_projection = node_snapshot.substrate_projection;
                 node.procedural_asset = node_snapshot.procedural_asset;
                 node.native_operator = node_snapshot.native_operator;
             } else if node_snapshot.is_instance_node() {
@@ -3498,9 +3697,13 @@ struct NodeSidecar {
     #[serde(default)]
     generated: Option<GeneratedNodeInfo>,
     #[serde(default)]
+    coordinate_contract: Option<Option<SubstrateCoordinateContract>>,
+    #[serde(default)]
     null_operator: Option<NullOperatorNode>,
     #[serde(default)]
     reference_input: Option<ReferenceInputNode>,
+    #[serde(default)]
+    substrate_projection: Option<SubstrateProjectionNode>,
     #[serde(default)]
     python_operator: Option<PythonOperatorNode>,
     #[serde(default)]
@@ -3515,6 +3718,7 @@ impl NodeSidecar {
             self.kind,
             NodeKind::Null
                 | NodeKind::ReferenceInput
+                | NodeKind::SubstrateProjection
                 | NodeKind::PythonOperator
                 | NodeKind::ProceduralAsset
                 | NodeKind::NativeOperator
@@ -3543,6 +3747,10 @@ impl NodeSidecar {
                 "Reference Input",
                 "Imports one compatible graph output as a live one-way dependency.",
             ),
+            NodeKind::SubstrateProjection => (
+                "Substrate Projection",
+                "Converts substrate coordinates as a visible graph operator.",
+            ),
             _ => ("Graph Node", "Restored graph node."),
         };
         GraphNode {
@@ -3563,8 +3771,12 @@ impl NodeSidecar {
             kind: self.kind,
             layout_position: self.layout_position.clamped_to_unit(),
             generated: self.generated,
+            coordinate_contract: self
+                .coordinate_contract
+                .unwrap_or_else(|| GraphDocument::default_coordinate_contract_for_kind(self.kind)),
             null_operator: self.null_operator,
             reference_input: self.reference_input,
+            substrate_projection: self.substrate_projection,
             python_operator: self.python_operator,
             procedural_asset: self.procedural_asset,
             native_operator: self.native_operator,
@@ -3583,7 +3795,7 @@ impl NodeSidecar {
 
 fn node_matches_snapshot_identity(node: &GraphNode, snapshot: &NodeSidecar) -> bool {
     match node.kind {
-        NodeKind::Null | NodeKind::ReferenceInput => {
+        NodeKind::Null | NodeKind::ReferenceInput | NodeKind::SubstrateProjection => {
             if snapshot.node_id.is_empty() {
                 node.name == snapshot.name
             } else {
@@ -3656,8 +3868,10 @@ pub(crate) struct GraphNode {
     pub kind: NodeKind,
     pub layout_position: GraphPoint,
     pub generated: Option<GeneratedNodeInfo>,
+    pub coordinate_contract: Option<SubstrateCoordinateContract>,
     pub null_operator: Option<NullOperatorNode>,
     pub reference_input: Option<ReferenceInputNode>,
+    pub substrate_projection: Option<SubstrateProjectionNode>,
     pub python_operator: Option<PythonOperatorNode>,
     pub procedural_asset: Option<ProceduralAssetInstanceNode>,
     pub native_operator: Option<NativeOperatorNode>,
@@ -3675,11 +3889,13 @@ impl GraphNode {
             kind: NodeKind::Null,
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
+            coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
             null_operator: Some(NullOperatorNode {
                 input_kind: HoudiniDataKind::GeometryTable,
                 output_kind: HoudiniDataKind::GeometryTable,
             }),
             reference_input: None,
+            substrate_projection: None,
             python_operator: None,
             procedural_asset: None,
             native_operator: None,
@@ -3702,10 +3918,12 @@ impl GraphNode {
             kind: NodeKind::ReferenceInput,
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
+            coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
             null_operator: None,
             reference_input: Some(ReferenceInputNode {
                 targets: vec![target],
             }),
+            substrate_projection: None,
             python_operator: None,
             procedural_asset: None,
             native_operator: None,
@@ -3721,6 +3939,32 @@ impl GraphNode {
         }
     }
 
+    fn substrate_projection(instance_id: String, projection: SubstrateProjectionNode) -> Self {
+        Self {
+            node_id: instance_id,
+            name: "Substrate Projection".to_owned(),
+            kind: NodeKind::SubstrateProjection,
+            layout_position: GraphPoint::new(0.5, 0.5),
+            generated: None,
+            coordinate_contract: Some(projection.to_contract.clone()),
+            null_operator: None,
+            reference_input: None,
+            substrate_projection: Some(projection),
+            python_operator: None,
+            procedural_asset: None,
+            native_operator: None,
+            evaluation: NodeEvaluation::clean(),
+            participates_in_output: true,
+            parameter: NodeParameter::scalar(
+                "Projected",
+                1.0,
+                0.0..=1.0,
+                "Visible assisted substrate projection; no reference input transform is hidden.",
+            ),
+            info: "Converts a referenced substrate coordinate contract through a visible graph node.",
+        }
+    }
+
     fn python_operator(instance_id: String, declaration_id: String) -> Self {
         Self {
             node_id: instance_id.clone(),
@@ -3728,8 +3972,10 @@ impl GraphNode {
             kind: NodeKind::PythonOperator,
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
+            coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
             null_operator: None,
             reference_input: None,
+            substrate_projection: None,
             python_operator: Some(PythonOperatorNode {
                 instance_id,
                 declaration_id,
@@ -3763,8 +4009,10 @@ impl GraphNode {
             kind: NodeKind::ProceduralAsset,
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
+            coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
             null_operator: None,
             reference_input: None,
+            substrate_projection: None,
             python_operator: None,
             procedural_asset: Some(ProceduralAssetInstanceNode {
                 instance_id,
@@ -3797,8 +4045,10 @@ impl GraphNode {
             kind: NodeKind::NativeOperator,
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
+            coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
             null_operator: None,
             reference_input: None,
+            substrate_projection: None,
             python_operator: None,
             procedural_asset: None,
             native_operator: Some(NativeOperatorNode {
@@ -3828,6 +4078,63 @@ impl GraphNode {
 pub(crate) struct NullOperatorNode {
     pub input_kind: HoudiniDataKind,
     pub output_kind: HoudiniDataKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SubstrateProjectionNode {
+    pub source_target: ReferenceTargetIdentity,
+    pub from_contract: SubstrateCoordinateContract,
+    pub to_contract: SubstrateCoordinateContract,
+    pub repair_summary: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SubstrateCoordinateContract {
+    pub substrate_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub origin: SubstrateOrigin,
+    pub y_axis: SubstrateYAxis,
+}
+
+impl SubstrateCoordinateContract {
+    fn demo_byteplot() -> Self {
+        Self {
+            substrate_id: "demo-byteplot-pixel-space".to_owned(),
+            width: 1024,
+            height: 1024,
+            origin: SubstrateOrigin::TopLeft,
+            y_axis: SubstrateYAxis::Down,
+        }
+    }
+
+    fn repair_summary_to(&self, to_contract: &Self) -> String {
+        format!(
+            "{} {}x{} {:?}/{:?} -> {} {}x{} {:?}/{:?}",
+            self.substrate_id,
+            self.width,
+            self.height,
+            self.origin,
+            self.y_axis,
+            to_contract.substrate_id,
+            to_contract.width,
+            to_contract.height,
+            to_contract.origin,
+            to_contract.y_axis
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SubstrateOrigin {
+    TopLeft,
+    BottomLeft,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SubstrateYAxis {
+    Down,
+    Up,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -3875,6 +4182,7 @@ pub(crate) struct ReferenceTargetEntryResolution {
     pub enabled: bool,
     pub provenance: ReferenceTargetProvenance,
     pub resolution: ReferenceTargetResolution,
+    pub expected_coordinate_contract: Option<SubstrateCoordinateContract>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3884,6 +4192,7 @@ pub(crate) struct ReferenceTargetResolution {
     pub readable_path: String,
     pub target_node_index: Option<usize>,
     pub output_kind: Option<HoudiniDataKind>,
+    pub coordinate_contract: Option<SubstrateCoordinateContract>,
     pub record_count: usize,
     pub source_provenance: Option<SourceProvenance>,
     pub diagnostic: Option<String>,
@@ -3904,6 +4213,7 @@ impl ReferenceTargetResolution {
             ),
             target_node_index: None,
             output_kind: None,
+            coordinate_contract: None,
             record_count: 0,
             source_provenance: None,
             diagnostic: Some(message.to_owned()),
@@ -3917,6 +4227,8 @@ pub(crate) enum ReferenceDiagnosticStatus {
     MissingNode,
     MissingOutput,
     DisallowedBoundary,
+    CoordinateContractMissing,
+    CoordinateIncompatibleRepairable,
 }
 
 impl ReferenceDiagnosticStatus {
@@ -3926,6 +4238,8 @@ impl ReferenceDiagnosticStatus {
             Self::MissingNode => "Missing node",
             Self::MissingOutput => "Missing output",
             Self::DisallowedBoundary => "Disallowed boundary",
+            Self::CoordinateContractMissing => "Coordinate contract missing",
+            Self::CoordinateIncompatibleRepairable => "Coordinate repair available",
         }
     }
 }
@@ -5263,6 +5577,7 @@ pub(crate) enum NodeKind {
     Style,
     Null,
     ReferenceInput,
+    SubstrateProjection,
     PythonOperator,
     ProceduralAsset,
     NativeOperator,
@@ -5277,6 +5592,7 @@ impl NodeKind {
             Self::Style => "Style",
             Self::Null => "Null",
             Self::ReferenceInput => "Reference Input",
+            Self::SubstrateProjection => "Substrate Projection",
             Self::PythonOperator => "Python Operator",
             Self::ProceduralAsset => "Asset",
             Self::NativeOperator => "Native Operator",
@@ -5291,6 +5607,7 @@ impl NodeKind {
             Self::Style => "Style",
             Self::Null => "Anchor",
             Self::ReferenceInput => "Reference",
+            Self::SubstrateProjection => "Project",
             Self::PythonOperator => "Compute",
             Self::ProceduralAsset => "Asset",
             Self::NativeOperator => "Native",
@@ -5338,6 +5655,7 @@ pub(crate) struct ReferenceInputNodeInfo {
     pub readable_path: String,
     pub status: ReferenceDiagnosticStatus,
     pub output_kind: Option<HoudiniDataKind>,
+    pub coordinate_contract: Option<SubstrateCoordinateContract>,
     pub source_provenance: Option<SourceProvenance>,
     pub targets: Vec<ReferenceTargetNodeInfo>,
     pub preserves_source_data: bool,
@@ -5350,6 +5668,8 @@ pub(crate) struct ReferenceTargetNodeInfo {
     pub status: ReferenceDiagnosticStatus,
     pub enabled: bool,
     pub output_kind: Option<HoudiniDataKind>,
+    pub coordinate_contract: Option<SubstrateCoordinateContract>,
+    pub expected_coordinate_contract: Option<SubstrateCoordinateContract>,
     pub record_count: usize,
     pub source_provenance: Option<SourceProvenance>,
     pub provenance: ReferenceTargetProvenance,
@@ -6163,8 +6483,8 @@ mod tests {
         PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
         PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
         PythonRequirementsSource, ReferenceDiagnosticStatus, RerunSceneDebugItem, RerunSceneItem,
-        SourceProvenance, ViewerGeometry, load_cubic_bezier_parquet,
-        load_cubic_bezier_parquet_with_metadata,
+        SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
+        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -6172,6 +6492,16 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
+
+    fn alternate_substrate_contract() -> SubstrateCoordinateContract {
+        SubstrateCoordinateContract {
+            substrate_id: "alternate-markov-pixel-space".to_owned(),
+            width: 1024,
+            height: 1024,
+            origin: SubstrateOrigin::BottomLeft,
+            y_axis: SubstrateYAxis::Up,
+        }
+    }
 
     #[test]
     fn sample_curve_is_native_cubic_with_four_points() {
@@ -6957,6 +7287,162 @@ mod tests {
     }
 
     #[test]
+    fn enabled_coordinate_incompatible_reference_target_blocks_output() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        graph.nodes[second_null_index].coordinate_contract = Some(alternate_substrate_contract());
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+
+        let info = graph
+            .selected_node_info(reference_index)
+            .expect("reference node should have info");
+        let reference_info = info.reference_input.expect("reference info should exist");
+
+        assert_eq!(info.status, NodeStatus::Failed);
+        assert_eq!(info.output_count, 0);
+        assert!(!reference_info.applies_hidden_transform);
+        assert!(reference_info.targets.iter().any(|target| {
+            target.enabled
+                && target.status == ReferenceDiagnosticStatus::CoordinateIncompatibleRepairable
+        }));
+        assert!(
+            graph
+                .reference_coordinate_repair_summary(reference_index)
+                .expect("repair should be offered")
+                .contains("visible substrate projection")
+        );
+    }
+
+    #[test]
+    fn disabled_coordinate_incompatible_reference_target_stays_visible() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        graph.nodes[second_null_index].coordinate_contract = Some(alternate_substrate_contract());
+        let second_target_node_id = graph.nodes[second_null_index].node_id.clone();
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+        assert!(
+            graph.set_reference_target_enabled(reference_index, &second_target_node_id, false,)
+        );
+
+        let info = graph
+            .selected_node_info(reference_index)
+            .expect("reference node should have info");
+        let reference_info = info.reference_input.expect("reference info should exist");
+
+        assert_eq!(info.status, NodeStatus::Healthy);
+        assert_eq!(info.output_count, graph.visible_output_count());
+        assert!(reference_info.targets.iter().any(|target| {
+            !target.enabled
+                && target.status == ReferenceDiagnosticStatus::CoordinateIncompatibleRepairable
+        }));
+    }
+
+    #[test]
+    fn missing_coordinate_contract_is_diagnostic_until_disabled_or_fixed() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        graph.nodes[second_null_index].coordinate_contract = None;
+        let second_target_node_id = graph.nodes[second_null_index].node_id.clone();
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+
+        let blocked = graph
+            .selected_node_info(reference_index)
+            .expect("reference node should have info");
+        assert_eq!(blocked.status, NodeStatus::Failed);
+        assert_eq!(blocked.output_count, 0);
+        assert!(
+            graph
+                .reference_coordinate_repair_summary(reference_index)
+                .is_none()
+        );
+
+        assert!(
+            graph.set_reference_target_enabled(reference_index, &second_target_node_id, false,)
+        );
+        let disabled = graph
+            .selected_node_info(reference_index)
+            .expect("reference node should have info");
+        let reference_info = disabled
+            .reference_input
+            .expect("reference info should exist");
+
+        assert_eq!(disabled.status, NodeStatus::Healthy);
+        assert!(reference_info.targets.iter().any(|target| {
+            !target.enabled && target.status == ReferenceDiagnosticStatus::CoordinateContractMissing
+        }));
+    }
+
+    #[test]
+    fn assisted_projection_repair_creates_visible_node_and_retargets_reference() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        graph.nodes[second_null_index].coordinate_contract = Some(alternate_substrate_contract());
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+
+        let projection_index = graph
+            .create_assisted_projection_for_first_repairable_reference_target(reference_index)
+            .expect("repair should create a visible projection node");
+        let projection_node_id = graph.nodes[projection_index].node_id.clone();
+        let reference_index = projection_index + 1;
+        let info = graph
+            .selected_node_info(reference_index)
+            .expect("reference node should have info");
+        let reference_info = info.reference_input.expect("reference info should exist");
+
+        assert_eq!(
+            graph.nodes[projection_index].kind,
+            NodeKind::SubstrateProjection
+        );
+        assert!(
+            graph.nodes[projection_index]
+                .substrate_projection
+                .as_ref()
+                .expect("projection node should carry repair contract")
+                .repair_summary
+                .contains("alternate-markov-pixel-space")
+        );
+        assert_eq!(info.status, NodeStatus::Healthy);
+        assert_eq!(info.output_count, graph.visible_output_count() * 2);
+        assert!(reference_info.targets.iter().any(|target| {
+            target.target.node_id == projection_node_id
+                && target.status == ReferenceDiagnosticStatus::Resolved
+        }));
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        let restored_projection = restored
+            .nodes
+            .iter()
+            .find(|node| node.node_id == projection_node_id)
+            .expect("projection node should round-trip as durable graph state");
+        assert_eq!(restored_projection.kind, NodeKind::SubstrateProjection);
+        assert_eq!(
+            restored_projection
+                .coordinate_contract
+                .as_ref()
+                .expect("projection should keep target coordinate contract"),
+            &SubstrateCoordinateContract::demo_byteplot()
+        );
+    }
+
+    #[test]
     fn reference_target_set_provenance_and_enablement_affect_fingerprint() {
         let mut graph = GraphDocument::sample();
         let first_null_index = graph.add_null_operator_node("OUT_A");
@@ -7211,8 +7697,10 @@ mod tests {
             kind: NodeKind::Filter,
             layout_position: GraphPoint::new(0.5, 0.1),
             generated: None,
+            coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
             null_operator: None,
             reference_input: None,
+            substrate_projection: None,
             python_operator: None,
             procedural_asset: None,
             native_operator: None,

@@ -12,7 +12,7 @@ use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState, GeometryBounds,
     GraphDocument, GraphPoint, GraphStyle, HoudiniNodeBinding, LayerKind, NodeStatus,
     PythonEnvironmentResolveTrigger, PythonEnvironmentStatus, PythonOperatorDependencyStatus,
-    SourceMetadata,
+    SourceMetadata, SubstrateCoordinateContract,
 };
 
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
@@ -594,6 +594,17 @@ impl HoudiniGraphPanel {
             {
                 self.selected_node = index;
             }
+            if graph
+                .reference_coordinate_repair_summary(self.selected_node)
+                .is_some()
+                && ui.button("Repair Projection").clicked()
+                && let Some(index) = graph
+                    .create_assisted_projection_for_first_repairable_reference_target(
+                        self.selected_node,
+                    )
+            {
+                self.selected_node = index;
+            }
             if ui.button("Duplicate Polygons").clicked() {
                 graph.duplicate_layer_view(LayerKind::Polygons, "Polygons Copy");
             }
@@ -942,6 +953,16 @@ impl HoudiniGraphPanel {
                         );
                         ui.end_row();
 
+                        ui.weak("Coordinates");
+                        ui.label(
+                            reference_input
+                                .coordinate_contract
+                                .as_ref()
+                                .map(format_coordinate_contract)
+                                .unwrap_or_else(|| "missing".to_owned()),
+                        );
+                        ui.end_row();
+
                         if let Some(provenance) = reference_input.source_provenance {
                             ui.weak("Target provenance");
                             ui.label(provenance.as_str());
@@ -989,6 +1010,22 @@ impl HoudiniGraphPanel {
                                     .unwrap_or_else(|| "missing".to_owned()),
                             );
                             ui.end_row();
+
+                            ui.weak("Target coordinates");
+                            ui.label(
+                                target
+                                    .coordinate_contract
+                                    .as_ref()
+                                    .map(format_coordinate_contract)
+                                    .unwrap_or_else(|| "missing".to_owned()),
+                            );
+                            ui.end_row();
+
+                            if let Some(expected) = &target.expected_coordinate_contract {
+                                ui.weak("Expected coordinates");
+                                ui.label(format_coordinate_contract(expected));
+                                ui.end_row();
+                            }
                         }
                     }
 
@@ -1371,6 +1408,13 @@ fn format_style(style: GraphStyle) -> String {
     format!(
         "rgb({}, {}, {}), opacity {:.2}, stroke {:.2}",
         style.color.r, style.color.g, style.color.b, style.opacity, style.stroke_scale
+    )
+}
+
+fn format_coordinate_contract(contract: &SubstrateCoordinateContract) -> String {
+    format!(
+        "{} {}x{} {:?}/{:?}",
+        contract.substrate_id, contract.width, contract.height, contract.origin, contract.y_axis
     )
 }
 
