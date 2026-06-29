@@ -612,6 +612,121 @@ impl GraphDocument {
         insert_index
     }
 
+    fn native_operator_node_inputs(
+        &self,
+        node_index: usize,
+    ) -> Option<(&GraphNode, &NativeOperatorNode, &NativeOperatorDeclaration)> {
+        let node = self.nodes.get(node_index)?;
+        let native_operator = node.native_operator.as_ref()?;
+        let declaration = self
+            .native_operator_declarations
+            .iter()
+            .find(|declaration| declaration.operator_id == native_operator.operator_id)?;
+        Some((node, native_operator, declaration))
+    }
+
+    #[allow(dead_code)]
+    pub fn native_operator_cache_key(&self, node_index: usize) -> Option<NativeOperatorCacheKey> {
+        let (node, native_operator, declaration) = self.native_operator_node_inputs(node_index)?;
+        let implementation_digest = declaration.implementation_digest();
+        let parameter_digest = declaration.parameter_digest(node.parameter.value);
+        let input_cache_keys = self.input_cache_keys_for_node(node_index);
+        let host_compatibility_version = declaration.host_compatibility_version.clone();
+        let capability_digest =
+            declaration.capability_digest(&self.native_operator_trust.granted_capabilities);
+        let key_digest = stable_digest(&serde_json::json!({
+            "operator_id": &declaration.operator_id,
+            "implementation_digest": &implementation_digest,
+            "declaration_version": &declaration.version,
+            "parameter_digest": &parameter_digest,
+            "input_cache_keys": &input_cache_keys,
+            "host_compatibility_version": &host_compatibility_version,
+            "capability_digest": &capability_digest,
+        }));
+
+        Some(NativeOperatorCacheKey {
+            key_digest,
+            operator_id: declaration.operator_id.clone(),
+            node_instance_id: native_operator.instance_id.clone(),
+            implementation_digest,
+            declaration_version: declaration.version.clone(),
+            parameter_digest,
+            input_cache_keys,
+            host_compatibility_version,
+            capability_digest,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn record_native_operator_output(
+        &mut self,
+        node_index: usize,
+        output_counts: NativeOperatorOutputCounts,
+    ) -> Option<NativeOperatorProvenanceRecord> {
+        let (_, native_operator, declaration) = self.native_operator_node_inputs(node_index)?;
+        let cache_key = self.native_operator_cache_key(node_index)?;
+        let record = NativeOperatorProvenanceRecord {
+            operator_id: declaration.operator_id.clone(),
+            version: declaration.version.clone(),
+            node_instance_id: native_operator.instance_id.clone(),
+            implementation_digest: cache_key.implementation_digest.clone(),
+            host_compatibility_version: cache_key.host_compatibility_version.clone(),
+            parameter_digest: cache_key.parameter_digest.clone(),
+            input_cache_keys: cache_key.input_cache_keys.clone(),
+            timestamp: current_timestamp_millis(),
+            output_counts,
+        };
+
+        if let Some(node) = self.nodes.get_mut(node_index)
+            && let Some(native_operator) = node.native_operator.as_mut()
+        {
+            native_operator.cache_key = Some(cache_key.clone());
+            native_operator.provenance = Some(record.clone());
+            native_operator.provenance_summary = Some(record.summary());
+            native_operator.last_valid_cache_key = Some(cache_key.key_digest);
+            native_operator.last_failure_summary = None;
+        }
+
+        Some(record)
+    }
+
+    #[allow(dead_code)]
+    pub fn refresh_native_operator_cache_statuses(&mut self) {
+        for index in 0..self.nodes.len() {
+            let Some((_, native_operator, declaration)) = self.native_operator_node_inputs(index)
+            else {
+                continue;
+            };
+            let version_status = if declaration.version
+                == native_operator
+                    .cache_key
+                    .as_ref()
+                    .map(|key| key.declaration_version.as_str())
+                    .unwrap_or(declaration.version.as_str())
+            {
+                OperatorVersionStatus::Current
+            } else {
+                OperatorVersionStatus::NewerAvailable
+            };
+            let cache_stale = native_operator
+                .cache_key
+                .as_ref()
+                .zip(self.native_operator_cache_key(index).as_ref())
+                .is_some_and(|(recorded, current)| recorded.key_digest != current.key_digest);
+
+            if let Some(node) = self.nodes.get_mut(index)
+                && let Some(native_operator) = node.native_operator.as_mut()
+            {
+                native_operator.version_status = version_status;
+                if cache_stale {
+                    node.evaluation.state = EvaluationState::Stale;
+                    node.evaluation.message =
+                        Some("Native operator cache key changed after the last run.".to_owned());
+                }
+            }
+        }
+    }
+
     fn native_operator_load_status(&self, operator_id: Option<&str>) -> NativeOperatorLoadStatus {
         let Some(operator_id) = operator_id else {
             return NativeOperatorLoadStatus::DeclarationMissing;
@@ -897,17 +1012,26 @@ impl GraphDocument {
             .iter()
             .take(node_index)
             .filter(|node| node.participates_in_output)
-            .map(|node| match &node.python_operator {
-                Some(python_operator) => python_operator
-                    .cache_key
-                    .as_ref()
-                    .map(|cache_key| cache_key.key_digest.clone())
-                    .unwrap_or_else(|| format!("{}:uncached", python_operator.instance_id)),
-                None => stable_digest(&serde_json::json!({
-                    "kind": node.kind.as_str(),
-                    "parameter": node.parameter.value,
-                    "rule": &node.parameter.rule_spec,
-                })),
+            .map(|node| {
+                if let Some(python_operator) = &node.python_operator {
+                    python_operator
+                        .cache_key
+                        .as_ref()
+                        .map(|cache_key| cache_key.key_digest.clone())
+                        .unwrap_or_else(|| format!("{}:uncached", python_operator.instance_id))
+                } else if let Some(native_operator) = &node.native_operator {
+                    native_operator
+                        .cache_key
+                        .as_ref()
+                        .map(|cache_key| cache_key.key_digest.clone())
+                        .unwrap_or_else(|| format!("{}:uncached", native_operator.instance_id))
+                } else {
+                    stable_digest(&serde_json::json!({
+                        "kind": node.kind.as_str(),
+                        "parameter": node.parameter.value,
+                        "rule": &node.parameter.rule_spec,
+                    }))
+                }
             })
             .collect()
     }
@@ -1442,6 +1566,11 @@ impl GraphDocument {
                         provenance_summary: declaration
                             .map(|declaration| declaration.provenance.summary())
                             .unwrap_or_else(|| "none".to_owned()),
+                        output_provenance_summary: native_node.provenance_summary.clone(),
+                        cache_key_summary: native_node
+                            .cache_key
+                            .as_ref()
+                            .map(NativeOperatorCacheKey::summary),
                         failure_modes: declaration
                             .map(|declaration| {
                                 declaration
@@ -2721,6 +2850,9 @@ impl GraphNode {
                 instance_id,
                 operator_id,
                 version_status: OperatorVersionStatus::Current,
+                cache_key: None,
+                provenance: None,
+                provenance_summary: None,
                 last_valid_cache_key: None,
                 last_failure_summary: None,
             }),
@@ -2772,6 +2904,12 @@ pub(crate) struct NativeOperatorNode {
     pub operator_id: String,
     #[serde(default)]
     pub version_status: OperatorVersionStatus,
+    #[serde(default)]
+    pub cache_key: Option<NativeOperatorCacheKey>,
+    #[serde(default)]
+    pub provenance: Option<NativeOperatorProvenanceRecord>,
+    #[serde(default)]
+    pub provenance_summary: Option<String>,
     pub last_valid_cache_key: Option<String>,
     pub last_failure_summary: Option<String>,
 }
@@ -2847,6 +2985,63 @@ impl PythonOperatorProvenanceRecord {
             self.operator_id, self.version, self.output_counts.geometry_records
         )
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct NativeOperatorCacheKey {
+    pub key_digest: String,
+    pub operator_id: String,
+    pub node_instance_id: String,
+    pub implementation_digest: String,
+    pub declaration_version: String,
+    pub parameter_digest: String,
+    pub input_cache_keys: Vec<String>,
+    pub host_compatibility_version: String,
+    pub capability_digest: String,
+}
+
+impl NativeOperatorCacheKey {
+    fn summary(&self) -> String {
+        format!(
+            "{} {} on host {} with {} input key(s)",
+            self.operator_id,
+            self.key_digest,
+            self.host_compatibility_version,
+            self.input_cache_keys.len()
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct NativeOperatorProvenanceRecord {
+    pub operator_id: String,
+    pub version: String,
+    pub node_instance_id: String,
+    pub implementation_digest: String,
+    pub host_compatibility_version: String,
+    pub parameter_digest: String,
+    pub input_cache_keys: Vec<String>,
+    pub timestamp: u128,
+    pub output_counts: NativeOperatorOutputCounts,
+}
+
+impl NativeOperatorProvenanceRecord {
+    fn summary(&self) -> String {
+        format!(
+            "{} {} produced {} geometry record(s) with {}",
+            self.operator_id,
+            self.version,
+            self.output_counts.geometry_records,
+            self.implementation_digest
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct NativeOperatorOutputCounts {
+    pub geometry_records: usize,
+    pub attribute_records: usize,
+    pub layer_records: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -2961,6 +3156,28 @@ pub(crate) struct NativeOperatorDeclaration {
     pub provenance: NativeOperatorProvenance,
     pub failure_modes: Vec<NativeOperatorFailureMode>,
     pub documentation: String,
+}
+
+impl NativeOperatorDeclaration {
+    fn implementation_digest(&self) -> String {
+        self.provenance.build_digest.clone().unwrap_or_else(|| {
+            stable_digest(&serde_json::json!({ "implementation": &self.implementation }))
+        })
+    }
+
+    fn parameter_digest(&self, node_parameter_value: f32) -> String {
+        stable_digest(&serde_json::json!({
+            "node_parameter_value": node_parameter_value,
+            "parameters": &self.parameters,
+        }))
+    }
+
+    fn capability_digest(&self, granted_capabilities: &[NativeOperatorCapability]) -> String {
+        stable_digest(&serde_json::json!({
+            "declared_capabilities": &self.capabilities,
+            "granted_capabilities": granted_capabilities,
+        }))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -3904,6 +4121,8 @@ pub(crate) struct NativeOperatorNodeInfo {
     pub parameters: Vec<String>,
     pub capabilities: Vec<String>,
     pub provenance_summary: String,
+    pub output_provenance_summary: Option<String>,
+    pub cache_key_summary: Option<String>,
     pub failure_modes: Vec<String>,
     pub version_status: OperatorVersionStatus,
     pub load_status: NativeOperatorLoadStatus,
@@ -4661,11 +4880,11 @@ mod tests {
         HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
         HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
         NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
-        NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorProvenance,
-        NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind, NodeStatus,
-        OperatorVersionStatus, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
-        ProceduralAssetSource, ProceduralAssetSubgraphReference, PythonDependencyHealth,
-        PythonEnvironmentDescriptor, PythonEnvironmentResolveState,
+        NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
+        NativeOperatorProvenance, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
+        NodeStatus, OperatorVersionStatus, ProceduralAssetDeclaration,
+        ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
+        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentResolveState,
         PythonEnvironmentResolveTrigger, PythonEnvironmentResolver, PythonEnvironmentStatus,
         PythonOperatorCapability, PythonOperatorDataKind, PythonOperatorDeclaration,
         PythonOperatorDependencies, PythonOperatorDependencyStatus, PythonOperatorEntryPoint,
@@ -6799,6 +7018,220 @@ mod tests {
         assert_eq!(
             load_status,
             NativeOperatorLoadStatus::ImplementationDigestMissing
+        );
+    }
+
+    #[test]
+    fn native_operator_cache_key_invalidates_on_explicit_inputs() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        trust_sample_native_operator(&mut graph);
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+
+        let base_key = graph
+            .native_operator_cache_key(node_index)
+            .expect("cache key should derive from declaration and trust settings");
+        assert_eq!(base_key.operator_id, "vy.native.simplify_curves");
+        assert_eq!(base_key.declaration_version, "0.1.0");
+        assert_eq!(base_key.implementation_digest, "native:simplify-curves:001");
+        assert_eq!(
+            base_key.host_compatibility_version,
+            "re_viewer-houdini-graph-0.1"
+        );
+        assert_eq!(base_key.input_cache_keys.len(), node_index);
+
+        graph.nodes[node_index].parameter.value = 0.75;
+        let changed_parameter = graph
+            .native_operator_cache_key(node_index)
+            .expect("cache key should update after parameter changes");
+        assert_ne!(changed_parameter.key_digest, base_key.key_digest);
+        assert_ne!(
+            changed_parameter.parameter_digest,
+            base_key.parameter_digest
+        );
+
+        graph.nodes[node_index].parameter.value = 0.0;
+        graph.native_operator_trust.granted_capabilities =
+            vec![NativeOperatorCapability::GeometryRead];
+        let changed_capabilities = graph
+            .native_operator_cache_key(node_index)
+            .expect("cache key should update after capability grants change");
+        assert_ne!(changed_capabilities.key_digest, base_key.key_digest);
+        assert_ne!(
+            changed_capabilities.capability_digest,
+            base_key.capability_digest
+        );
+
+        graph.native_operator_trust.granted_capabilities =
+            sample_native_operator_declaration().capabilities;
+        graph.native_operator_declarations[0]
+            .provenance
+            .build_digest = Some("native:simplify-curves:002".to_owned());
+        let changed_implementation = graph
+            .native_operator_cache_key(node_index)
+            .expect("cache key should update after implementation digest changes");
+        assert_ne!(changed_implementation.key_digest, base_key.key_digest);
+        assert_ne!(
+            changed_implementation.implementation_digest,
+            base_key.implementation_digest
+        );
+    }
+
+    #[test]
+    fn native_operator_provenance_persists_typed_output_metadata() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        trust_sample_native_operator(&mut graph);
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+
+        let record = graph
+            .record_native_operator_output(
+                node_index,
+                NativeOperatorOutputCounts {
+                    geometry_records: 4,
+                    attribute_records: 2,
+                    layer_records: 1,
+                },
+            )
+            .expect("provenance should be recorded for native operator");
+
+        assert_eq!(record.operator_id, "vy.native.simplify_curves");
+        assert_eq!(record.implementation_digest, "native:simplify-curves:001");
+        assert_eq!(
+            record.host_compatibility_version,
+            "re_viewer-houdini-graph-0.1"
+        );
+        assert_eq!(record.output_counts.geometry_records, 4);
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist")
+            .native_operator
+            .expect("native info should exist");
+        assert!(
+            info.cache_key_summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("vy.native.simplify_curves"))
+        );
+        assert!(
+            info.output_provenance_summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("produced 4 geometry"))
+        );
+
+        let json = graph.to_sidecar_json().unwrap();
+        assert!(json.contains("cache_key"));
+        assert!(json.contains("provenance"));
+        assert!(json.contains("native:simplify-curves:001"));
+        assert!(!json.contains("cached_output"));
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        let restored_native = restored
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::NativeOperator)
+            .expect("native node should restore")
+            .native_operator
+            .as_ref()
+            .expect("native payload should restore");
+        assert_eq!(
+            restored_native
+                .cache_key
+                .as_ref()
+                .expect("cache key should restore")
+                .implementation_digest,
+            "native:simplify-curves:001"
+        );
+        assert_eq!(
+            restored_native
+                .provenance
+                .as_ref()
+                .expect("provenance should restore")
+                .output_counts
+                .geometry_records,
+            4
+        );
+    }
+
+    #[test]
+    fn native_operator_host_change_blocks_run_and_marks_cached_output_stale() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        trust_sample_native_operator(&mut graph);
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        graph
+            .record_native_operator_output(
+                node_index,
+                NativeOperatorOutputCounts {
+                    geometry_records: 4,
+                    attribute_records: 0,
+                    layer_records: 0,
+                },
+            )
+            .expect("native output should be recorded");
+
+        graph.native_operator_declarations[0].host_compatibility_version = "old-host".to_owned();
+        graph.refresh_native_operator_cache_statuses();
+        graph.request_node_run(node_index);
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist");
+        let native = info.native_operator.expect("native info should exist");
+        assert_eq!(
+            native.load_status,
+            NativeOperatorLoadStatus::HostIncompatible
+        );
+        assert_eq!(info.status, NodeStatus::Failed);
+        assert_eq!(info.evaluation.state, EvaluationState::Manual);
+        assert_eq!(
+            info.evaluation.message.as_deref(),
+            Some("Native operator host compatibility version does not match this viewer.")
+        );
+        assert!(
+            native
+                .cache_key_summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("re_viewer-houdini-graph-0.1"))
+        );
+    }
+
+    #[test]
+    fn native_operator_cache_status_marks_parameter_and_upstream_changes_stale() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        trust_sample_native_operator(&mut graph);
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        graph
+            .record_native_operator_output(
+                node_index,
+                NativeOperatorOutputCounts {
+                    geometry_records: 4,
+                    attribute_records: 0,
+                    layer_records: 0,
+                },
+            )
+            .expect("native output should be recorded");
+
+        graph.nodes[1].parameter.value = 0.25;
+        graph.refresh_native_operator_cache_statuses();
+
+        assert_eq!(
+            graph.nodes[node_index].evaluation.state,
+            EvaluationState::Stale
+        );
+        assert_eq!(
+            graph.nodes[node_index].evaluation.message.as_deref(),
+            Some("Native operator cache key changed after the last run.")
         );
     }
 

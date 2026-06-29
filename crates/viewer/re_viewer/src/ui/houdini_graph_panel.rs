@@ -910,6 +910,19 @@ impl HoudiniGraphPanel {
                         ui.label(&native_operator.provenance_summary);
                         ui.end_row();
 
+                        if let Some(output_provenance) = &native_operator.output_provenance_summary
+                        {
+                            ui.weak("Last output provenance");
+                            ui.label(output_provenance);
+                            ui.end_row();
+                        }
+
+                        if let Some(cache_key) = &native_operator.cache_key_summary {
+                            ui.weak("Cache key");
+                            ui.label(cache_key);
+                            ui.end_row();
+                        }
+
                         ui.weak("Failure modes");
                         ui.label(format_list(&native_operator.failure_modes));
                         ui.end_row();
