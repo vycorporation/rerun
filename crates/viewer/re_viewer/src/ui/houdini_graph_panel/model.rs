@@ -34,6 +34,8 @@ pub(crate) struct GraphDocument {
     pub geometry: Vec<Geometry>,
     pub recording_geometry: Vec<Geometry>,
     pub python_operator_declarations: Vec<PythonOperatorDeclaration>,
+    pub procedural_asset_declarations: Vec<ProceduralAssetDeclaration>,
+    pub native_operator_declarations: Vec<NativeOperatorDeclaration>,
     pub python_environment: PythonEnvironmentDescriptor,
 }
 
@@ -194,6 +196,8 @@ impl GraphDocument {
             geometry,
             recording_geometry: Vec::new(),
             python_operator_declarations: Vec::new(),
+            procedural_asset_declarations: Vec::new(),
+            native_operator_declarations: Vec::new(),
             python_environment: PythonEnvironmentDescriptor::default(),
         }
     }
@@ -1968,6 +1972,10 @@ struct HoudiniGraphSidecar {
     #[serde(default)]
     python_operator_declarations: Vec<PythonOperatorDeclaration>,
     #[serde(default)]
+    procedural_asset_declarations: Vec<ProceduralAssetDeclaration>,
+    #[serde(default)]
+    native_operator_declarations: Vec<NativeOperatorDeclaration>,
+    #[serde(default)]
     python_environment: PythonEnvironmentDescriptor,
 }
 
@@ -2012,6 +2020,8 @@ impl HoudiniGraphSidecar {
             demo_geometry: graph.geometry.clone(),
             recording_geometry: graph.recording_geometry.clone(),
             python_operator_declarations: graph.python_operator_declarations.clone(),
+            procedural_asset_declarations: graph.procedural_asset_declarations.clone(),
+            native_operator_declarations: graph.native_operator_declarations.clone(),
             python_environment: graph.python_environment.clone(),
         }
     }
@@ -2037,6 +2047,8 @@ impl HoudiniGraphSidecar {
         graph.recording_geometry = self.recording_geometry;
         graph.style = self.style;
         graph.python_operator_declarations = self.python_operator_declarations;
+        graph.procedural_asset_declarations = self.procedural_asset_declarations;
+        graph.native_operator_declarations = self.native_operator_declarations;
         graph.python_environment = self.python_environment;
 
         for node_snapshot in self.nodes {
@@ -2273,6 +2285,141 @@ pub(crate) struct PythonOperatorOutputCounts {
     pub geometry_records: usize,
     pub attribute_records: usize,
     pub layer_records: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ProceduralAssetDeclaration {
+    pub asset_id: String,
+    pub display_name: String,
+    pub version: String,
+    pub description: String,
+    pub labels: Vec<String>,
+    pub help: String,
+    pub source: ProceduralAssetSource,
+    pub inputs: Vec<HoudiniOperatorPort>,
+    pub outputs: Vec<HoudiniOperatorPort>,
+    pub promoted_parameters: Vec<HoudiniParameterDeclaration>,
+    pub wrapped_subgraph: ProceduralAssetSubgraphReference,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ProceduralAssetSource {
+    pub project_path: String,
+    pub author: Option<String>,
+    pub created_at: Option<String>,
+    pub source_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ProceduralAssetSubgraphReference {
+    pub graph_id: String,
+    pub output_node_id: String,
+    pub captures_native_cubic_bezier: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct NativeOperatorDeclaration {
+    pub operator_id: String,
+    pub display_name: String,
+    pub version: String,
+    pub host_compatibility_version: String,
+    pub implementation: NativeOperatorImplementation,
+    pub inputs: Vec<HoudiniOperatorPort>,
+    pub outputs: Vec<HoudiniOperatorPort>,
+    pub parameters: Vec<HoudiniParameterDeclaration>,
+    pub capabilities: Vec<NativeOperatorCapability>,
+    pub provenance: NativeOperatorProvenance,
+    pub failure_modes: Vec<NativeOperatorFailureMode>,
+    pub documentation: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum NativeOperatorImplementation {
+    DynamicLibrary { path: String, symbol: String },
+    Builtin { name: String },
+    WasmComponent { path: String, export: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum NativeOperatorCapability {
+    GeometryRead,
+    GeometryWrite,
+    FileRead,
+    FileWrite,
+    Network,
+    Gpu,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct NativeOperatorProvenance {
+    pub source_repository: Option<String>,
+    pub source_revision: Option<String>,
+    pub build_digest: Option<String>,
+    pub vendor: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct NativeOperatorFailureMode {
+    pub code: String,
+    pub summary: String,
+    pub recoverable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct HoudiniOperatorPort {
+    pub name: String,
+    pub data_kind: HoudiniDataKind,
+    pub required: bool,
+    pub help: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum HoudiniDataKind {
+    GeometryTable,
+    AttributeTable,
+    Scalar,
+    String,
+    LayerStyle,
+}
+
+impl HoudiniDataKind {
+    #[allow(dead_code)]
+    pub fn preserves_native_cubic_bezier(self) -> bool {
+        matches!(self, Self::GeometryTable)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct HoudiniParameterDeclaration {
+    pub name: String,
+    pub kind: HoudiniParameterKind,
+    pub default_value: HoudiniParameterValue,
+    pub range: Option<HoudiniNumericRange>,
+    pub allowed_values: Vec<String>,
+    pub help: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum HoudiniParameterKind {
+    Float,
+    Bool,
+    String,
+    Enum,
+    FilePath,
+    AttributeSelector,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum HoudiniParameterValue {
+    Float(f32),
+    Bool(bool),
+    String(String),
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct HoudiniNumericRange {
+    pub min: f32,
+    pub max: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3698,18 +3845,22 @@ mod tests {
     use super::{
         AttributeTableQuery, AttributeTableSort, EvaluationState, ExportGeometry,
         GeneratedNodeSource, Geometry, GeometryKind, GraphColor, GraphDocument, GraphNode,
-        GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema, HoudiniGeometryRecord,
-        HoudiniGeometrySchema, LayerKind, NodeEvaluation, NodeKind, NodeParameter,
-        NodeParameterKind, NodeStatus, PythonDependencyHealth, PythonEnvironmentDescriptor,
-        PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
-        PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
-        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorDependencyStatus,
-        PythonOperatorEntryPoint, PythonOperatorNumericRange, PythonOperatorOutputCounts,
-        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
-        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
-        PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
-        RerunSceneDebugItem, RerunSceneItem, SourceProvenance, ViewerGeometry,
-        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema, HoudiniDataKind,
+        HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
+        HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
+        NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
+        NativeOperatorImplementation, NativeOperatorProvenance, NodeEvaluation, NodeKind,
+        NodeParameter, NodeParameterKind, NodeStatus, ProceduralAssetDeclaration,
+        ProceduralAssetSource, ProceduralAssetSubgraphReference, PythonDependencyHealth,
+        PythonEnvironmentDescriptor, PythonEnvironmentResolveState,
+        PythonEnvironmentResolveTrigger, PythonEnvironmentResolver, PythonEnvironmentStatus,
+        PythonOperatorCapability, PythonOperatorDataKind, PythonOperatorDeclaration,
+        PythonOperatorDependencies, PythonOperatorDependencyStatus, PythonOperatorEntryPoint,
+        PythonOperatorNumericRange, PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
+        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
+        PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
+        PythonRequirementsSource, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
+        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -5473,6 +5624,100 @@ mod tests {
     }
 
     #[test]
+    fn procedural_asset_declarations_round_trip_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(restored.procedural_asset_declarations.len(), 1);
+        assert_eq!(
+            restored.procedural_asset_declarations[0],
+            graph.procedural_asset_declarations[0]
+        );
+        assert!(json.contains("procedural_asset_declarations"));
+        assert!(json.contains("vy.asset.curve_cleanup"));
+        assert!(
+            restored.procedural_asset_declarations[0].outputs[0]
+                .data_kind
+                .preserves_native_cubic_bezier()
+        );
+    }
+
+    #[test]
+    fn native_operator_declarations_round_trip_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(restored.native_operator_declarations.len(), 1);
+        assert_eq!(
+            restored.native_operator_declarations[0],
+            graph.native_operator_declarations[0]
+        );
+        assert!(json.contains("native_operator_declarations"));
+        assert!(json.contains("vy.native.simplify_curves"));
+        assert!(
+            restored.native_operator_declarations[0].outputs[0]
+                .data_kind
+                .preserves_native_cubic_bezier()
+        );
+    }
+
+    #[test]
+    fn sidecar_without_asset_or_native_declarations_still_loads() {
+        let graph = GraphDocument::sample();
+        let mut value =
+            serde_json::from_str::<serde_json::Value>(&graph.to_sidecar_json().unwrap())
+                .expect("sidecar should be valid json");
+        let object = value.as_object_mut().expect("sidecar should be an object");
+        object.remove("procedural_asset_declarations");
+        object.remove("native_operator_declarations");
+        let json = serde_json::to_string_pretty(&value).unwrap();
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert!(restored.procedural_asset_declarations.is_empty());
+        assert!(restored.native_operator_declarations.is_empty());
+    }
+
+    #[test]
+    fn asset_and_native_geometry_contracts_keep_native_cubic_bezier() {
+        let asset = sample_procedural_asset_declaration();
+        let native = sample_native_operator_declaration();
+
+        assert!(
+            asset
+                .outputs
+                .iter()
+                .any(|port| port.data_kind.preserves_native_cubic_bezier())
+        );
+        assert!(
+            native
+                .inputs
+                .iter()
+                .any(|port| port.data_kind.preserves_native_cubic_bezier())
+        );
+        assert!(
+            native
+                .outputs
+                .iter()
+                .any(|port| port.data_kind.preserves_native_cubic_bezier())
+        );
+        assert!(asset.wrapped_subgraph.captures_native_cubic_bezier);
+    }
+
+    #[test]
     fn python_environment_descriptor_round_trips_through_sidecar() {
         let mut graph = GraphDocument::sample();
         graph.python_environment = sample_python_environment_descriptor();
@@ -5599,6 +5844,113 @@ mod tests {
             },
             capabilities: vec![PythonOperatorCapability::FileRead],
             help: "Smooths curve control points without mutating viewer state.".to_owned(),
+        }
+    }
+
+    fn sample_procedural_asset_declaration() -> ProceduralAssetDeclaration {
+        ProceduralAssetDeclaration {
+            asset_id: "vy.asset.curve_cleanup".to_owned(),
+            display_name: "Curve cleanup".to_owned(),
+            version: "0.1.0".to_owned(),
+            description: "Reusable graph asset for cleaning polygon and native cubic curve layers."
+                .to_owned(),
+            labels: vec!["curves".to_owned(), "cleanup".to_owned()],
+            help: "Promotes the score threshold and stroke scale from a wrapped Houdini graph."
+                .to_owned(),
+            source: ProceduralAssetSource {
+                project_path: "assets/curve_cleanup.houdini_graph.json".to_owned(),
+                author: Some("vy".to_owned()),
+                created_at: Some("2026-06-29T00:00:00Z".to_owned()),
+                source_digest: Some("asset:curve-cleanup:001".to_owned()),
+            },
+            inputs: vec![geometry_port("geometry", "Input graph geometry.")],
+            outputs: vec![geometry_port(
+                "geometry",
+                "Output geometry preserving polygons and native cubic Beziers.",
+            )],
+            promoted_parameters: vec![
+                HoudiniParameterDeclaration {
+                    name: "minimum_score".to_owned(),
+                    kind: HoudiniParameterKind::Float,
+                    default_value: HoudiniParameterValue::Float(0.55),
+                    range: Some(HoudiniNumericRange { min: 0.0, max: 1.0 }),
+                    allowed_values: Vec::new(),
+                    help: "Promoted filter threshold.".to_owned(),
+                },
+                HoudiniParameterDeclaration {
+                    name: "layer_name".to_owned(),
+                    kind: HoudiniParameterKind::String,
+                    default_value: HoudiniParameterValue::String("Clean curves".to_owned()),
+                    range: None,
+                    allowed_values: Vec::new(),
+                    help: "Output layer label.".to_owned(),
+                },
+            ],
+            wrapped_subgraph: ProceduralAssetSubgraphReference {
+                graph_id: "graph.curve_cleanup".to_owned(),
+                output_node_id: "output.main".to_owned(),
+                captures_native_cubic_bezier: true,
+            },
+        }
+    }
+
+    fn sample_native_operator_declaration() -> NativeOperatorDeclaration {
+        NativeOperatorDeclaration {
+            operator_id: "vy.native.simplify_curves".to_owned(),
+            display_name: "Simplify curves".to_owned(),
+            version: "0.1.0".to_owned(),
+            host_compatibility_version: "re_viewer-houdini-graph-0.1".to_owned(),
+            implementation: NativeOperatorImplementation::DynamicLibrary {
+                path: "plugins/native/libvy_simplify_curves.dylib".to_owned(),
+                symbol: "vy_houdini_operator_entry".to_owned(),
+            },
+            inputs: vec![geometry_port(
+                "geometry",
+                "Input geometry table with polygons and native cubic Beziers.",
+            )],
+            outputs: vec![geometry_port(
+                "geometry",
+                "Simplified geometry table preserving native cubic Bezier records.",
+            )],
+            parameters: vec![HoudiniParameterDeclaration {
+                name: "tolerance".to_owned(),
+                kind: HoudiniParameterKind::Float,
+                default_value: HoudiniParameterValue::Float(0.1),
+                range: Some(HoudiniNumericRange {
+                    min: 0.0,
+                    max: 10.0,
+                }),
+                allowed_values: Vec::new(),
+                help: "Simplification tolerance in graph units.".to_owned(),
+            }],
+            capabilities: vec![
+                NativeOperatorCapability::GeometryRead,
+                NativeOperatorCapability::GeometryWrite,
+            ],
+            provenance: NativeOperatorProvenance {
+                source_repository: Some("vycorporation/rerun".to_owned()),
+                source_revision: Some("native-plugin-spike".to_owned()),
+                build_digest: Some("native:simplify-curves:001".to_owned()),
+                vendor: Some("vy".to_owned()),
+            },
+            failure_modes: vec![NativeOperatorFailureMode {
+                code: "invalid_geometry".to_owned(),
+                summary: "Input geometry table did not match the Houdini geometry schema."
+                    .to_owned(),
+                recoverable: true,
+            }],
+            documentation:
+                "Trusted native operator declaration only; loading happens in a later issue."
+                    .to_owned(),
+        }
+    }
+
+    fn geometry_port(name: &str, help: &str) -> HoudiniOperatorPort {
+        HoudiniOperatorPort {
+            name: name.to_owned(),
+            data_kind: HoudiniDataKind::GeometryTable,
+            required: true,
+            help: help.to_owned(),
         }
     }
 
