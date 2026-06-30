@@ -48,6 +48,8 @@ pub(crate) struct HoudiniGraphPanel {
     selected_node: usize,
     active_workspace: HoudiniGraphWorkspace,
     dragging_node: Option<usize>,
+    dragging_annotation: Option<usize>,
+    resizing_annotation: Option<usize>,
     last_parquet_path: Option<String>,
     parquet_status: Option<String>,
     graph_document_status: Option<String>,
@@ -86,6 +88,8 @@ impl Default for HoudiniGraphPanel {
             selected_node: 1,
             active_workspace: HoudiniGraphWorkspace::Graph,
             dragging_node: None,
+            dragging_annotation: None,
+            resizing_annotation: None,
             last_parquet_path: None,
             parquet_status: None,
             graph_document_status: None,
@@ -1254,6 +1258,7 @@ impl HoudiniGraphPanel {
         let layout_rect = canvas_rect.shrink2(egui::vec2(12.0, 10.0));
         let node_size = Vec2::new(116.0, 48.0);
         let mut node_rects = layout_node_rects(graph, layout_rect, node_size);
+        let annotation_rects = layout_annotation_rects(graph, layout_rect);
         let generated_lane_y = layout_rect.top() + layout_rect.height() * 0.82;
         painter.line_segment(
             [
@@ -1277,6 +1282,8 @@ impl HoudiniGraphPanel {
         if let Some(pointer_pos) = response.interact_pointer_pos() {
             if response.clicked() || response.drag_started() {
                 self.dragging_node = None;
+                self.dragging_annotation = None;
+                self.resizing_annotation = None;
                 let mut hit_node = false;
                 for (index, node_rect) in node_rects.iter().enumerate() {
                     if node_rect.contains(pointer_pos) {
@@ -1287,7 +1294,24 @@ impl HoudiniGraphPanel {
                         break;
                     }
                 }
-                if response.clicked() && !hit_node && !self.node_info_pinned {
+
+                let mut hit_annotation = false;
+                if !hit_node {
+                    for (index, annotation_rect) in annotation_rects.iter().enumerate().rev() {
+                        if annotation_resize_handle_rect(*annotation_rect).contains(pointer_pos) {
+                            self.resizing_annotation = Some(index);
+                            hit_annotation = true;
+                            break;
+                        }
+                        if annotation_rect.contains(pointer_pos) {
+                            self.dragging_annotation = Some(index);
+                            hit_annotation = true;
+                            break;
+                        }
+                    }
+                }
+
+                if response.clicked() && !hit_node && !hit_annotation && !self.node_info_pinned {
                     self.node_info_open = false;
                 }
             }
@@ -1299,12 +1323,34 @@ impl HoudiniGraphPanel {
                         unmap_node_layout_point(layout_rect, pointer_pos, node_size),
                     );
                     node_rects = layout_node_rects(graph, layout_rect, node_size);
+                } else if let Some(resizing_annotation) = self.resizing_annotation {
+                    if let Some(annotation) = graph.annotations.get_mut(resizing_annotation) {
+                        let pointer_delta = ui.input(|input| input.pointer.delta());
+                        annotation.size.x = (annotation.size.x
+                            + pointer_delta.x / layout_rect.width())
+                        .clamp(0.08, 0.95);
+                        annotation.size.y = (annotation.size.y
+                            + pointer_delta.y / layout_rect.height())
+                        .clamp(0.08, 0.95);
+                    }
+                } else if let Some(dragging_annotation) = self.dragging_annotation
+                    && let Some(annotation) = graph.annotations.get_mut(dragging_annotation)
+                {
+                    let pointer_delta = ui.input(|input| input.pointer.delta());
+                    annotation.position.x = (annotation.position.x
+                        + pointer_delta.x / layout_rect.width())
+                    .clamp(0.0, 0.95);
+                    annotation.position.y = (annotation.position.y
+                        + pointer_delta.y / layout_rect.height())
+                    .clamp(0.0, 0.95);
                 }
             }
         }
 
         if ui.input(|input| input.pointer.any_released()) {
             self.dragging_node = None;
+            self.dragging_annotation = None;
+            self.resizing_annotation = None;
         }
 
         let connector_color = ui.visuals().widgets.noninteractive.fg_stroke.color;
@@ -2370,6 +2416,14 @@ fn layout_node_rects(graph: &GraphDocument, rect: Rect, node_size: Vec2) -> Vec<
     node_rects
 }
 
+fn layout_annotation_rects(graph: &GraphDocument, rect: Rect) -> Vec<Rect> {
+    graph
+        .annotations
+        .iter()
+        .map(|annotation| display_annotation_rect(rect, annotation))
+        .collect()
+}
+
 fn map_annotation_rect(rect: Rect, position: GraphPoint, size: GraphPoint) -> Rect {
     let left = rect.left() + rect.width() * position.x.clamp(0.0, 1.0);
     let top = rect.top() + rect.height() * position.y.clamp(0.0, 1.0);
@@ -2378,22 +2432,32 @@ fn map_annotation_rect(rect: Rect, position: GraphPoint, size: GraphPoint) -> Re
     Rect::from_min_size(Pos2::new(left, top), egui::vec2(width, height))
 }
 
-fn draw_graph_annotation(
-    painter: &egui::Painter,
-    layout_rect: Rect,
-    annotation: &self::model::GraphAnnotation,
-    visuals: &egui::Visuals,
-) {
-    let full_annotation_rect =
-        map_annotation_rect(layout_rect, annotation.position, annotation.size);
-    let annotation_rect = if annotation.collapsed {
+fn display_annotation_rect(rect: Rect, annotation: &self::model::GraphAnnotation) -> Rect {
+    let full_annotation_rect = map_annotation_rect(rect, annotation.position, annotation.size);
+    if annotation.collapsed {
         Rect::from_min_size(
             full_annotation_rect.min,
             egui::vec2(full_annotation_rect.width(), 20.0),
         )
     } else {
         full_annotation_rect
-    };
+    }
+}
+
+fn annotation_resize_handle_rect(annotation_rect: Rect) -> Rect {
+    Rect::from_min_size(
+        annotation_rect.right_bottom() - egui::vec2(12.0, 12.0),
+        egui::vec2(12.0, 12.0),
+    )
+}
+
+fn draw_graph_annotation(
+    painter: &egui::Painter,
+    layout_rect: Rect,
+    annotation: &self::model::GraphAnnotation,
+    visuals: &egui::Visuals,
+) {
+    let annotation_rect = display_annotation_rect(layout_rect, annotation);
     match annotation.kind {
         GraphAnnotationKind::NetworkBox => {
             let body_fill = Color32::from_rgba_unmultiplied(150, 150, 150, 72);
@@ -2418,6 +2482,7 @@ fn draw_graph_annotation(
                 FontId::proportional(12.0),
                 visuals.text_color(),
             );
+            draw_annotation_resize_handle(painter, annotation_rect, stroke.color);
         }
         GraphAnnotationKind::StickyNote => {
             let body_fill = Color32::from_rgba_unmultiplied(214, 90, 176, 150);
@@ -2452,8 +2517,24 @@ fn draw_graph_annotation(
                     Color32::BLACK,
                 );
             }
+            draw_annotation_resize_handle(painter, annotation_rect, stroke.color);
         }
     }
+}
+
+fn draw_annotation_resize_handle(painter: &egui::Painter, annotation_rect: Rect, color: Color32) {
+    let handle_rect = annotation_resize_handle_rect(annotation_rect).shrink(3.0);
+    painter.line_segment(
+        [handle_rect.left_bottom(), handle_rect.right_top()],
+        Stroke::new(1.0, color),
+    );
+    painter.line_segment(
+        [
+            handle_rect.left_bottom() + egui::vec2(4.0, 0.0),
+            handle_rect.right_top() + egui::vec2(0.0, 4.0),
+        ],
+        Stroke::new(1.0, color),
+    );
 }
 
 fn format_sticky_note_text(text: &str) -> String {
