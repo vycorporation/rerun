@@ -54,6 +54,8 @@ pub(crate) struct HoudiniGraphPanel {
     node_drag_peak_delta_pixels: f32,
     dragging_annotation: Option<usize>,
     resizing_annotation: Option<usize>,
+    graph_view_zoom: f32,
+    graph_view_pan: Vec2,
     last_parquet_path: Option<String>,
     parquet_status: Option<String>,
     graph_document_status: Option<String>,
@@ -91,6 +93,8 @@ impl Default for HoudiniGraphPanel {
             node_drag_peak_delta_pixels: 0.0,
             dragging_annotation: None,
             resizing_annotation: None,
+            graph_view_zoom: 1.0,
+            graph_view_pan: Vec2::ZERO,
             last_parquet_path: None,
             parquet_status: None,
             graph_document_status: None,
@@ -1268,13 +1272,35 @@ impl HoudiniGraphPanel {
             canvas_rect,
             ui.visuals().widgets.noninteractive.bg_stroke.color,
             network_view.grid_spacing,
+            self.graph_view_zoom,
+            self.graph_view_pan,
         );
 
         let layout_rect = canvas_rect.shrink2(egui::vec2(12.0, 10.0));
         let node_size = Vec2::new(116.0, 48.0);
-        let mut node_rects = layout_node_rects(graph, layout_rect, node_size);
-        let annotation_rects = layout_annotation_rects(graph, layout_rect);
-        let generated_lane_y = layout_rect.top() + layout_rect.height() * 0.82;
+        let mut node_rects = layout_node_rects(
+            graph,
+            layout_rect,
+            node_size,
+            self.graph_view_zoom,
+            self.graph_view_pan,
+        );
+        let annotation_rects = layout_annotation_rects(
+            graph,
+            layout_rect,
+            self.graph_view_zoom,
+            self.graph_view_pan,
+        );
+        let generated_lane_y = transform_layout_pos(
+            layout_rect,
+            Pos2::new(
+                layout_rect.left(),
+                layout_rect.top() + layout_rect.height() * 0.82,
+            ),
+            self.graph_view_zoom,
+            self.graph_view_pan,
+        )
+        .y;
         painter.line_segment(
             [
                 Pos2::new(layout_rect.left(), generated_lane_y),
@@ -1291,7 +1317,14 @@ impl HoudiniGraphPanel {
         );
 
         for annotation in &graph.annotations {
-            draw_graph_annotation(&painter, layout_rect, annotation, ui.visuals());
+            draw_graph_annotation(
+                &painter,
+                layout_rect,
+                annotation,
+                self.graph_view_zoom,
+                self.graph_view_pan,
+                ui.visuals(),
+            );
         }
 
         if response.hovered()
@@ -1299,9 +1332,18 @@ impl HoudiniGraphPanel {
         {
             toggle_network_display_options(ui);
         }
+        if response.hovered() {
+            self.update_graph_viewport(ui, layout_rect);
+        }
 
         if let Some(pointer_pos) = response.interact_pointer_pos() {
-            if response.clicked() || response.drag_started() {
+            if response.dragged_by(egui::PointerButton::Middle) {
+                self.graph_view_pan += ui.input(|input| input.pointer.delta());
+            }
+
+            if response.clicked_by(egui::PointerButton::Primary)
+                || response.drag_started_by(egui::PointerButton::Primary)
+            {
                 self.dragging_node = None;
                 self.dragging_annotation = None;
                 self.resizing_annotation = None;
@@ -1333,41 +1375,57 @@ impl HoudiniGraphPanel {
                     }
                 }
 
-                if response.clicked() && !hit_node && !hit_annotation && !self.node_info_pinned {
+                if response.clicked_by(egui::PointerButton::Primary)
+                    && !hit_node
+                    && !hit_annotation
+                    && !self.node_info_pinned
+                {
                     self.node_info_open = false;
                 }
             }
 
-            if response.dragged() {
+            if response.dragged_by(egui::PointerButton::Primary) {
                 if let Some(dragging_node) = self.dragging_node {
                     let pointer_delta = ui.input(|input| input.pointer.delta());
                     self.node_drag_peak_delta_pixels =
                         self.node_drag_peak_delta_pixels.max(pointer_delta.length());
                     graph.set_node_layout_position(
                         dragging_node,
-                        unmap_node_layout_point(layout_rect, pointer_pos, node_size),
+                        unmap_node_layout_point(
+                            layout_rect,
+                            pointer_pos,
+                            node_size,
+                            self.graph_view_zoom,
+                            self.graph_view_pan,
+                        ),
                     );
-                    node_rects = layout_node_rects(graph, layout_rect, node_size);
+                    node_rects = layout_node_rects(
+                        graph,
+                        layout_rect,
+                        node_size,
+                        self.graph_view_zoom,
+                        self.graph_view_pan,
+                    );
                 } else if let Some(resizing_annotation) = self.resizing_annotation {
                     if let Some(annotation) = graph.annotations.get_mut(resizing_annotation) {
                         let pointer_delta = ui.input(|input| input.pointer.delta());
                         annotation.size.x = (annotation.size.x
-                            + pointer_delta.x / layout_rect.width())
-                        .clamp(0.08, 0.95);
+                            + pointer_delta.x / (layout_rect.width() * self.graph_view_zoom))
+                            .clamp(0.08, 0.95);
                         annotation.size.y = (annotation.size.y
-                            + pointer_delta.y / layout_rect.height())
-                        .clamp(0.08, 0.95);
+                            + pointer_delta.y / (layout_rect.height() * self.graph_view_zoom))
+                            .clamp(0.08, 0.95);
                     }
                 } else if let Some(dragging_annotation) = self.dragging_annotation
                     && let Some(annotation) = graph.annotations.get_mut(dragging_annotation)
                 {
                     let pointer_delta = ui.input(|input| input.pointer.delta());
                     annotation.position.x = (annotation.position.x
-                        + pointer_delta.x / layout_rect.width())
-                    .clamp(0.0, 0.95);
+                        + pointer_delta.x / (layout_rect.width() * self.graph_view_zoom))
+                        .clamp(0.0, 0.95);
                     annotation.position.y = (annotation.position.y
-                        + pointer_delta.y / layout_rect.height())
-                    .clamp(0.0, 0.95);
+                        + pointer_delta.y / (layout_rect.height() * self.graph_view_zoom))
+                        .clamp(0.0, 0.95);
                 }
             }
         }
@@ -1472,7 +1530,45 @@ impl HoudiniGraphPanel {
             draw_node_badges(&painter, node_rect, node, network_view, ui.visuals());
         }
 
+        painter.text(
+            canvas_rect.left_bottom() + egui::vec2(8.0, -8.0),
+            Align2::LEFT_BOTTOM,
+            format!("{:.0}%", self.graph_view_zoom * 100.0),
+            FontId::monospace(10.0),
+            ui.visuals().weak_text_color(),
+        );
+
         response
+    }
+
+    fn update_graph_viewport(&mut self, ui: &mut Ui, layout_rect: Rect) {
+        let Some(pointer_pos) = ui.input(|input| input.pointer.hover_pos()) else {
+            return;
+        };
+
+        let (zoom_delta, scroll_delta) =
+            ui.input(|input| (input.zoom_delta(), input.smooth_scroll_delta()));
+        let wheel_zoom_delta = if scroll_delta.y.abs() > 0.0 {
+            (scroll_delta.y / 360.0).exp()
+        } else {
+            1.0
+        };
+        let combined_zoom_delta = zoom_delta * wheel_zoom_delta;
+        if (combined_zoom_delta - 1.0).abs() <= f32::EPSILON {
+            return;
+        }
+
+        let previous_zoom = self.graph_view_zoom;
+        let new_zoom = (self.graph_view_zoom * combined_zoom_delta).clamp(0.45, 2.6);
+        if (new_zoom - previous_zoom).abs() <= f32::EPSILON {
+            return;
+        }
+
+        let center = layout_rect.center();
+        self.graph_view_pan = pointer_pos
+            - center
+            - (pointer_pos - center - self.graph_view_pan) * new_zoom / previous_zoom;
+        self.graph_view_zoom = new_zoom;
     }
 
     fn node_info_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) {
@@ -2345,12 +2441,20 @@ fn faded_color(color: Color32, alpha: f32) -> Color32 {
     )
 }
 
-fn draw_network_grid(painter: &egui::Painter, rect: Rect, color: Color32, spacing_scale: f32) {
-    let spacing = (24.0 * spacing_scale).clamp(12.0, 144.0);
+fn draw_network_grid(
+    painter: &egui::Painter,
+    rect: Rect,
+    color: Color32,
+    spacing_scale: f32,
+    zoom: f32,
+    pan: Vec2,
+) {
+    let spacing = (24.0 * spacing_scale * zoom).clamp(8.0, 180.0);
     let grid_color = faded_color(color, 0.32);
     let stroke = Stroke::new(1.0, grid_color);
+    let origin = rect.center() + pan;
 
-    let mut x = rect.left() + spacing;
+    let mut x = origin.x + ((rect.left() - origin.x) / spacing).floor() * spacing;
     while x < rect.right() {
         painter.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
@@ -2359,7 +2463,7 @@ fn draw_network_grid(painter: &egui::Painter, rect: Rect, color: Color32, spacin
         x += spacing;
     }
 
-    let mut y = rect.top() + spacing;
+    let mut y = origin.y + ((rect.top() - origin.y) / spacing).floor() * spacing;
     while y < rect.bottom() {
         painter.line_segment(
             [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
@@ -2486,16 +2590,38 @@ fn evaluation_color_from_visuals(visuals: &egui::Visuals, state: EvaluationState
     }
 }
 
-fn map_node_layout_point(rect: Rect, point: GraphPoint, node_size: Vec2) -> Pos2 {
-    let usable_width = (rect.width() - node_size.x).max(1.0);
-    let usable_height = (rect.height() - node_size.y).max(1.0);
-    Pos2::new(
-        rect.left() + node_size.x * 0.5 + usable_width * point.x,
-        rect.top() + node_size.y * 0.5 + usable_height * point.y,
-    )
+fn transform_layout_pos(rect: Rect, position: Pos2, zoom: f32, pan: Vec2) -> Pos2 {
+    rect.center() + (position - rect.center()) * zoom + pan
 }
 
-fn unmap_node_layout_point(rect: Rect, position: Pos2, node_size: Vec2) -> GraphPoint {
+fn inverse_transform_layout_pos(rect: Rect, position: Pos2, zoom: f32, pan: Vec2) -> Pos2 {
+    rect.center() + (position - rect.center() - pan) / zoom
+}
+
+fn map_node_layout_point(
+    rect: Rect,
+    point: GraphPoint,
+    node_size: Vec2,
+    zoom: f32,
+    pan: Vec2,
+) -> Pos2 {
+    let usable_width = (rect.width() - node_size.x).max(1.0);
+    let usable_height = (rect.height() - node_size.y).max(1.0);
+    let position = Pos2::new(
+        rect.left() + node_size.x * 0.5 + usable_width * point.x,
+        rect.top() + node_size.y * 0.5 + usable_height * point.y,
+    );
+    transform_layout_pos(rect, position, zoom, pan)
+}
+
+fn unmap_node_layout_point(
+    rect: Rect,
+    position: Pos2,
+    node_size: Vec2,
+    zoom: f32,
+    pan: Vec2,
+) -> GraphPoint {
+    let position = inverse_transform_layout_pos(rect, position, zoom, pan);
     let usable_width = (rect.width() - node_size.x).max(1.0);
     let usable_height = (rect.height() - node_size.y).max(1.0);
     GraphPoint {
@@ -2504,36 +2630,57 @@ fn unmap_node_layout_point(rect: Rect, position: Pos2, node_size: Vec2) -> Graph
     }
 }
 
-fn layout_node_rects(graph: &GraphDocument, rect: Rect, node_size: Vec2) -> Vec<Rect> {
+fn layout_node_rects(
+    graph: &GraphDocument,
+    rect: Rect,
+    node_size: Vec2,
+    zoom: f32,
+    pan: Vec2,
+) -> Vec<Rect> {
     let layout = graph.graph_layout();
     let mut node_rects = vec![Rect::NOTHING; graph.nodes.len()];
     for layout_node in &layout.nodes {
         node_rects[layout_node.node_index] = Rect::from_center_size(
-            map_node_layout_point(rect, layout_node.position, node_size),
-            node_size,
+            map_node_layout_point(rect, layout_node.position, node_size, zoom, pan),
+            node_size * zoom,
         );
     }
     node_rects
 }
 
-fn layout_annotation_rects(graph: &GraphDocument, rect: Rect) -> Vec<Rect> {
+fn layout_annotation_rects(graph: &GraphDocument, rect: Rect, zoom: f32, pan: Vec2) -> Vec<Rect> {
     graph
         .annotations
         .iter()
-        .map(|annotation| display_annotation_rect(rect, annotation))
+        .map(|annotation| display_annotation_rect(rect, annotation, zoom, pan))
         .collect()
 }
 
-fn map_annotation_rect(rect: Rect, position: GraphPoint, size: GraphPoint) -> Rect {
+fn map_annotation_rect(
+    rect: Rect,
+    position: GraphPoint,
+    size: GraphPoint,
+    zoom: f32,
+    pan: Vec2,
+) -> Rect {
     let left = rect.left() + rect.width() * position.x.clamp(0.0, 1.0);
     let top = rect.top() + rect.height() * position.y.clamp(0.0, 1.0);
     let width = (rect.width() * size.x.clamp(0.04, 1.0)).max(44.0);
     let height = (rect.height() * size.y.clamp(0.04, 1.0)).max(28.0);
-    Rect::from_min_size(Pos2::new(left, top), egui::vec2(width, height))
+    Rect::from_min_size(
+        transform_layout_pos(rect, Pos2::new(left, top), zoom, pan),
+        egui::vec2(width, height) * zoom,
+    )
 }
 
-fn display_annotation_rect(rect: Rect, annotation: &self::model::GraphAnnotation) -> Rect {
-    let full_annotation_rect = map_annotation_rect(rect, annotation.position, annotation.size);
+fn display_annotation_rect(
+    rect: Rect,
+    annotation: &self::model::GraphAnnotation,
+    zoom: f32,
+    pan: Vec2,
+) -> Rect {
+    let full_annotation_rect =
+        map_annotation_rect(rect, annotation.position, annotation.size, zoom, pan);
     if annotation.collapsed {
         Rect::from_min_size(
             full_annotation_rect.min,
@@ -2555,9 +2702,11 @@ fn draw_graph_annotation(
     painter: &egui::Painter,
     layout_rect: Rect,
     annotation: &self::model::GraphAnnotation,
+    zoom: f32,
+    pan: Vec2,
     visuals: &egui::Visuals,
 ) {
-    let annotation_rect = display_annotation_rect(layout_rect, annotation);
+    let annotation_rect = display_annotation_rect(layout_rect, annotation, zoom, pan);
     match annotation.kind {
         GraphAnnotationKind::NetworkBox => {
             let body_fill = Color32::from_rgba_unmultiplied(150, 150, 150, 72);
