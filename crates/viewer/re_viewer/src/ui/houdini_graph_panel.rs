@@ -11,8 +11,9 @@ pub(crate) mod model;
 use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState, GeometryBounds,
     GraphAnnotationKind, GraphDocument, GraphPoint, GraphStyle, HoudiniNodeBinding, LayerKind,
-    NetworkBadgeVisibility, NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeStatus,
-    PythonEnvironmentResolveTrigger, PythonEnvironmentStatus, PythonOperatorDependencyStatus,
+    NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkNodeRingVisibility,
+    NetworkViewDisplayOptions, NodeStatus, PythonEnvironmentResolveTrigger,
+    PythonEnvironmentStatus, PythonOperatorDependencyStatus, ReferenceDiagnosticStatus,
     SourceMetadata, SubstrateCoordinateContract,
 };
 
@@ -882,61 +883,434 @@ impl HoudiniGraphPanel {
     }
 
     fn selected_node_controls_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
-        let mut selected_parameter_changed = false;
-        if self.selected_node < graph.nodes.len() {
-            let mut node_name = graph.nodes[self.selected_node].name.clone();
-            let node_kind = graph.nodes[self.selected_node].kind;
-            ui.horizontal_wrapped(|ui| {
-                ui.weak("Name");
-                if ui
-                    .add(egui::TextEdit::singleline(&mut node_name).desired_width(128.0))
-                    .changed()
-                {
-                    graph.set_node_name(self.selected_node, node_name.clone());
-                }
-                ui.weak(node_kind.as_str());
-            });
-        }
-        if let Some(node) = graph.nodes.get_mut(self.selected_node) {
-            ui.label(node.info);
-            selected_parameter_changed = ui
-                .add(
-                    Slider::new(&mut node.parameter.value, node.parameter.range.clone())
-                        .text(node.parameter.name),
-                )
-                .on_hover_text(node.parameter.help)
-                .changed();
-        }
-        if selected_parameter_changed {
-            graph.mark_reference_inputs_stale_for_target_index(self.selected_node);
-        }
-        self.selected_node_flags_ui(ui, graph);
-        self.evaluation_controls_ui(ui, graph);
+        let Some(info) = graph.selected_node_info(self.selected_node) else {
+            ui.weak("Select a node to edit graph-owned parameters.");
+            return;
+        };
+
+        self.selected_node_identity_ui(ui, graph, &info);
+        self.selected_node_parameter_ui(ui, graph, &info);
+        self.selected_node_flags_ui(ui, graph, &info);
+        self.selected_node_evaluation_ui(ui, graph, &info);
+        self.selected_node_comment_ui(ui, graph);
+        self.selected_node_operator_settings_ui(ui, &info);
     }
 
-    fn selected_node_flags_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+    fn selected_node_identity_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        info: &self::model::NodeInfo,
+    ) {
+        egui::CollapsingHeader::new("Node")
+            .id_salt("houdini_graph_parms_node")
+            .default_open(true)
+            .show(ui, |ui| {
+                if self.selected_node < graph.nodes.len() {
+                    let mut node_name = graph.nodes[self.selected_node].name.clone();
+                    ui.horizontal(|ui| {
+                        ui.weak("Name");
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut node_name)
+                                    .desired_width(ui.available_width().clamp(128.0, 220.0)),
+                            )
+                            .changed()
+                        {
+                            graph.set_node_name(self.selected_node, node_name.clone());
+                        }
+                    });
+                }
+
+                egui::Grid::new("houdini_graph_parms_node_identity")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        parms_row(ui, "Path", &self.selected_node_path(graph));
+                        parms_row(ui, "Type", info.kind.as_str());
+                        parms_row(ui, "Role", info.role);
+                        parms_row(ui, "Data", info.data_kind);
+                        ui.weak("Status");
+                        ui.colored_label(status_color(ui, info.status), info.status.as_str());
+                        ui.end_row();
+                        parms_row(ui, "Records", &info.record_count.to_string());
+                        parms_row(
+                            ui,
+                            "Ports",
+                            &format!("{} in / {} out", info.input_count, info.output_count),
+                        );
+                        parms_row(ui, "Time dependent", "No");
+                    });
+                ui.weak(info.summary);
+                if let Some(node) = graph.nodes.get(self.selected_node) {
+                    ui.weak(node.info);
+                }
+
+                for warning in &info.warnings {
+                    ui.colored_label(ui.visuals().warn_fg_color, warning);
+                }
+            });
+    }
+
+    fn selected_node_parameter_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        info: &self::model::NodeInfo,
+    ) {
+        egui::CollapsingHeader::new("Parameters")
+            .id_salt("houdini_graph_parms_parameters")
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut selected_parameter_changed = false;
+                if let Some(node) = graph.nodes.get_mut(self.selected_node) {
+                    egui::Grid::new("houdini_graph_parms_parameter_metadata")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            parms_row(ui, "Parameter", node.parameter.name);
+                            parms_row(ui, "Kind", node.parameter.kind.as_str());
+                            if let Some(rule) = node.parameter.as_attribute_rule() {
+                                parms_row(
+                                    ui,
+                                    "Rule",
+                                    &format!(
+                                        "{} {} value",
+                                        rule.attribute_name,
+                                        rule.comparison.as_str()
+                                    ),
+                                );
+                            }
+                        });
+
+                    selected_parameter_changed = ui
+                        .add(
+                            Slider::new(&mut node.parameter.value, node.parameter.range.clone())
+                                .text(node.parameter.name),
+                        )
+                        .on_hover_text(node.parameter.help)
+                        .changed();
+                    ui.weak(node.parameter.help);
+                }
+
+                if selected_parameter_changed {
+                    graph.mark_reference_inputs_stale_for_target_index(self.selected_node);
+                }
+
+                if let Some(bounds) = &info.bounds {
+                    egui::Grid::new("houdini_graph_parms_bounds")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            parms_row(
+                                ui,
+                                "Bounds min",
+                                &format!("{:.3}, {:.3}", bounds.min.x, bounds.min.y),
+                            );
+                            parms_row(
+                                ui,
+                                "Bounds max",
+                                &format!("{:.3}, {:.3}", bounds.max.x, bounds.max.y),
+                            );
+                        });
+                }
+            });
+    }
+
+    fn selected_node_flags_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        info: &self::model::NodeInfo,
+    ) {
         if self.selected_node >= graph.nodes.len() {
             return;
         }
 
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.weak("Flags");
-            if let Some(node) = graph.nodes.get_mut(self.selected_node) {
-                ui.re_checkbox(&mut node.participates_in_output, "Display output");
-                ui.re_checkbox(&mut node.show_comment_in_network, "Show comment");
-            }
+        egui::CollapsingHeader::new("Flags")
+            .id_salt("houdini_graph_parms_flags")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if let Some(node) = graph.nodes.get_mut(self.selected_node) {
+                        ui.re_checkbox(&mut node.participates_in_output, "Display output");
+                        ui.re_checkbox(&mut node.show_comment_in_network, "Show comment");
+                    }
 
-            let mut manual = graph.nodes[self.selected_node].evaluation.manual;
-            if ui.re_checkbox(&mut manual, "Manual").changed() {
-                graph.set_node_manual(self.selected_node, manual);
-            }
+                    let mut manual = graph.nodes[self.selected_node].evaluation.manual;
+                    if ui.re_checkbox(&mut manual, "Manual cook").changed() {
+                        graph.set_node_manual(self.selected_node, manual);
+                    }
 
-            if ui.button("Info").clicked() {
-                self.node_info_open = true;
-                self.active_graph_pane = GraphWorkbenchPane::Info;
-            }
-        });
+                    if ui.button("Info").clicked() {
+                        self.node_info_open = true;
+                        self.active_graph_pane = GraphWorkbenchPane::Info;
+                    }
+                });
+                ui.weak(format!(
+                    "Shared graph display context; {} reference consumer(s).",
+                    info.reference_consumers.len()
+                ));
+            });
+    }
+
+    fn selected_node_evaluation_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        info: &self::model::NodeInfo,
+    ) {
+        egui::CollapsingHeader::new("Cook")
+            .id_salt("houdini_graph_parms_cook")
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::Grid::new("houdini_graph_parms_cook_state")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.weak("State");
+                        ui.colored_label(
+                            evaluation_color(ui, info.evaluation.state),
+                            info.evaluation.state.as_str(),
+                        );
+                        ui.end_row();
+
+                        parms_row(ui, "Manual", yes_no(info.evaluation.manual));
+                        parms_row(
+                            ui,
+                            "Message",
+                            info.evaluation.message.as_deref().unwrap_or("none"),
+                        );
+                    });
+                self.evaluation_controls_ui(ui, graph);
+            });
+    }
+
+    fn selected_node_operator_settings_ui(&mut self, ui: &mut Ui, info: &self::model::NodeInfo) {
+        egui::CollapsingHeader::new("Operator")
+            .id_salt("houdini_graph_parms_operator")
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut rendered = false;
+
+                if let Some(null_operator) = &info.null_operator {
+                    rendered = true;
+                    egui::Grid::new("houdini_graph_parms_null_operator")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            parms_row(ui, "Convention", null_operator.convention.as_str());
+                            parms_row(ui, "Input kind", &format!("{:?}", null_operator.input_kind));
+                            parms_row(
+                                ui,
+                                "Output kind",
+                                &format!("{:?}", null_operator.output_kind),
+                            );
+                            parms_row(
+                                ui,
+                                "Record identity",
+                                yes_no(null_operator.preserves_record_identity),
+                            );
+                            parms_row(
+                                ui,
+                                "Provenance",
+                                yes_no(null_operator.preserves_source_provenance),
+                            );
+                        });
+                }
+
+                if let Some(reference_input) = &info.reference_input {
+                    rendered = true;
+                    egui::Grid::new("houdini_graph_parms_reference_input")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            parms_row(ui, "Reference", &reference_input.readable_path);
+                            ui.weak("Status");
+                            ui.colored_label(
+                                reference_status_color(ui, reference_input.status),
+                                reference_input.status.as_str(),
+                            );
+                            ui.end_row();
+                            parms_row(
+                                ui,
+                                "Hidden transform",
+                                yes_no(reference_input.applies_hidden_transform),
+                            );
+                            parms_row(
+                                ui,
+                                "Preserves data",
+                                yes_no(reference_input.preserves_source_data),
+                            );
+                            parms_row(ui, "Targets", &reference_input.targets.len().to_string());
+                        });
+                }
+
+                if let Some(output_operator) = &info.output_operator {
+                    rendered = true;
+                    egui::Grid::new("houdini_graph_parms_output_operator")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            parms_row(ui, "Output", output_operator.kind.as_str());
+                            parms_row(ui, "Payload", output_operator.semantic_payload.as_str());
+                            parms_row(ui, "Command", output_operator.command.as_str());
+                            parms_row(
+                                ui,
+                                "Preferred target",
+                                output_operator
+                                    .preferred_target
+                                    .map(|target| target.as_str())
+                                    .unwrap_or("choose target"),
+                            );
+                            parms_row(
+                                ui,
+                                "Viewer state",
+                                if output_operator.graph_viewport_state_separate {
+                                    "target-owned"
+                                } else {
+                                    "graph-owned"
+                                },
+                            );
+                        });
+                    if let Some(rerun_options) = &output_operator.rerun_options {
+                        ui.weak(format!(
+                            "Rerun options: debug items {}, cubic metadata {}.",
+                            yes_no(rerun_options.include_debug_items),
+                            yes_no(rerun_options.preserve_native_cubic_metadata)
+                        ));
+                    }
+                    for negotiation in &output_operator.negotiations {
+                        ui.weak(format!(
+                            "{}: {} - {}",
+                            negotiation.target.as_str(),
+                            negotiation.mapping.as_str(),
+                            negotiation.reason
+                        ));
+                    }
+                }
+
+                if let Some(python_operator) = &info.python_operator {
+                    rendered = true;
+                    egui::Grid::new("houdini_graph_parms_python_operator")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            parms_row(ui, "Operator", &python_operator.display_name);
+                            parms_row(ui, "Declaration", &python_operator.declaration_id);
+                            parms_row(ui, "Version", &python_operator.version);
+                            ui.weak("Dependencies");
+                            ui.colored_label(
+                                python_operator_dependency_color(
+                                    ui,
+                                    python_operator.dependency_status,
+                                ),
+                                python_operator.dependency_status.as_str(),
+                            );
+                            ui.end_row();
+                            parms_row(
+                                ui,
+                                "Requirements",
+                                &format_list(&python_operator.requirements),
+                            );
+                            parms_row(
+                                ui,
+                                "Cache key",
+                                python_operator
+                                    .cache_key_summary
+                                    .as_deref()
+                                    .unwrap_or("none"),
+                            );
+                        });
+                    ui.weak(&python_operator.dependency_summary);
+                    if let Some(provenance) = &python_operator.provenance_summary {
+                        ui.weak(provenance);
+                    }
+                    if let Some(failure) = &python_operator.last_failure_summary {
+                        ui.colored_label(ui.visuals().error_fg_color, failure);
+                    }
+                }
+
+                if let Some(asset) = &info.procedural_asset {
+                    rendered = true;
+                    egui::Grid::new("houdini_graph_parms_asset_operator")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            parms_row(ui, "Asset", &asset.display_name);
+                            parms_row(ui, "Asset id", &asset.asset_id);
+                            parms_row(ui, "Version", &asset.instance_version);
+                            parms_row(
+                                ui,
+                                "Current",
+                                asset.current_version.as_deref().unwrap_or("missing"),
+                            );
+                            parms_row(ui, "Unlocked", yes_no(asset.contents_unlocked));
+                            parms_row(ui, "Parameters", &format_list(&asset.promoted_parameters));
+                            parms_row(ui, "Bindings", &format_bindings(&asset.input_bindings));
+                        });
+                    if !asset.description.is_empty() {
+                        ui.weak(&asset.description);
+                    }
+                    if let Some(output_summary) = &asset.output_summary {
+                        ui.weak(output_summary);
+                    }
+                }
+
+                if let Some(native_operator) = &info.native_operator {
+                    rendered = true;
+                    egui::Grid::new("houdini_graph_parms_native_operator")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            parms_row(ui, "Operator", &native_operator.display_name);
+                            parms_row(ui, "Operator id", &native_operator.operator_id);
+                            parms_row(ui, "Version", &native_operator.version);
+                            parms_row(ui, "Host", &native_operator.host_compatibility_version);
+                            ui.weak("Load");
+                            ui.colored_label(
+                                native_operator_load_status_color(ui, native_operator.load_status),
+                                native_operator.load_status.as_str(),
+                            );
+                            ui.end_row();
+                            parms_row(ui, "Inputs", &format_list(&native_operator.inputs));
+                            parms_row(ui, "Outputs", &format_list(&native_operator.outputs));
+                            parms_row(ui, "Parameters", &format_list(&native_operator.parameters));
+                            parms_row(
+                                ui,
+                                "Capabilities",
+                                &format_list(&native_operator.capabilities),
+                            );
+                            parms_row(
+                                ui,
+                                "Cache key",
+                                native_operator
+                                    .cache_key_summary
+                                    .as_deref()
+                                    .unwrap_or("none"),
+                            );
+                        });
+                    ui.weak(&native_operator.provenance_summary);
+                    if let Some(provenance) = &native_operator.output_provenance_summary {
+                        ui.weak(provenance);
+                    }
+                    if let Some(failure) = &native_operator.last_failure_summary {
+                        ui.colored_label(ui.visuals().error_fg_color, failure);
+                    }
+                }
+
+                if !rendered {
+                    ui.weak("No specialized operator settings for this node.");
+                }
+            });
+    }
+
+    fn selected_node_path(&self, graph: &GraphDocument) -> String {
+        graph
+            .nodes
+            .get(self.selected_node)
+            .map(|node| format!("/obj/main/{}", node.name))
+            .unwrap_or_else(|| "/obj/main/<none>".to_owned())
     }
 
     fn graph_workbench_side_strip_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -3433,6 +3807,43 @@ fn python_operator_dependency_color(ui: &Ui, status: PythonOperatorDependencySta
         | PythonOperatorDependencyStatus::StaleEnvironment
         | PythonOperatorDependencyStatus::DisabledEnvironment => ui.visuals().warn_fg_color,
     }
+}
+
+fn reference_status_color(ui: &Ui, status: ReferenceDiagnosticStatus) -> Color32 {
+    match status {
+        ReferenceDiagnosticStatus::Resolved => ui.visuals().text_color(),
+        ReferenceDiagnosticStatus::CoordinateIncompatibleRepairable => ui.visuals().warn_fg_color,
+        ReferenceDiagnosticStatus::MissingNode
+        | ReferenceDiagnosticStatus::MissingOutput
+        | ReferenceDiagnosticStatus::DisallowedBoundary
+        | ReferenceDiagnosticStatus::AssetPrivateInternal
+        | ReferenceDiagnosticStatus::CoordinateContractMissing => ui.visuals().error_fg_color,
+    }
+}
+
+fn native_operator_load_status_color(ui: &Ui, status: NativeOperatorLoadStatus) -> Color32 {
+    match status {
+        NativeOperatorLoadStatus::Ready => ui.visuals().text_color(),
+        NativeOperatorLoadStatus::TrustRequired
+        | NativeOperatorLoadStatus::MissingCapabilityGrant => ui.visuals().warn_fg_color,
+        NativeOperatorLoadStatus::DeclarationMissing
+        | NativeOperatorLoadStatus::HostIncompatible
+        | NativeOperatorLoadStatus::ImplementationDigestMissing
+        | NativeOperatorLoadStatus::LoadFailed
+        | NativeOperatorLoadStatus::RuntimeFailed
+        | NativeOperatorLoadStatus::TimedOut
+        | NativeOperatorLoadStatus::OutputSchemaMismatch => ui.visuals().error_fg_color,
+    }
+}
+
+fn parms_row(ui: &mut Ui, label: &str, value: &str) {
+    ui.weak(label);
+    ui.label(value);
+    ui.end_row();
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "Yes" } else { "No" }
 }
 
 fn format_list(values: &[String]) -> String {
