@@ -6,6 +6,24 @@ This file provides guidance to Claude Code (claude.ai/code) and other LLMs when 
 
 Rerun is a time-aware multimodal data stack and visualizations tool used in robotics, spatial AI, computer vision, and similar domains. It provides SDKs (Python, Rust, C++) for logging rich data (images, point clouds, tensors, etc.) and a Viewer for visualization.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues on `vycorporation/rerun`; external PRs are not a triage request surface by default.
+See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default Matt Pocock triage label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`.
+See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a multi-context repo.
+Read `CONTEXT-MAP.md`; graph workbench product-fork context lives under `product/graph-workbench/product-prd/source/`.
+See `docs/agents/domain.md`.
+
 ## Build system
 
 We use `pixi` for task management and dependency installation. Check `pixi.toml` for a full list of tasks.
