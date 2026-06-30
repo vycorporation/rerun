@@ -593,6 +593,37 @@ impl HoudiniGraphPanel {
         true
     }
 
+    fn frame_selected_annotation_in_rect(
+        &mut self,
+        graph: &GraphDocument,
+        layout_rect: Rect,
+    ) -> bool {
+        let Some(annotation_index) = self.selected_annotation else {
+            return false;
+        };
+        let Some(annotation) = graph.annotations.get(annotation_index) else {
+            return false;
+        };
+        let selected_center =
+            display_annotation_rect(layout_rect, annotation, self.graph_view_zoom, Vec2::ZERO)
+                .center();
+        self.graph_view_pan = layout_rect.center() - selected_center;
+        true
+    }
+
+    fn frame_selected_item_in_rect(
+        &mut self,
+        graph: &GraphDocument,
+        layout_rect: Rect,
+        node_size: Vec2,
+    ) -> bool {
+        if self.selected_annotation.is_some() {
+            self.frame_selected_annotation_in_rect(graph, layout_rect)
+        } else {
+            self.frame_selected_node_in_rect(graph, layout_rect, node_size)
+        }
+    }
+
     fn resize_selected_network_box_to_contents(&mut self, graph: &mut GraphDocument) -> bool {
         if let Some(annotation_index) = self.selected_annotation
             && graph
@@ -2354,6 +2385,7 @@ impl HoudiniGraphPanel {
             GraphSearchTarget::Annotation(index) => {
                 self.selected_annotation = Some(index);
                 self.context_menu_canvas = false;
+                self.pending_frame_selected = true;
                 self.active_workspace = HoudiniGraphWorkspace::Graph;
                 self.active_graph_pane = GraphWorkbenchPane::Find;
             }
@@ -2475,7 +2507,7 @@ impl HoudiniGraphPanel {
 
         let mut layout_changed = false;
         if self.pending_frame_selected {
-            layout_changed |= self.frame_selected_node_in_rect(graph, layout_rect, node_size);
+            layout_changed |= self.frame_selected_item_in_rect(graph, layout_rect, node_size);
             self.pending_frame_selected = false;
         }
         if response.hovered() && !self.tab_menu_open {
@@ -2490,6 +2522,7 @@ impl HoudiniGraphPanel {
                         .unwrap_or_else(|| canvas_rect.center()),
                     input.key_pressed(egui::Key::H) && input.modifiers.is_none(),
                     input.key_pressed(egui::Key::F) && input.modifiers.is_none(),
+                    input.key_pressed(egui::Key::F) && input.modifiers.command,
                     input.key_pressed(egui::Key::O) && shift_only,
                     input.key_pressed(egui::Key::P) && shift_only,
                     input.key_pressed(egui::Key::M) && shift_only,
@@ -2505,6 +2538,7 @@ impl HoudiniGraphPanel {
                 pointer_anchor,
                 home_pressed,
                 frame_selected_pressed,
+                find_pressed,
                 add_network_box_pressed,
                 add_sticky_note_pressed,
                 resize_box_pressed,
@@ -2526,7 +2560,11 @@ impl HoudiniGraphPanel {
                 layout_changed = true;
             }
             if frame_selected_pressed {
-                layout_changed |= self.frame_selected_node_in_rect(graph, layout_rect, node_size);
+                layout_changed |= self.frame_selected_item_in_rect(graph, layout_rect, node_size);
+            }
+            if find_pressed {
+                self.active_workspace = HoudiniGraphWorkspace::Graph;
+                self.active_graph_pane = GraphWorkbenchPane::Find;
             }
             if add_network_box_pressed {
                 layout_changed |=
