@@ -2031,6 +2031,13 @@ impl HoudiniGraphPanel {
                 let mut hit_annotation = false;
                 if !hit_node {
                     for (index, annotation_rect) in annotation_rects.iter().enumerate().rev() {
+                        if annotation_collapse_toggle_rect(*annotation_rect).contains(pointer_pos) {
+                            if let Some(annotation) = graph.annotations.get_mut(index) {
+                                annotation.collapsed = !annotation.collapsed;
+                            }
+                            hit_annotation = true;
+                            break;
+                        }
                         if annotation_resize_handle_rect(*annotation_rect).contains(pointer_pos) {
                             self.resizing_annotation = Some(index);
                             hit_annotation = true;
@@ -3889,6 +3896,13 @@ fn annotation_resize_handle_rect(annotation_rect: Rect) -> Rect {
     )
 }
 
+fn annotation_collapse_toggle_rect(annotation_rect: Rect) -> Rect {
+    Rect::from_min_size(
+        annotation_rect.left_top() + egui::vec2(5.0, 3.0),
+        egui::vec2(12.0, 12.0),
+    )
+}
+
 fn draw_graph_annotation(
     painter: &egui::Painter,
     layout_rect: Rect,
@@ -3911,14 +3925,20 @@ fn draw_graph_annotation(
                 Pos2::new(annotation_rect.right(), annotation_rect.top() + 18.0),
             );
             painter.rect_filled(header_rect, 6.0, header_fill);
+            let toggle_rect = annotation_collapse_toggle_rect(header_rect);
+            painter.rect_filled(toggle_rect, 2.0, body_fill);
+            painter.rect_stroke(toggle_rect, 2.0, stroke, StrokeKind::Inside);
             painter.text(
-                header_rect.left_center() + egui::vec2(6.0, 0.0),
+                toggle_rect.center(),
+                Align2::CENTER_CENTER,
+                if annotation.collapsed { "+" } else { "-" },
+                FontId::monospace(11.0),
+                visuals.text_color(),
+            );
+            painter.text(
+                header_rect.left_center() + egui::vec2(23.0, 0.0),
                 Align2::LEFT_CENTER,
-                format!(
-                    "{} {}",
-                    if annotation.collapsed { "+" } else { "-" },
-                    annotation.title
-                ),
+                &annotation.title,
                 FontId::proportional(12.0),
                 visuals.text_color(),
             );
@@ -3936,14 +3956,20 @@ fn draw_graph_annotation(
                 Pos2::new(annotation_rect.right(), annotation_rect.top() + 18.0),
             );
             painter.rect_filled(header_rect, 5.0, header_fill);
+            let toggle_rect = annotation_collapse_toggle_rect(header_rect);
+            painter.rect_filled(toggle_rect, 2.0, body_fill);
+            painter.rect_stroke(toggle_rect, 2.0, stroke, StrokeKind::Inside);
             painter.text(
-                header_rect.left_center() + egui::vec2(6.0, 0.0),
+                toggle_rect.center(),
+                Align2::CENTER_CENTER,
+                if annotation.collapsed { "+" } else { "-" },
+                FontId::monospace(11.0),
+                Color32::BLACK,
+            );
+            painter.text(
+                header_rect.left_center() + egui::vec2(23.0, 0.0),
                 Align2::LEFT_CENTER,
-                format!(
-                    "{} {}",
-                    if annotation.collapsed { "+" } else { "-" },
-                    annotation.title
-                ),
+                &annotation.title,
                 FontId::proportional(12.0),
                 Color32::BLACK,
             );
