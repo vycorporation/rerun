@@ -1093,6 +1093,57 @@ impl HoudiniGraphPanel {
                         ui.end_row();
                     }
 
+                    if let Some(output_operator) = &info.output_operator {
+                        ui.weak("Output operator");
+                        ui.label(output_operator.kind.as_str());
+                        ui.end_row();
+
+                        ui.weak("Payload");
+                        ui.label(output_operator.semantic_payload.as_str());
+                        ui.end_row();
+
+                        ui.weak("Command");
+                        ui.label(output_operator.command.as_str());
+                        ui.end_row();
+
+                        ui.weak("Preferred target");
+                        ui.label(
+                            output_operator
+                                .preferred_target
+                                .map(|target| target.as_str())
+                                .unwrap_or("none"),
+                        );
+                        ui.end_row();
+
+                        for negotiation in &output_operator.negotiations {
+                            ui.weak(format!("Target {}", negotiation.target.as_str()));
+                            ui.label(format!(
+                                "{}: {}",
+                                negotiation.mapping.as_str(),
+                                negotiation.reason
+                            ));
+                            ui.end_row();
+                        }
+
+                        if let Some(rerun_options) = &output_operator.rerun_options {
+                            ui.weak("Rerun options");
+                            ui.label(format!(
+                                "debug: {}, cubic metadata: {}",
+                                rerun_options.include_debug_items,
+                                rerun_options.preserve_native_cubic_metadata
+                            ));
+                            ui.end_row();
+                        }
+
+                        ui.weak("Viewport state");
+                        ui.label(if output_operator.graph_viewport_state_separate {
+                            "graph editing viewport is separate"
+                        } else {
+                            "stored on output operator"
+                        });
+                        ui.end_row();
+                    }
+
                     if let Some(python_operator) = &info.python_operator {
                         ui.weak("Operator");
                         ui.label(format!(

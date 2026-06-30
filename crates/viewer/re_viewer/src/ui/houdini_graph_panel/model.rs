@@ -99,6 +99,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.0, 0.5),
                     generated: None,
                     coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+                    output_operator: None,
                     null_operator: None,
                     reference_input: None,
                     substrate_projection: None,
@@ -122,6 +123,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.33, 0.5),
                     generated: None,
                     coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+                    output_operator: None,
                     null_operator: None,
                     reference_input: None,
                     substrate_projection: None,
@@ -147,6 +149,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.66, 0.5),
                     generated: None,
                     coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+                    output_operator: None,
                     null_operator: None,
                     reference_input: None,
                     substrate_projection: None,
@@ -170,6 +173,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(1.0, 0.5),
                     generated: None,
                     coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+                    output_operator: Some(OutputOperatorNode::rerun_scene()),
                     null_operator: None,
                     reference_input: None,
                     substrate_projection: None,
@@ -2242,6 +2246,7 @@ impl GraphDocument {
                 warnings: Vec::new(),
                 reference_consumers: reference_consumers.clone(),
                 reference_output_warning: reference_output_warning.clone(),
+                output_operator: None,
                 null_operator: None,
                 reference_input: None,
                 python_operator: None,
@@ -2273,6 +2278,7 @@ impl GraphDocument {
                 warnings: filter_warnings,
                 reference_consumers: reference_consumers.clone(),
                 reference_output_warning: reference_output_warning.clone(),
+                output_operator: None,
                 null_operator: None,
                 reference_input: None,
                 python_operator: None,
@@ -2304,6 +2310,7 @@ impl GraphDocument {
                 warnings: style_warnings,
                 reference_consumers: reference_consumers.clone(),
                 reference_output_warning: reference_output_warning.clone(),
+                output_operator: None,
                 null_operator: None,
                 reference_input: None,
                 python_operator: None,
@@ -2333,6 +2340,7 @@ impl GraphDocument {
                     warnings: Vec::new(),
                     reference_consumers: reference_consumers.clone(),
                     reference_output_warning: reference_output_warning.clone(),
+                    output_operator: None,
                     null_operator: Some(NullOperatorNodeInfo {
                         convention: contract.convention,
                         input_kind: contract.input_kind,
@@ -2388,6 +2396,7 @@ impl GraphDocument {
                     warnings,
                     reference_consumers: reference_consumers.clone(),
                     reference_output_warning: reference_output_warning.clone(),
+                    output_operator: None,
                     null_operator: None,
                     reference_input: Some(ReferenceInputNodeInfo {
                         target: primary.resolution.target.clone(),
@@ -2447,6 +2456,7 @@ impl GraphDocument {
                     )],
                     reference_consumers: reference_consumers.clone(),
                     reference_output_warning: reference_output_warning.clone(),
+                    output_operator: None,
                     null_operator: None,
                     reference_input: None,
                     python_operator: None,
@@ -2495,6 +2505,7 @@ impl GraphDocument {
                     warnings,
                     reference_consumers: reference_consumers.clone(),
                     reference_output_warning: reference_output_warning.clone(),
+                    output_operator: None,
                     null_operator: None,
                     reference_input: None,
                     python_operator: Some(PythonOperatorNodeInfo {
@@ -2561,6 +2572,7 @@ impl GraphDocument {
                     warnings,
                     reference_consumers: reference_consumers.clone(),
                     reference_output_warning: reference_output_warning.clone(),
+                    output_operator: None,
                     null_operator: None,
                     reference_input: None,
                     python_operator: None,
@@ -2641,6 +2653,7 @@ impl GraphDocument {
                     warnings,
                     reference_consumers: reference_consumers.clone(),
                     reference_output_warning: reference_output_warning.clone(),
+                    output_operator: None,
                     null_operator: None,
                     reference_input: None,
                     python_operator: None,
@@ -2725,6 +2738,25 @@ impl GraphDocument {
                 warnings: Vec::new(),
                 reference_consumers,
                 reference_output_warning,
+                output_operator: node.output_operator.as_ref().map(|output_operator| {
+                    OutputOperatorNodeInfo {
+                        kind: output_operator.kind,
+                        semantic_payload: output_operator.contract.semantic_payload,
+                        command: output_operator.contract.command,
+                        preferred_target: output_operator.contract.preferred_target,
+                        negotiations: [
+                            OutputTargetId::GenericGraph,
+                            OutputTargetId::Rerun,
+                            OutputTargetId::DebugPreparedPolyline,
+                            OutputTargetId::UnsupportedExternal,
+                        ]
+                        .into_iter()
+                        .map(|target| self.negotiate_output_target(output_operator, target))
+                        .collect(),
+                        rerun_options: output_operator.rerun_options.clone(),
+                        graph_viewport_state_separate: true,
+                    }
+                }),
                 null_operator: None,
                 reference_input: None,
                 python_operator: None,
@@ -2823,6 +2855,83 @@ impl GraphDocument {
         }
 
         summary
+    }
+
+    #[allow(dead_code)]
+    pub fn output_target_contract_for_node(
+        &self,
+        node_index: usize,
+    ) -> Option<OutputTargetContract> {
+        self.nodes
+            .get(node_index)?
+            .output_operator
+            .as_ref()
+            .map(|operator| operator.contract.clone())
+    }
+
+    #[allow(dead_code)]
+    pub fn negotiate_output_target_for_node(
+        &self,
+        node_index: usize,
+        target: OutputTargetId,
+    ) -> Option<OutputTargetNegotiation> {
+        let node = self.nodes.get(node_index)?;
+        let output_operator = node.output_operator.as_ref()?;
+        Some(self.negotiate_output_target(output_operator, target))
+    }
+
+    fn negotiate_output_target(
+        &self,
+        output_operator: &OutputOperatorNode,
+        target: OutputTargetId,
+    ) -> OutputTargetNegotiation {
+        match target {
+            OutputTargetId::GenericGraph => OutputTargetNegotiation {
+                target,
+                mapping: OutputCapabilityMapping::NativeMapping,
+                reason: "Graph-owned layered geometry can be consumed through the generic output contract.".to_owned(),
+            },
+            OutputTargetId::Rerun => {
+                let has_native_cubic = self
+                    .active_geometry()
+                    .iter()
+                    .filter(|geometry| self.emits(geometry))
+                    .any(|geometry| matches!(geometry, Geometry::CubicBezier(_)));
+                if output_operator.kind == OutputOperatorKind::RerunSpecialized
+                    && !has_native_cubic
+                {
+                    OutputTargetNegotiation {
+                        target,
+                        mapping: OutputCapabilityMapping::NativeMapping,
+                        reason: "Rerun target can map the current polygon output natively through its adapter.".to_owned(),
+                    }
+                } else if output_operator.kind == OutputOperatorKind::RerunSpecialized
+                    && has_native_cubic
+                {
+                    OutputTargetNegotiation {
+                        target,
+                        mapping: OutputCapabilityMapping::LowerFidelityWithWarning,
+                        reason: "Rerun target preserves cubic control points as graph metadata but visualizes cubic curves through adapter-owned control points and control-polygon previews.".to_owned(),
+                    }
+                } else {
+                    OutputTargetNegotiation {
+                        target,
+                        mapping: OutputCapabilityMapping::PreparedRepresentation,
+                        reason: "Generic output can be adapted to Rerun through a declared prepared scene representation.".to_owned(),
+                    }
+                }
+            }
+            OutputTargetId::DebugPreparedPolyline => OutputTargetNegotiation {
+                target,
+                mapping: OutputCapabilityMapping::PreparedRepresentation,
+                reason: "Dense polyline data is a declared debug/export representation at the output boundary.".to_owned(),
+            },
+            OutputTargetId::UnsupportedExternal => OutputTargetNegotiation {
+                target,
+                mapping: OutputCapabilityMapping::Unsupported,
+                reason: "No output target adapter has declared support for this target.".to_owned(),
+            },
+        }
     }
 
     pub fn load_synthetic_render_benchmark(
@@ -3729,6 +3838,7 @@ impl HoudiniGraphSidecar {
                     parameter_rule: node.parameter.rule_spec.clone(),
                     generated: node.generated,
                     coordinate_contract: Some(node.coordinate_contract.clone()),
+                    output_operator: node.output_operator.clone(),
                     null_operator: node.null_operator.clone(),
                     reference_input: node.reference_input.clone(),
                     substrate_projection: node.substrate_projection.clone(),
@@ -3805,6 +3915,9 @@ impl HoudiniGraphSidecar {
                 node.coordinate_contract = node_snapshot.coordinate_contract.unwrap_or_else(|| {
                     GraphDocument::default_coordinate_contract_for_kind(node.kind)
                 });
+                node.output_operator = node_snapshot.output_operator.or_else(|| {
+                    (node.kind == NodeKind::Output).then(OutputOperatorNode::rerun_scene)
+                });
                 node.python_operator = node_snapshot.python_operator;
                 node.reference_input = node_snapshot.reference_input;
                 node.substrate_projection = node_snapshot.substrate_projection;
@@ -3860,6 +3973,8 @@ struct NodeSidecar {
     generated: Option<GeneratedNodeInfo>,
     #[serde(default)]
     coordinate_contract: Option<Option<SubstrateCoordinateContract>>,
+    #[serde(default)]
+    output_operator: Option<OutputOperatorNode>,
     #[serde(default)]
     null_operator: Option<NullOperatorNode>,
     #[serde(default)]
@@ -3936,6 +4051,7 @@ impl NodeSidecar {
             coordinate_contract: self
                 .coordinate_contract
                 .unwrap_or_else(|| GraphDocument::default_coordinate_contract_for_kind(self.kind)),
+            output_operator: self.output_operator,
             null_operator: self.null_operator,
             reference_input: self.reference_input,
             substrate_projection: self.substrate_projection,
@@ -4035,6 +4151,7 @@ pub(crate) struct GraphNode {
     pub layout_position: GraphPoint,
     pub generated: Option<GeneratedNodeInfo>,
     pub coordinate_contract: Option<SubstrateCoordinateContract>,
+    pub output_operator: Option<OutputOperatorNode>,
     pub null_operator: Option<NullOperatorNode>,
     pub reference_input: Option<ReferenceInputNode>,
     pub substrate_projection: Option<SubstrateProjectionNode>,
@@ -4056,6 +4173,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+            output_operator: None,
             null_operator: Some(NullOperatorNode {
                 input_kind: HoudiniDataKind::GeometryTable,
                 output_kind: HoudiniDataKind::GeometryTable,
@@ -4085,6 +4203,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+            output_operator: None,
             null_operator: None,
             reference_input: Some(ReferenceInputNode {
                 targets: vec![target],
@@ -4113,6 +4232,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: Some(projection.to_contract.clone()),
+            output_operator: None,
             null_operator: None,
             reference_input: None,
             substrate_projection: Some(projection),
@@ -4139,6 +4259,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+            output_operator: None,
             null_operator: None,
             reference_input: None,
             substrate_projection: None,
@@ -4176,6 +4297,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+            output_operator: None,
             null_operator: None,
             reference_input: None,
             substrate_projection: None,
@@ -4213,6 +4335,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+            output_operator: None,
             null_operator: None,
             reference_input: None,
             substrate_projection: None,
@@ -4245,6 +4368,144 @@ impl GraphNode {
 pub(crate) struct NullOperatorNode {
     pub input_kind: HoudiniDataKind,
     pub output_kind: HoudiniDataKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct OutputOperatorNode {
+    pub kind: OutputOperatorKind,
+    pub contract: OutputTargetContract,
+    pub rerun_options: Option<RerunOutputTargetOptions>,
+}
+
+impl OutputOperatorNode {
+    fn rerun_scene() -> Self {
+        Self {
+            kind: OutputOperatorKind::RerunSpecialized,
+            contract: OutputTargetContract {
+                semantic_payload: OutputSemanticPayload::LayeredGeometry,
+                command: OutputCommand::ComposeScene,
+                preferred_target: Some(OutputTargetId::Rerun),
+            },
+            rerun_options: Some(RerunOutputTargetOptions {
+                include_debug_items: true,
+                preserve_native_cubic_metadata: true,
+            }),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn generic_scene() -> Self {
+        Self {
+            kind: OutputOperatorKind::Generic,
+            contract: OutputTargetContract {
+                semantic_payload: OutputSemanticPayload::LayeredGeometry,
+                command: OutputCommand::ComposeScene,
+                preferred_target: None,
+            },
+            rerun_options: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum OutputOperatorKind {
+    Generic,
+    RerunSpecialized,
+}
+
+impl OutputOperatorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generic => "Generic",
+            Self::RerunSpecialized => "Rerun specialized",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct OutputTargetContract {
+    pub semantic_payload: OutputSemanticPayload,
+    pub command: OutputCommand,
+    pub preferred_target: Option<OutputTargetId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum OutputSemanticPayload {
+    LayeredGeometry,
+}
+
+impl OutputSemanticPayload {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LayeredGeometry => "Layered geometry",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum OutputCommand {
+    ComposeScene,
+    SaveRecording,
+}
+
+impl OutputCommand {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ComposeScene => "Compose scene",
+            Self::SaveRecording => "Save recording",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum OutputTargetId {
+    GenericGraph,
+    Rerun,
+    DebugPreparedPolyline,
+    UnsupportedExternal,
+}
+
+impl OutputTargetId {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GenericGraph => "Generic graph",
+            Self::Rerun => "Rerun",
+            Self::DebugPreparedPolyline => "Debug prepared polyline",
+            Self::UnsupportedExternal => "Unsupported external",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct RerunOutputTargetOptions {
+    pub include_debug_items: bool,
+    pub preserve_native_cubic_metadata: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OutputTargetNegotiation {
+    pub target: OutputTargetId,
+    pub mapping: OutputCapabilityMapping,
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutputCapabilityMapping {
+    NativeMapping,
+    PreparedRepresentation,
+    LowerFidelityWithWarning,
+    Unsupported,
+}
+
+impl OutputCapabilityMapping {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeMapping => "Native mapping",
+            Self::PreparedRepresentation => "Prepared representation",
+            Self::LowerFidelityWithWarning => "Lower fidelity with warning",
+            Self::Unsupported => "Unsupported",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -5808,6 +6069,7 @@ pub(crate) struct NodeInfo {
     pub warnings: Vec<String>,
     pub reference_consumers: Vec<ReferenceConsumerInfo>,
     pub reference_output_warning: Option<ReferenceOutputChangeWarning>,
+    pub output_operator: Option<OutputOperatorNodeInfo>,
     pub null_operator: Option<NullOperatorNodeInfo>,
     pub reference_input: Option<ReferenceInputNodeInfo>,
     pub python_operator: Option<PythonOperatorNodeInfo>,
@@ -5834,6 +6096,16 @@ pub(crate) struct ReferenceOutputChangeWarning {
     pub target_node_name: String,
     pub output_name: String,
     pub affected_references: Vec<ReferenceConsumerInfo>,
+}
+
+pub(crate) struct OutputOperatorNodeInfo {
+    pub kind: OutputOperatorKind,
+    pub semantic_payload: OutputSemanticPayload,
+    pub command: OutputCommand,
+    pub preferred_target: Option<OutputTargetId>,
+    pub negotiations: Vec<OutputTargetNegotiation>,
+    pub rerun_options: Option<RerunOutputTargetOptions>,
+    pub graph_viewport_state_separate: bool,
 }
 
 pub(crate) struct NullOperatorNodeInfo {
@@ -6670,7 +6942,8 @@ mod tests {
         NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
         NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
         NativeOperatorProvenance, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
-        NodeStatus, OperatorVersionStatus, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
+        NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
+        OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
         ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
         PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
         PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
@@ -6758,6 +7031,140 @@ mod tests {
                 .items
                 .iter()
                 .any(|item| matches!(item.geometry, ViewerGeometry::CubicBezier(_)))
+        );
+    }
+
+    #[test]
+    fn generic_output_operator_expresses_viewer_agnostic_contract() {
+        let mut graph = GraphDocument::sample();
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .expect("output node should exist");
+        graph.nodes[output_index].output_operator = Some(OutputOperatorNode::generic_scene());
+
+        let contract = graph
+            .output_target_contract_for_node(output_index)
+            .expect("generic output should expose a contract");
+        let generic_negotiation = graph
+            .negotiate_output_target_for_node(output_index, OutputTargetId::GenericGraph)
+            .expect("generic target should negotiate");
+        let rerun_negotiation = graph
+            .negotiate_output_target_for_node(output_index, OutputTargetId::Rerun)
+            .expect("rerun target should negotiate through adapter");
+
+        assert_eq!(contract.preferred_target, None);
+        assert_eq!(
+            generic_negotiation.mapping,
+            OutputCapabilityMapping::NativeMapping
+        );
+        assert_eq!(
+            rerun_negotiation.mapping,
+            OutputCapabilityMapping::PreparedRepresentation
+        );
+    }
+
+    #[test]
+    fn rerun_output_operator_negotiates_lower_fidelity_for_native_cubics() {
+        let graph = GraphDocument::sample();
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .expect("output node should exist");
+
+        let info = graph
+            .selected_node_info(output_index)
+            .expect("output node should expose info")
+            .output_operator
+            .expect("output operator info should exist");
+        let rerun_negotiation = info
+            .negotiations
+            .iter()
+            .find(|negotiation| negotiation.target == OutputTargetId::Rerun)
+            .expect("rerun negotiation should be present");
+
+        assert_eq!(info.kind, OutputOperatorKind::RerunSpecialized);
+        assert_eq!(info.preferred_target, Some(OutputTargetId::Rerun));
+        assert_eq!(
+            rerun_negotiation.mapping,
+            OutputCapabilityMapping::LowerFidelityWithWarning
+        );
+        assert!(
+            rerun_negotiation
+                .reason
+                .contains("preserves cubic control points")
+        );
+        assert!(
+            info.rerun_options
+                .expect("rerun output should expose adapter options")
+                .preserve_native_cubic_metadata
+        );
+        assert!(info.graph_viewport_state_separate);
+    }
+
+    #[test]
+    fn output_target_negotiation_reports_native_prepared_and_unsupported_paths() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .geometry
+            .retain(|geometry| matches!(geometry, Geometry::Polygon(_)));
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .expect("output node should exist");
+
+        assert_eq!(
+            graph
+                .negotiate_output_target_for_node(output_index, OutputTargetId::Rerun)
+                .expect("rerun target should negotiate")
+                .mapping,
+            OutputCapabilityMapping::NativeMapping
+        );
+        assert_eq!(
+            graph
+                .negotiate_output_target_for_node(
+                    output_index,
+                    OutputTargetId::DebugPreparedPolyline
+                )
+                .expect("debug target should negotiate")
+                .mapping,
+            OutputCapabilityMapping::PreparedRepresentation
+        );
+        assert_eq!(
+            graph
+                .negotiate_output_target_for_node(output_index, OutputTargetId::UnsupportedExternal)
+                .expect("unsupported target should negotiate")
+                .mapping,
+            OutputCapabilityMapping::Unsupported
+        );
+    }
+
+    #[test]
+    fn output_operator_round_trips_without_target_owned_runtime_state() {
+        let graph = GraphDocument::sample();
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        let output_index = restored
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .expect("output node should exist");
+
+        assert!(json.contains("output_operator"));
+        assert!(json.contains("RerunSpecialized"));
+        assert!(!json.contains("entity_path"));
+        assert!(!json.contains("timeline"));
+        assert!(!json.contains("session"));
+        assert_eq!(
+            restored
+                .output_target_contract_for_node(output_index)
+                .expect("output contract should round-trip")
+                .preferred_target,
+            Some(OutputTargetId::Rerun)
         );
     }
 
@@ -7994,6 +8401,7 @@ mod tests {
             layout_position: GraphPoint::new(0.5, 0.1),
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+            output_operator: None,
             null_operator: None,
             reference_input: None,
             substrate_projection: None,
