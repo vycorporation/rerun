@@ -2048,6 +2048,12 @@ impl HoudiniGraphPanel {
                 self.resizing_annotation = None;
                 let mut hit_node = false;
                 for (index, node_rect) in node_rects.iter().enumerate() {
+                    if let Some(flag_action) = node_flag_action_at(*node_rect, pointer_pos) {
+                        self.selected_node = index;
+                        self.apply_node_ring_action(graph, index, flag_action);
+                        hit_node = true;
+                        break;
+                    }
                     let ring_visible = node_ring_visible(
                         network_view.node_ring_visibility,
                         self.selected_node == index,
@@ -2208,6 +2214,21 @@ impl HoudiniGraphPanel {
             None
         };
 
+        let hovered_node_flag_action = if response.hovered() {
+            ui.input(|input| input.pointer.hover_pos())
+                .and_then(|pointer_pos| {
+                    node_rects
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, node_rect)| {
+                            node_flag_action_at(*node_rect, pointer_pos)
+                                .map(|action| (index, action, pointer_pos))
+                        })
+                })
+        } else {
+            None
+        };
+
         let connector_color = ui.visuals().widgets.noninteractive.fg_stroke.color;
         for edge in graph.graph_layout().edges {
             let from_rect = node_rects[edge.from_node];
@@ -2305,11 +2326,16 @@ impl HoudiniGraphPanel {
                     ui.visuals().weak_text_color(),
                 );
             }
-            draw_node_flag_strip(&painter, node_rect, node, ui.visuals());
+            let hovered_flag_action =
+                hovered_node_flag_action.and_then(|(node_index, action, _)| {
+                    (node_index == layout_node.node_index).then_some(action)
+                });
+            draw_node_flag_strip(&painter, node_rect, node, hovered_flag_action, ui.visuals());
             draw_node_badges(&painter, node_rect, node, network_view, ui.visuals());
         }
 
-        if let Some((node_index, action, pointer_pos)) = hovered_ring_action
+        if let Some((node_index, action, pointer_pos)) =
+            hovered_ring_action.or(hovered_node_flag_action)
             && let Some(node) = graph.nodes.get(node_index)
         {
             draw_node_ring_action_tooltip(
@@ -3898,23 +3924,33 @@ fn draw_node_flag_strip(
     painter: &egui::Painter,
     node_rect: Rect,
     node: &self::model::GraphNode,
+    hovered_action: Option<NodeRingAction>,
     visuals: &egui::Visuals,
 ) {
     let flags = [
         (
+            NodeRingAction::Display,
             "D",
             node.participates_in_output,
             visuals.selection.stroke.color,
         ),
-        ("M", node.evaluation.manual, visuals.warn_fg_color),
+        (
+            NodeRingAction::Manual,
+            "M",
+            node.evaluation.manual,
+            visuals.warn_fg_color,
+        ),
     ];
 
-    let flag_size = egui::vec2(13.0, 13.0);
-    let origin = node_rect.right_bottom() + egui::vec2(-32.0, -19.0);
-    for (index, (label, active, active_color)) in flags.into_iter().enumerate() {
-        let rect = Rect::from_min_size(origin + egui::vec2(index as f32 * 15.0, 0.0), flag_size);
+    for (action, label, active, active_color) in flags {
+        let Some(rect) = node_flag_rect(node_rect, action) else {
+            continue;
+        };
+        let hovered = hovered_action == Some(action);
         let fill = if active {
             faded_color(active_color, 0.86)
+        } else if hovered {
+            visuals.widgets.hovered.bg_fill
         } else {
             visuals.widgets.inactive.bg_fill
         };
@@ -3923,8 +3959,8 @@ fn draw_node_flag_strip(
             rect,
             2.0,
             Stroke::new(
-                1.0,
-                if active {
+                if hovered { 1.5 } else { 1.0 },
+                if hovered || active {
                     active_color
                 } else {
                     visuals.widgets.inactive.fg_stroke.color
@@ -3940,6 +3976,28 @@ fn draw_node_flag_strip(
             visuals.text_color(),
         );
     }
+}
+
+fn node_flag_action_at(node_rect: Rect, pointer_pos: Pos2) -> Option<NodeRingAction> {
+    [NodeRingAction::Display, NodeRingAction::Manual]
+        .into_iter()
+        .find(|action| {
+            node_flag_rect(node_rect, *action).is_some_and(|rect| rect.contains(pointer_pos))
+        })
+}
+
+fn node_flag_rect(node_rect: Rect, action: NodeRingAction) -> Option<Rect> {
+    let index = match action {
+        NodeRingAction::Display => 0,
+        NodeRingAction::Manual => 1,
+        NodeRingAction::Info | NodeRingAction::Run => return None,
+    };
+    let flag_size = egui::vec2(13.0, 13.0);
+    let origin = node_rect.right_bottom() + egui::vec2(-32.0, -19.0);
+    Some(Rect::from_min_size(
+        origin + egui::vec2(index as f32 * 15.0, 0.0),
+        flag_size,
+    ))
 }
 
 fn evaluation_color_from_visuals(visuals: &egui::Visuals, state: EvaluationState) -> Color32 {
