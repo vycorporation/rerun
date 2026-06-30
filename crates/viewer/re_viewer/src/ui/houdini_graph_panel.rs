@@ -253,6 +253,7 @@ struct OperatorPaletteUiOptions {
     show_recent: bool,
     include_organization: bool,
     include_layers: bool,
+    highlighted_action: Option<OperatorPaletteAction>,
 }
 
 impl HoudiniGraphPanel {
@@ -696,7 +697,11 @@ impl HoudiniGraphPanel {
                     .default_open(category.default_open(filter_is_empty))
                     .show(ui, |ui| {
                         for entry in matching_entries {
-                            if operator_palette_button_ui(ui, entry) {
+                            if operator_palette_button_ui(
+                                ui,
+                                entry,
+                                options.highlighted_action == Some(entry.action),
+                            ) {
                                 applied_action =
                                     self.apply_operator_palette_action(graph, entry.action);
                             }
@@ -705,7 +710,11 @@ impl HoudiniGraphPanel {
             } else {
                 ui.weak(category.label());
                 for entry in matching_entries {
-                    if operator_palette_button_ui(ui, entry) {
+                    if operator_palette_button_ui(
+                        ui,
+                        entry,
+                        options.highlighted_action == Some(entry.action),
+                    ) {
                         applied_action = self.apply_operator_palette_action(graph, entry.action);
                     }
                 }
@@ -717,6 +726,32 @@ impl HoudiniGraphPanel {
         }
 
         applied_action
+    }
+
+    fn first_matching_operator_palette_action(
+        &self,
+        graph: &GraphDocument,
+        include_organization: bool,
+        include_layers: bool,
+    ) -> Option<OperatorPaletteAction> {
+        let filter = self.operator_filter.trim().to_lowercase();
+        let entries = operator_palette_entries(
+            graph,
+            self.selected_node,
+            include_organization,
+            include_layers,
+        );
+        OperatorPaletteCategory::ALL
+            .into_iter()
+            .find_map(|category| {
+                entries
+                    .iter()
+                    .find(|entry| {
+                        entry.category == category
+                            && operator_matches(&filter, entry.label, entry.aliases)
+                    })
+                    .map(|entry| entry.action)
+            })
     }
 
     fn apply_operator_palette_action(
@@ -1716,6 +1751,7 @@ impl HoudiniGraphPanel {
                 show_recent: true,
                 include_organization: false,
                 include_layers: true,
+                highlighted_action: None,
             },
         );
     }
@@ -2281,6 +2317,16 @@ impl HoudiniGraphPanel {
                         filter_response.request_focus();
                     }
                 });
+                let highlighted_action =
+                    self.first_matching_operator_palette_action(graph, true, false);
+                let accepted_keyboard_action = ui
+                    .input(|input| input.key_pressed(egui::Key::Enter))
+                    && highlighted_action
+                        .is_some_and(|action| self.apply_operator_palette_action(graph, action));
+                if accepted_keyboard_action {
+                    self.tab_menu_open = false;
+                    return;
+                }
                 ui.separator();
                 if self.operator_palette_ui(
                     ui,
@@ -2291,6 +2337,7 @@ impl HoudiniGraphPanel {
                         show_recent: true,
                         include_organization: true,
                         include_layers: false,
+                        highlighted_action,
                     },
                 ) {
                     self.tab_menu_open = false;
@@ -3368,10 +3415,16 @@ fn operator_palette_entry(action: OperatorPaletteAction) -> OperatorPaletteEntry
     }
 }
 
-fn operator_palette_button_ui(ui: &mut Ui, entry: OperatorPaletteEntry) -> bool {
+fn operator_palette_button_ui(ui: &mut Ui, entry: OperatorPaletteEntry, highlighted: bool) -> bool {
     let mut clicked = false;
     ui.horizontal_wrapped(|ui| {
-        clicked = ui.button(entry.label).on_hover_text(entry.detail).clicked();
+        let mut button = egui::Button::new(entry.label);
+        if highlighted {
+            button = button
+                .fill(ui.visuals().selection.bg_fill)
+                .stroke(ui.visuals().selection.stroke);
+        }
+        clicked = ui.add(button).on_hover_text(entry.detail).clicked();
         ui.weak(entry.detail);
     });
     clicked
