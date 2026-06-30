@@ -1501,6 +1501,7 @@ impl HoudiniGraphPanel {
                     &mut options.time_dependent_badge,
                 );
                 badge_visibility_combo_ui(ui, "Asset Lock Badge", &mut options.lock_badge);
+                badge_visibility_combo_ui(ui, "Unload Badge", &mut options.unload_badge);
                 badge_visibility_combo_ui(ui, "Has Data Badge", &mut options.has_data_badge);
                 badge_visibility_combo_ui(ui, "Cached Code Badge", &mut options.cached_code_badge);
                 badge_visibility_combo_ui(ui, "Constraint Badge", &mut options.constraint_badge);
