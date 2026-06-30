@@ -67,6 +67,7 @@ pub(crate) struct HoudiniGraphPanel {
     benchmark_curve_count: usize,
     benchmark_polygon_count: usize,
     operator_filter: String,
+    operator_history: Vec<OperatorPaletteAction>,
     node_info_open: bool,
     node_info_pinned: bool,
     node_info_refresh_automatically: bool,
@@ -109,6 +110,7 @@ impl Default for HoudiniGraphPanel {
             benchmark_curve_count: 10_000,
             benchmark_polygon_count: 1_000,
             operator_filter: String::new(),
+            operator_history: Vec::new(),
             node_info_open: true,
             node_info_pinned: false,
             node_info_refresh_automatically: true,
@@ -187,6 +189,66 @@ impl GraphWorkbenchPane {
             Self::Layers => "Layers",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperatorPaletteAction {
+    AddOutNull,
+    AddReference,
+    AddRepairProjection,
+    AddNetworkBox,
+    AddStickyNote,
+    DuplicatePolygons,
+    DuplicateCurves,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperatorPaletteCategory {
+    Create,
+    Organize,
+    LayerActions,
+}
+
+impl OperatorPaletteCategory {
+    const ALL: [Self; 3] = [Self::Create, Self::Organize, Self::LayerActions];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Create => "Create",
+            Self::Organize => "Organize",
+            Self::LayerActions => "Layer Actions",
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Organize => "organize",
+            Self::LayerActions => "layer_actions",
+        }
+    }
+
+    fn default_open(self, filter_is_empty: bool) -> bool {
+        !filter_is_empty || matches!(self, Self::Create)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OperatorPaletteEntry {
+    action: OperatorPaletteAction,
+    category: OperatorPaletteCategory,
+    label: &'static str,
+    detail: &'static str,
+    aliases: &'static [&'static str],
+}
+
+#[derive(Clone, Copy)]
+struct OperatorPaletteUiOptions {
+    id_salt: &'static str,
+    grouped: bool,
+    show_recent: bool,
+    include_organization: bool,
+    include_layers: bool,
 }
 
 impl HoudiniGraphPanel {
@@ -300,38 +362,17 @@ impl HoudiniGraphPanel {
             ui.separator();
 
             ui.menu_button("Add", |ui| {
-                if ui.button("Node...").clicked() {
-                    self.operator_filter.clear();
-                    self.tab_menu_open = true;
-                    self.tab_menu_anchor = ui.cursor().min;
-                    self.active_graph_pane = GraphWorkbenchPane::Operators;
+                if ui.button("TAB Menu...").clicked() {
+                    self.open_operator_chooser_at(ui.cursor().min);
                     ui.close();
                 }
                 ui.separator();
-                if ui.button("OUT Null").clicked() {
-                    self.selected_node = graph.add_null_operator_node("OUT_MAIN");
-                    self.node_info_open = true;
-                    self.active_graph_pane = GraphWorkbenchPane::Parameters;
-                    ui.close();
-                }
-                if ui.button("Reference").clicked() {
-                    if let Some(index) = graph.add_reference_input_node(self.selected_node) {
-                        self.selected_node = index;
-                        self.node_info_open = true;
-                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
-                    }
-                    ui.close();
-                }
-                if ui.button("Network Box").clicked() {
-                    graph.add_network_box_for_node(self.selected_node);
-                    self.active_graph_pane = GraphWorkbenchPane::Operators;
-                    ui.close();
-                }
-                if ui.button("Sticky Note").clicked() {
-                    graph.add_sticky_note_near_node(self.selected_node);
-                    self.active_graph_pane = GraphWorkbenchPane::Operators;
-                    ui.close();
-                }
+                self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddOutNull);
+                self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddReference);
+                self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddRepairProjection);
+                ui.separator();
+                self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddNetworkBox);
+                self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddStickyNote);
             });
 
             ui.menu_button("Edit", |ui| {
@@ -478,6 +519,211 @@ impl HoudiniGraphPanel {
 
     fn zoom_graph_view(&mut self, factor: f32) {
         self.graph_view_zoom = (self.graph_view_zoom * factor).clamp(0.45, 2.6);
+    }
+
+    fn open_operator_chooser_at(&mut self, anchor: Pos2) {
+        self.operator_filter.clear();
+        self.tab_menu_open = true;
+        self.tab_menu_anchor = anchor + egui::vec2(6.0, 6.0);
+        self.active_graph_pane = GraphWorkbenchPane::Operators;
+    }
+
+    fn operator_menu_action_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        action: OperatorPaletteAction,
+    ) {
+        if !operator_palette_action_available(graph, self.selected_node, action) {
+            return;
+        }
+        let entry = operator_palette_entry(action);
+        if ui.button(entry.label).on_hover_text(entry.detail).clicked() {
+            self.apply_operator_palette_action(graph, action);
+            ui.close();
+        }
+    }
+
+    fn operator_palette_compact_button_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        action: OperatorPaletteAction,
+    ) {
+        if !operator_palette_action_available(graph, self.selected_node, action) {
+            return;
+        }
+        let entry = operator_palette_entry(action);
+        if ui
+            .small_button(entry.label)
+            .on_hover_text(entry.detail)
+            .clicked()
+        {
+            self.apply_operator_palette_action(graph, action);
+        }
+    }
+
+    fn operator_palette_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        options: OperatorPaletteUiOptions,
+    ) -> bool {
+        let filter = self.operator_filter.trim().to_lowercase();
+        let filter_is_empty = filter.is_empty();
+        let mut applied_action = false;
+        let mut shown_operator = false;
+
+        if options.show_recent && filter_is_empty {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("Recent");
+                let recent_actions = self.operator_history.clone();
+                if recent_actions.is_empty() {
+                    ui.weak("No recent operators yet.");
+                } else {
+                    for action in recent_actions {
+                        if !operator_palette_action_included(
+                            action,
+                            options.include_organization,
+                            options.include_layers,
+                        ) {
+                            continue;
+                        }
+                        if !operator_palette_action_available(graph, self.selected_node, action) {
+                            continue;
+                        }
+                        let entry = operator_palette_entry(action);
+                        if ui
+                            .small_button(entry.label)
+                            .on_hover_text(entry.detail)
+                            .clicked()
+                        {
+                            applied_action = self.apply_operator_palette_action(graph, action);
+                        }
+                    }
+                }
+            });
+            ui.separator();
+        }
+
+        let entries = operator_palette_entries(
+            graph,
+            self.selected_node,
+            options.include_organization,
+            options.include_layers,
+        );
+
+        for category in OperatorPaletteCategory::ALL {
+            let matching_entries = entries
+                .iter()
+                .copied()
+                .filter(|entry| {
+                    entry.category == category
+                        && operator_matches(&filter, entry.label, entry.aliases)
+                })
+                .collect::<Vec<_>>();
+            if matching_entries.is_empty() {
+                continue;
+            }
+
+            shown_operator = true;
+            if options.grouped {
+                egui::CollapsingHeader::new(category.label())
+                    .id_salt(format!("{}_{}", options.id_salt, category.id()))
+                    .default_open(category.default_open(filter_is_empty))
+                    .show(ui, |ui| {
+                        for entry in matching_entries {
+                            if operator_palette_button_ui(ui, entry) {
+                                applied_action =
+                                    self.apply_operator_palette_action(graph, entry.action);
+                            }
+                        }
+                    });
+            } else {
+                ui.weak(category.label());
+                for entry in matching_entries {
+                    if operator_palette_button_ui(ui, entry) {
+                        applied_action = self.apply_operator_palette_action(graph, entry.action);
+                    }
+                }
+            }
+        }
+
+        if !shown_operator {
+            ui.weak("No matching graph-backed operators.");
+        }
+
+        applied_action
+    }
+
+    fn apply_operator_palette_action(
+        &mut self,
+        graph: &mut GraphDocument,
+        action: OperatorPaletteAction,
+    ) -> bool {
+        let applied = match action {
+            OperatorPaletteAction::AddOutNull => {
+                self.selected_node = graph.add_null_operator_node("OUT_MAIN");
+                self.node_info_open = true;
+                self.active_graph_pane = GraphWorkbenchPane::Parameters;
+                true
+            }
+            OperatorPaletteAction::AddReference => {
+                if let Some(index) = graph.add_reference_input_node(self.selected_node) {
+                    self.selected_node = index;
+                    self.node_info_open = true;
+                    self.active_graph_pane = GraphWorkbenchPane::Parameters;
+                    true
+                } else {
+                    false
+                }
+            }
+            OperatorPaletteAction::AddRepairProjection => {
+                if let Some(index) = graph
+                    .create_assisted_projection_for_first_repairable_reference_target(
+                        self.selected_node,
+                    )
+                {
+                    self.selected_node = index;
+                    self.node_info_open = true;
+                    self.active_graph_pane = GraphWorkbenchPane::Parameters;
+                    true
+                } else {
+                    false
+                }
+            }
+            OperatorPaletteAction::AddNetworkBox => {
+                graph.add_network_box_for_node(self.selected_node);
+                self.active_graph_pane = GraphWorkbenchPane::Operators;
+                true
+            }
+            OperatorPaletteAction::AddStickyNote => {
+                graph.add_sticky_note_near_node(self.selected_node);
+                self.active_graph_pane = GraphWorkbenchPane::Operators;
+                true
+            }
+            OperatorPaletteAction::DuplicatePolygons => {
+                graph.duplicate_layer_view(LayerKind::Polygons, "Polygons Copy");
+                true
+            }
+            OperatorPaletteAction::DuplicateCurves => {
+                graph.duplicate_layer_view(LayerKind::Curves, "Curves Copy");
+                true
+            }
+        };
+
+        if applied {
+            self.record_operator_palette_action(action);
+        }
+
+        applied
+    }
+
+    fn record_operator_palette_action(&mut self, action: OperatorPaletteAction) {
+        self.operator_history
+            .retain(|existing_action| *existing_action != action);
+        self.operator_history.insert(0, action);
+        self.operator_history.truncate(4);
     }
 
     fn inspect_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -651,12 +897,16 @@ impl HoudiniGraphPanel {
             .default_open(false)
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Network Box").clicked() {
-                        graph.add_network_box_for_node(self.selected_node);
-                    }
-                    if ui.button("Sticky Note").clicked() {
-                        graph.add_sticky_note_near_node(self.selected_node);
-                    }
+                    self.operator_palette_compact_button_ui(
+                        ui,
+                        graph,
+                        OperatorPaletteAction::AddNetworkBox,
+                    );
+                    self.operator_palette_compact_button_ui(
+                        ui,
+                        graph,
+                        OperatorPaletteAction::AddStickyNote,
+                    );
                 });
 
                 let node_names = graph
@@ -1359,7 +1609,7 @@ impl HoudiniGraphPanel {
 
     fn operator_strip_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         ui.horizontal(|ui| {
-            ui.weak("Tab");
+            ui.weak("TAB");
             ui.add(
                 egui::TextEdit::singleline(&mut self.operator_filter)
                     .desired_width((ui.available_width() - 44.0).clamp(96.0, 180.0))
@@ -1374,90 +1624,17 @@ impl HoudiniGraphPanel {
             ui.weak(format!("Selected: {} ({})", node.name, node.kind.as_str()));
         }
 
-        let filter = self.operator_filter.trim().to_lowercase();
-        let mut shown_operator = false;
-
-        egui::CollapsingHeader::new("Create")
-            .id_salt("houdini_operator_create_palette")
-            .default_open(true)
-            .show(ui, |ui| {
-                if operator_matches(&filter, "OUT Null", &["null", "anchor", "out"]) {
-                    shown_operator = true;
-                    if operator_palette_button_ui(
-                        ui,
-                        "OUT Null",
-                        "Typed pass-through anchor using the OUT_* naming convention.",
-                    ) {
-                        let index = graph.add_null_operator_node("OUT_MAIN");
-                        self.selected_node = index;
-                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
-                    }
-                }
-
-                if operator_matches(&filter, "Reference", &["object merge", "import", "target"]) {
-                    shown_operator = true;
-                    if operator_palette_button_ui(
-                        ui,
-                        "Reference",
-                        "Visible live reference to the selected node output.",
-                    ) && let Some(index) = graph.add_reference_input_node(self.selected_node)
-                    {
-                        self.selected_node = index;
-                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
-                    }
-                }
-
-                if graph
-                    .reference_coordinate_repair_summary(self.selected_node)
-                    .is_some()
-                    && operator_matches(&filter, "Repair Projection", &["projection", "repair"])
-                {
-                    shown_operator = true;
-                    if operator_palette_button_ui(
-                        ui,
-                        "Repair Projection",
-                        "Insert a visible substrate projection node for the selected reference.",
-                    ) && let Some(index) = graph
-                        .create_assisted_projection_for_first_repairable_reference_target(
-                            self.selected_node,
-                        )
-                    {
-                        self.selected_node = index;
-                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
-                    }
-                }
-            });
-
-        egui::CollapsingHeader::new("Layer Actions")
-            .id_salt("houdini_operator_layer_palette")
-            .default_open(filter.is_empty())
-            .show(ui, |ui| {
-                if operator_matches(&filter, "Duplicate Polygons", &["polygon", "layer"]) {
-                    shown_operator = true;
-                    if operator_palette_button_ui(
-                        ui,
-                        "Duplicate Polygons",
-                        "Create another graph-backed polygon layer view.",
-                    ) {
-                        graph.duplicate_layer_view(LayerKind::Polygons, "Polygons Copy");
-                    }
-                }
-
-                if operator_matches(&filter, "Duplicate Curves", &["curve", "bezier", "layer"]) {
-                    shown_operator = true;
-                    if operator_palette_button_ui(
-                        ui,
-                        "Duplicate Curves",
-                        "Create another graph-backed native cubic layer view.",
-                    ) {
-                        graph.duplicate_layer_view(LayerKind::Curves, "Curves Copy");
-                    }
-                }
-            });
-
-        if !shown_operator {
-            ui.weak("No matching graph-backed operators.");
-        }
+        self.operator_palette_ui(
+            ui,
+            graph,
+            OperatorPaletteUiOptions {
+                id_salt: "houdini_operator_side_palette",
+                grouped: true,
+                show_recent: true,
+                include_organization: false,
+                include_layers: true,
+            },
+        );
     }
 
     fn compact_layer_stack_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -1616,12 +1793,10 @@ impl HoudiniGraphPanel {
             toggle_network_display_options(ui);
         }
         if response.hovered() && ui.input(|input| input.key_pressed(egui::Key::Tab)) {
-            self.active_graph_pane = GraphWorkbenchPane::Operators;
-            self.tab_menu_open = true;
-            self.tab_menu_anchor = ui
+            let anchor = ui
                 .input(|input| input.pointer.hover_pos())
                 .unwrap_or_else(|| canvas_rect.center());
-            self.operator_filter.clear();
+            self.open_operator_chooser_at(anchor);
         }
         if response.hovered() {
             self.update_graph_viewport(ui, layout_rect);
@@ -1877,93 +2052,30 @@ impl HoudiniGraphPanel {
             .title_bar(true)
             .open(&mut open)
             .show(ui.ctx(), |ui| {
-                ui.set_min_width(260.0);
-                ui.add(
+                ui.set_min_width(320.0);
+                ui.horizontal(|ui| {
+                    ui.weak("TAB");
                     egui::TextEdit::singleline(&mut self.operator_filter)
-                        .desired_width(240.0)
-                        .hint_text("operator"),
-                );
+                        .desired_width(248.0)
+                        .hint_text("operator")
+                        .show(ui);
+                    if ui.small_button("Clear").clicked() {
+                        self.operator_filter.clear();
+                    }
+                });
                 ui.separator();
-                let filter = self.operator_filter.trim().to_lowercase();
-                let mut shown_operator = false;
-
-                if operator_matches(&filter, "OUT Null", &["null", "anchor", "out"]) {
-                    shown_operator = true;
-                    if operator_palette_button_ui(
-                        ui,
-                        "OUT Null",
-                        "Typed pass-through anchor using the OUT_* naming convention.",
-                    ) {
-                        self.selected_node = graph.add_null_operator_node("OUT_MAIN");
-                        self.node_info_open = true;
-                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
-                        self.tab_menu_open = false;
-                    }
-                }
-
-                if operator_matches(&filter, "Reference", &["object merge", "import", "target"]) {
-                    shown_operator = true;
-                    if operator_palette_button_ui(
-                        ui,
-                        "Reference",
-                        "Visible live reference to the selected node output.",
-                    ) && let Some(index) = graph.add_reference_input_node(self.selected_node)
-                    {
-                        self.selected_node = index;
-                        self.node_info_open = true;
-                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
-                        self.tab_menu_open = false;
-                    }
-                }
-
-                if operator_matches(&filter, "Network Box", &["box", "organize"]) {
-                    shown_operator = true;
-                    if operator_palette_button_ui(
-                        ui,
-                        "Network Box",
-                        "Group selected graph items as durable network organization.",
-                    ) {
-                        graph.add_network_box_for_node(self.selected_node);
-                        self.tab_menu_open = false;
-                    }
-                }
-
-                if operator_matches(&filter, "Sticky Note", &["note", "comment"]) {
-                    shown_operator = true;
-                    if operator_palette_button_ui(
-                        ui,
-                        "Sticky Note",
-                        "Create a durable canvas note near the selected node.",
-                    ) {
-                        graph.add_sticky_note_near_node(self.selected_node);
-                        self.tab_menu_open = false;
-                    }
-                }
-
-                if graph
-                    .reference_coordinate_repair_summary(self.selected_node)
-                    .is_some()
-                    && operator_matches(&filter, "Repair Projection", &["projection", "repair"])
-                {
-                    shown_operator = true;
-                    if operator_palette_button_ui(
-                        ui,
-                        "Repair Projection",
-                        "Insert a visible substrate projection node for the selected reference.",
-                    ) && let Some(index) = graph
-                        .create_assisted_projection_for_first_repairable_reference_target(
-                            self.selected_node,
-                        )
-                    {
-                        self.selected_node = index;
-                        self.node_info_open = true;
-                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
-                        self.tab_menu_open = false;
-                    }
-                }
-
-                if !shown_operator {
-                    ui.weak("No matching graph-backed operators.");
+                if self.operator_palette_ui(
+                    ui,
+                    graph,
+                    OperatorPaletteUiOptions {
+                        id_salt: "houdini_graph_canvas_tab_palette",
+                        grouped: true,
+                        show_recent: true,
+                        include_organization: true,
+                        include_layers: false,
+                    },
+                ) {
+                    self.tab_menu_open = false;
                 }
             });
 
@@ -1992,28 +2104,19 @@ impl HoudiniGraphPanel {
         }
 
         ui.separator();
-        if ui.button("Add OUT Null").clicked() {
-            self.selected_node = graph.add_null_operator_node("OUT_MAIN");
-            self.node_info_open = true;
-            self.active_graph_pane = GraphWorkbenchPane::Parameters;
+        if ui.button("TAB Menu...").clicked() {
+            let anchor = ui
+                .input(|input| input.pointer.hover_pos())
+                .unwrap_or_else(|| ui.cursor().min);
+            self.open_operator_chooser_at(anchor);
             ui.close();
         }
-        if ui.button("Add Reference").clicked() {
-            if let Some(index) = graph.add_reference_input_node(self.selected_node) {
-                self.selected_node = index;
-                self.node_info_open = true;
-                self.active_graph_pane = GraphWorkbenchPane::Parameters;
-            }
-            ui.close();
-        }
-        if ui.button("Add Network Box").clicked() {
-            graph.add_network_box_for_node(self.selected_node);
-            ui.close();
-        }
-        if ui.button("Add Sticky Note").clicked() {
-            graph.add_sticky_note_near_node(self.selected_node);
-            ui.close();
-        }
+        ui.separator();
+        self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddOutNull);
+        self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddReference);
+        self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddRepairProjection);
+        self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddNetworkBox);
+        self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddStickyNote);
 
         ui.separator();
         if ui.button("Resize Box to Contents").clicked() {
@@ -2914,11 +3017,132 @@ fn operator_matches(filter: &str, label: &str, aliases: &[&str]) -> bool {
         || aliases.iter().any(|alias| alias.contains(filter))
 }
 
-fn operator_palette_button_ui(ui: &mut Ui, label: &str, detail: &str) -> bool {
+fn operator_palette_entries(
+    graph: &GraphDocument,
+    selected_node: usize,
+    include_organization: bool,
+    include_layers: bool,
+) -> Vec<OperatorPaletteEntry> {
+    let mut entries = vec![
+        operator_palette_entry(OperatorPaletteAction::AddOutNull),
+        operator_palette_entry(OperatorPaletteAction::AddReference),
+    ];
+
+    if graph
+        .reference_coordinate_repair_summary(selected_node)
+        .is_some()
+    {
+        entries.push(operator_palette_entry(
+            OperatorPaletteAction::AddRepairProjection,
+        ));
+    }
+
+    if include_organization {
+        entries.extend([
+            operator_palette_entry(OperatorPaletteAction::AddNetworkBox),
+            operator_palette_entry(OperatorPaletteAction::AddStickyNote),
+        ]);
+    }
+
+    if include_layers {
+        entries.extend([
+            operator_palette_entry(OperatorPaletteAction::DuplicatePolygons),
+            operator_palette_entry(OperatorPaletteAction::DuplicateCurves),
+        ]);
+    }
+
+    entries
+}
+
+fn operator_palette_action_available(
+    graph: &GraphDocument,
+    selected_node: usize,
+    action: OperatorPaletteAction,
+) -> bool {
+    match action {
+        OperatorPaletteAction::AddRepairProjection => graph
+            .reference_coordinate_repair_summary(selected_node)
+            .is_some(),
+        OperatorPaletteAction::AddOutNull
+        | OperatorPaletteAction::AddReference
+        | OperatorPaletteAction::AddNetworkBox
+        | OperatorPaletteAction::AddStickyNote
+        | OperatorPaletteAction::DuplicatePolygons
+        | OperatorPaletteAction::DuplicateCurves => true,
+    }
+}
+
+fn operator_palette_action_included(
+    action: OperatorPaletteAction,
+    include_organization: bool,
+    include_layers: bool,
+) -> bool {
+    match operator_palette_entry(action).category {
+        OperatorPaletteCategory::Create => true,
+        OperatorPaletteCategory::Organize => include_organization,
+        OperatorPaletteCategory::LayerActions => include_layers,
+    }
+}
+
+fn operator_palette_entry(action: OperatorPaletteAction) -> OperatorPaletteEntry {
+    match action {
+        OperatorPaletteAction::AddOutNull => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::Create,
+            label: "OUT Null",
+            detail: "Typed pass-through anchor using the OUT_* naming convention.",
+            aliases: &["null", "anchor", "out", "in"],
+        },
+        OperatorPaletteAction::AddReference => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::Create,
+            label: "Reference",
+            detail: "Visible live reference to the selected node output.",
+            aliases: &["object merge", "import", "target"],
+        },
+        OperatorPaletteAction::AddRepairProjection => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::Create,
+            label: "Repair Projection",
+            detail: "Insert a visible substrate projection node for the selected reference.",
+            aliases: &["projection", "repair", "coordinates"],
+        },
+        OperatorPaletteAction::AddNetworkBox => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::Organize,
+            label: "Network Box",
+            detail: "Group selected graph items as durable network organization.",
+            aliases: &["box", "organize", "group"],
+        },
+        OperatorPaletteAction::AddStickyNote => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::Organize,
+            label: "Sticky Note",
+            detail: "Create a durable canvas note near the selected node.",
+            aliases: &["note", "comment", "sticky"],
+        },
+        OperatorPaletteAction::DuplicatePolygons => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::LayerActions,
+            label: "Duplicate Polygons",
+            detail: "Create another graph-backed polygon layer view.",
+            aliases: &["polygon", "layer"],
+        },
+        OperatorPaletteAction::DuplicateCurves => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::LayerActions,
+            label: "Duplicate Curves",
+            detail: "Create another graph-backed native cubic layer view.",
+            aliases: &["curve", "bezier", "layer"],
+        },
+    }
+}
+
+fn operator_palette_button_ui(ui: &mut Ui, entry: OperatorPaletteEntry) -> bool {
     let mut clicked = false;
     ui.horizontal_wrapped(|ui| {
-        clicked = ui.button(label).clicked();
-        ui.weak(detail);
+        clicked = ui.button(entry.label).on_hover_text(entry.detail).clicked();
+        ui.weak(entry.detail);
     });
     clicked
 }
