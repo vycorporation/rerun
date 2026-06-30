@@ -300,6 +300,14 @@ impl HoudiniGraphPanel {
             ui.separator();
 
             ui.menu_button("Add", |ui| {
+                if ui.button("Node...").clicked() {
+                    self.operator_filter.clear();
+                    self.tab_menu_open = true;
+                    self.tab_menu_anchor = ui.cursor().min;
+                    self.active_graph_pane = GraphWorkbenchPane::Operators;
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button("OUT Null").clicked() {
                     self.selected_node = graph.add_null_operator_node("OUT_MAIN");
                     self.node_info_open = true;
@@ -326,20 +334,115 @@ impl HoudiniGraphPanel {
                 }
             });
 
-            ui.menu_button("View", |ui| {
-                if ui.button("Display Options").clicked() {
-                    self.active_graph_pane = GraphWorkbenchPane::Display;
-                    toggle_network_display_options(ui);
+            ui.menu_button("Edit", |ui| {
+                if ui.button("Parameters").clicked() {
+                    self.active_graph_pane = GraphWorkbenchPane::Parameters;
                     ui.close();
                 }
-                if ui.button("Reset View").clicked() {
+                if ui.button("Node Information").clicked() {
+                    self.node_info_open = true;
+                    self.active_graph_pane = GraphWorkbenchPane::Info;
+                    ui.close();
+                }
+                if ui.button("Pin Node Information").clicked() {
+                    self.node_info_open = true;
+                    self.node_info_pinned = true;
+                    self.active_graph_pane = GraphWorkbenchPane::Info;
+                    ui.close();
+                }
+                if ui.button("Edit Comment").clicked() {
+                    self.node_info_open = true;
+                    self.active_graph_pane = GraphWorkbenchPane::Info;
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Go", |ui| {
+                if ui.button("Home Network").clicked() {
                     self.graph_view_zoom = 1.0;
                     self.graph_view_pan = Vec2::ZERO;
                     ui.close();
                 }
             });
 
+            ui.menu_button("View", |ui| {
+                if ui.button("Display Options").clicked() {
+                    self.active_graph_pane = GraphWorkbenchPane::Display;
+                    toggle_network_display_options(ui);
+                    ui.close();
+                }
+                ui.separator();
+                ui.weak("Show Node Ring");
+                for visibility in NetworkNodeRingVisibility::ALL {
+                    if ui
+                        .selectable_label(
+                            graph.network_view.node_ring_visibility == visibility,
+                            visibility.label(),
+                        )
+                        .clicked()
+                    {
+                        graph.network_view.node_ring_visibility = visibility;
+                        ui.close();
+                    }
+                }
+            });
+
+            ui.menu_button("Tools", |ui| {
+                if ui.button("Operators").clicked() {
+                    self.active_graph_pane = GraphWorkbenchPane::Operators;
+                    ui.close();
+                }
+                if ui.button("Parameters").clicked() {
+                    self.active_graph_pane = GraphWorkbenchPane::Parameters;
+                    ui.close();
+                }
+                if ui.button("Node Info").clicked() {
+                    self.node_info_open = true;
+                    self.active_graph_pane = GraphWorkbenchPane::Info;
+                    ui.close();
+                }
+                if ui.button("Display").clicked() {
+                    self.active_graph_pane = GraphWorkbenchPane::Display;
+                    ui.close();
+                }
+                if ui.button("Layers").clicked() {
+                    self.active_graph_pane = GraphWorkbenchPane::Layers;
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Run Selected").clicked() {
+                    graph.request_node_run(self.selected_node);
+                    graph.complete_node_run(self.selected_node);
+                    ui.close();
+                }
+                if ui.button("Evaluate Output").clicked() {
+                    graph.demand_output_evaluation();
+                    ui.close();
+                }
+            });
+
             ui.menu_button("Layout", |ui| {
+                if ui.button("Reset View").clicked() {
+                    self.graph_view_zoom = 1.0;
+                    self.graph_view_pan = Vec2::ZERO;
+                    ui.close();
+                }
+                if ui.button("Resize Selected Box to Contents").clicked() {
+                    if let Some(annotation_index) =
+                        graph.annotations.iter().position(|annotation| {
+                            annotation.kind == GraphAnnotationKind::NetworkBox
+                                && graph.nodes.get(self.selected_node).is_some_and(|node| {
+                                    annotation
+                                        .member_node_ids
+                                        .iter()
+                                        .any(|member_id| member_id == &node.node_id)
+                                })
+                        })
+                    {
+                        graph.resize_network_box_to_contents(annotation_index);
+                    }
+                    ui.close();
+                }
                 if ui.button("Resize Boxes to Contents").clicked() {
                     let network_box_indices = graph
                         .annotations
