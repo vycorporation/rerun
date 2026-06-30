@@ -56,6 +56,11 @@ pub(crate) struct HoudiniGraphPanel {
     benchmark_curve_count: usize,
     benchmark_polygon_count: usize,
     operator_filter: String,
+    node_info_open: bool,
+    node_info_pinned: bool,
+    node_info_refresh_automatically: bool,
+    node_info_show_additional: bool,
+    node_info_show_debug: bool,
     table_search: String,
     table_minimum_score_enabled: bool,
     table_minimum_score: f32,
@@ -85,6 +90,11 @@ impl Default for HoudiniGraphPanel {
             benchmark_curve_count: 10_000,
             benchmark_polygon_count: 1_000,
             operator_filter: String::new(),
+            node_info_open: true,
+            node_info_pinned: false,
+            node_info_refresh_automatically: true,
+            node_info_show_additional: false,
+            node_info_show_debug: false,
             table_search: String::new(),
             table_minimum_score_enabled: false,
             table_minimum_score: 0.0,
@@ -290,6 +300,25 @@ impl HoudiniGraphPanel {
     }
 
     fn graph_workbench_node_info_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) {
+        ui.horizontal_wrapped(|ui| {
+            ui.re_checkbox(&mut self.node_info_pinned, "Pin");
+            ui.re_checkbox(
+                &mut self.node_info_refresh_automatically,
+                "Refresh automatically",
+            );
+            if ui.button("Refresh").clicked() {
+                self.node_info_open = true;
+            }
+            if self.node_info_open && !self.node_info_pinned && ui.button("Close").clicked() {
+                self.node_info_open = false;
+            }
+        });
+
+        if !self.node_info_open {
+            ui.weak("Node info hidden; select a node or pin this panel.");
+            return;
+        }
+
         let Some(info) = graph.selected_node_info(self.selected_node) else {
             ui.weak("Select a node to inspect graph-owned metadata.");
             return;
@@ -306,11 +335,36 @@ impl HoudiniGraphPanel {
             info.record_count, info.input_count, info.output_count
         ));
         ui.weak(info.summary);
+        ui.horizontal_wrapped(|ui| {
+            ui.weak("Time dependent");
+            ui.label("No");
+        });
 
         for warning in &info.warnings {
             ui.colored_label(ui.visuals().warn_fg_color, warning);
         }
 
+        ui.re_checkbox(&mut self.node_info_show_additional, "Show additional info");
+        if self.node_info_show_additional {
+            self.graph_workbench_additional_node_info_ui(ui, &info);
+        }
+
+        ui.re_checkbox(&mut self.node_info_show_debug, "Show debug");
+        if self.node_info_show_debug {
+            egui::ScrollArea::vertical()
+                .id_salt("houdini_graph_workbench_node_info_debug_scroll")
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    self.node_info_ui(ui, graph);
+                });
+        }
+    }
+
+    fn graph_workbench_additional_node_info_ui(
+        &mut self,
+        ui: &mut Ui,
+        info: &self::model::NodeInfo,
+    ) {
         if let Some(reference_input) = &info.reference_input {
             ui.horizontal_wrapped(|ui| {
                 ui.weak("Reference");
@@ -374,17 +428,6 @@ impl HoudiniGraphPanel {
                 }
             }
         }
-
-        egui::CollapsingHeader::new("Details")
-            .id_salt("houdini_graph_workbench_node_info_details")
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("houdini_graph_workbench_node_info_scroll")
-                    .max_height(180.0)
-                    .show(ui, |ui| {
-                        self.node_info_ui(ui, graph);
-                    });
-            });
     }
 
     fn output_summary_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
@@ -1053,12 +1096,18 @@ impl HoudiniGraphPanel {
         if let Some(pointer_pos) = response.interact_pointer_pos() {
             if response.clicked() || response.drag_started() {
                 self.dragging_node = None;
+                let mut hit_node = false;
                 for (index, node_rect) in node_rects.iter().enumerate() {
                     if node_rect.contains(pointer_pos) {
                         self.selected_node = index;
+                        self.node_info_open = true;
                         self.dragging_node = Some(index);
+                        hit_node = true;
                         break;
                     }
+                }
+                if response.clicked() && !hit_node && !self.node_info_pinned {
+                    self.node_info_open = false;
                 }
             }
 
