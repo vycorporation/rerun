@@ -21,15 +21,50 @@ use crate::ui::houdini_graph_panel::model::{
     CubicBezier, GraphDocument, GraphPoint, GraphStyle, LayerKind, RerunQueryBridge,
     RerunQueryBridgeMode, RerunSceneDebugItem, RerunSceneItem, RerunSceneOutput,
 };
-use crate::ui::houdini_graph_panel::{lock_houdini_graph, shared_houdini_graph_from_context};
+use crate::ui::houdini_graph_panel::{
+    lock_houdini_graph, lock_houdini_graph_panel, shared_houdini_graph_from_context,
+    shared_houdini_graph_panel_from_context,
+};
 
 #[derive(Default)]
 pub(crate) struct HoudiniGraphView;
 
 #[derive(Default)]
+pub(crate) struct HoudiniNetworkView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniInspectorView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniDataView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniOutputsView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniProjectView;
+
+#[derive(Default)]
 struct HoudiniGraphViewState {
     selected_item_index: Option<usize>,
     last_frame_stats: Option<HoudiniFrameStats>,
+}
+
+#[derive(Default)]
+struct HoudiniPanelViewState;
+
+impl ViewState for HoudiniPanelViewState {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn heap_size_bytes(&self) -> u64 {
+        std::mem::size_of_val(self) as u64
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -177,6 +212,384 @@ impl VisualizerSystem for HoudiniGraphSourceVisualizer {
         _context_systems: &ViewContextCollection,
     ) -> Result<VisualizerExecutionOutput, ViewSystemExecutionError> {
         Ok(VisualizerExecutionOutput::default())
+    }
+}
+
+impl ViewClass for HoudiniNetworkView {
+    fn identifier() -> ViewClassIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewClassIdentifier,
+            "HoudiniNetwork"
+        )
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Network"
+    }
+
+    fn is_experimental(&self) -> bool {
+        true
+    }
+
+    fn icon(&self) -> &'static re_ui::Icon {
+        &icons::VIEW_GRAPH
+    }
+
+    fn help(&self, _os: egui::os::OperatingSystem) -> Help {
+        Help::new("Houdini network")
+            .markdown("Node network editor for the product-fork Houdini graph.")
+    }
+
+    fn on_register(
+        &self,
+        _system_registry: &mut ViewSystemRegistrator<'_>,
+    ) -> Result<(), ViewClassRegistryError> {
+        Ok(())
+    }
+
+    fn new_state(&self) -> Box<dyn ViewState> {
+        Box::<HoudiniPanelViewState>::default()
+    }
+
+    fn preferred_tile_aspect_ratio(&self, _state: &dyn ViewState) -> Option<f32> {
+        Some(16.0 / 10.0)
+    }
+
+    fn layout_priority(&self) -> ViewClassLayoutPriority {
+        ViewClassLayoutPriority::Medium
+    }
+
+    fn spawn_heuristics(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _include_entity: &dyn Fn(&EntityPath) -> bool,
+    ) -> ViewSpawnHeuristics {
+        ViewSpawnHeuristics::root().with_max_views_spawned(1)
+    }
+
+    fn selection_ui(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _space_origin: &EntityPath,
+        _view_id: re_viewer_context::ViewId,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        ui.label("Blueprint view for the shared Houdini node network.");
+        Ok(())
+    }
+
+    fn ui(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _query: &ViewQuery<'_>,
+        _system_output: SystemExecutionOutput,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        show_houdini_panel_view(ui, |panel, ui, graph| {
+            panel.show_network_view(ui, graph);
+        });
+        Ok(())
+    }
+}
+
+impl ViewClass for HoudiniInspectorView {
+    fn identifier() -> ViewClassIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewClassIdentifier,
+            "HoudiniInspector"
+        )
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Inspector"
+    }
+
+    fn is_experimental(&self) -> bool {
+        true
+    }
+
+    fn icon(&self) -> &'static re_ui::Icon {
+        &icons::VIEW_GENERIC
+    }
+
+    fn help(&self, _os: egui::os::OperatingSystem) -> Help {
+        Help::new("Houdini inspector")
+            .markdown("Parameters, operators, find, display, and layer controls for the shared Houdini graph.")
+    }
+
+    fn on_register(
+        &self,
+        _system_registry: &mut ViewSystemRegistrator<'_>,
+    ) -> Result<(), ViewClassRegistryError> {
+        Ok(())
+    }
+
+    fn new_state(&self) -> Box<dyn ViewState> {
+        Box::<HoudiniPanelViewState>::default()
+    }
+
+    fn preferred_tile_aspect_ratio(&self, _state: &dyn ViewState) -> Option<f32> {
+        Some(4.0 / 5.0)
+    }
+
+    fn layout_priority(&self) -> ViewClassLayoutPriority {
+        ViewClassLayoutPriority::Medium
+    }
+
+    fn spawn_heuristics(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _include_entity: &dyn Fn(&EntityPath) -> bool,
+    ) -> ViewSpawnHeuristics {
+        ViewSpawnHeuristics::root().with_max_views_spawned(1)
+    }
+
+    fn selection_ui(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _space_origin: &EntityPath,
+        _view_id: re_viewer_context::ViewId,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        ui.label("Blueprint view for the shared Houdini inspector.");
+        Ok(())
+    }
+
+    fn ui(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _query: &ViewQuery<'_>,
+        _system_output: SystemExecutionOutput,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        show_houdini_panel_view(ui, |panel, ui, graph| {
+            panel.show_inspector_view(ui, graph);
+        });
+        Ok(())
+    }
+}
+
+impl ViewClass for HoudiniDataView {
+    fn identifier() -> ViewClassIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewClassIdentifier,
+            "HoudiniData"
+        )
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Data"
+    }
+
+    fn is_experimental(&self) -> bool {
+        true
+    }
+
+    fn help(&self, _os: egui::os::OperatingSystem) -> Help {
+        Help::new("Houdini data")
+            .markdown("Attribute table and source summary for the shared Houdini graph.")
+    }
+
+    fn on_register(
+        &self,
+        _system_registry: &mut ViewSystemRegistrator<'_>,
+    ) -> Result<(), ViewClassRegistryError> {
+        Ok(())
+    }
+
+    fn new_state(&self) -> Box<dyn ViewState> {
+        Box::<HoudiniPanelViewState>::default()
+    }
+
+    fn layout_priority(&self) -> ViewClassLayoutPriority {
+        ViewClassLayoutPriority::Low
+    }
+
+    fn spawn_heuristics(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _include_entity: &dyn Fn(&EntityPath) -> bool,
+    ) -> ViewSpawnHeuristics {
+        ViewSpawnHeuristics::empty().with_max_views_spawned(1)
+    }
+
+    fn ui(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _query: &ViewQuery<'_>,
+        _system_output: SystemExecutionOutput,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        show_houdini_panel_view(ui, |panel, ui, graph| {
+            panel.show_data_view(ui, graph);
+        });
+        Ok(())
+    }
+}
+
+impl ViewClass for HoudiniOutputsView {
+    fn identifier() -> ViewClassIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewClassIdentifier,
+            "HoudiniOutputs"
+        )
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Outputs"
+    }
+
+    fn is_experimental(&self) -> bool {
+        true
+    }
+
+    fn help(&self, _os: egui::os::OperatingSystem) -> Help {
+        Help::new("Houdini outputs")
+            .markdown("Output summary, recording export, and render benchmark controls for the shared Houdini graph.")
+    }
+
+    fn on_register(
+        &self,
+        _system_registry: &mut ViewSystemRegistrator<'_>,
+    ) -> Result<(), ViewClassRegistryError> {
+        Ok(())
+    }
+
+    fn new_state(&self) -> Box<dyn ViewState> {
+        Box::<HoudiniPanelViewState>::default()
+    }
+
+    fn layout_priority(&self) -> ViewClassLayoutPriority {
+        ViewClassLayoutPriority::Low
+    }
+
+    fn spawn_heuristics(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _include_entity: &dyn Fn(&EntityPath) -> bool,
+    ) -> ViewSpawnHeuristics {
+        ViewSpawnHeuristics::empty().with_max_views_spawned(1)
+    }
+
+    fn ui(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _query: &ViewQuery<'_>,
+        _system_output: SystemExecutionOutput,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        show_houdini_panel_view(ui, |panel, ui, graph| {
+            panel.show_outputs_view(ui, graph);
+        });
+        Ok(())
+    }
+}
+
+impl ViewClass for HoudiniProjectView {
+    fn identifier() -> ViewClassIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewClassIdentifier,
+            "HoudiniProject"
+        )
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Project"
+    }
+
+    fn is_experimental(&self) -> bool {
+        true
+    }
+
+    fn help(&self, _os: egui::os::OperatingSystem) -> Help {
+        Help::new("Houdini project")
+            .markdown("Project-local graph document, Python environment, and asset controls.")
+    }
+
+    fn on_register(
+        &self,
+        _system_registry: &mut ViewSystemRegistrator<'_>,
+    ) -> Result<(), ViewClassRegistryError> {
+        Ok(())
+    }
+
+    fn new_state(&self) -> Box<dyn ViewState> {
+        Box::<HoudiniPanelViewState>::default()
+    }
+
+    fn layout_priority(&self) -> ViewClassLayoutPriority {
+        ViewClassLayoutPriority::Low
+    }
+
+    fn spawn_heuristics(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _include_entity: &dyn Fn(&EntityPath) -> bool,
+    ) -> ViewSpawnHeuristics {
+        ViewSpawnHeuristics::empty().with_max_views_spawned(1)
+    }
+
+    fn ui(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _query: &ViewQuery<'_>,
+        _system_output: SystemExecutionOutput,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        show_houdini_panel_view(ui, |panel, ui, graph| {
+            panel.show_project_view(ui, graph);
+        });
+        Ok(())
+    }
+}
+
+fn show_houdini_panel_view(
+    ui: &mut egui::Ui,
+    render: impl FnOnce(
+        &mut crate::ui::HoudiniGraphPanel,
+        &mut egui::Ui,
+        &crate::ui::SharedHoudiniGraph,
+    ),
+) {
+    match (
+        shared_houdini_graph_from_context(ui.ctx()),
+        shared_houdini_graph_panel_from_context(ui.ctx()),
+    ) {
+        (Some(shared_graph), Some(shared_panel)) => {
+            let mut panel = lock_houdini_graph_panel(&shared_panel);
+            render(&mut panel, ui, &shared_graph);
+        }
+        _ => {
+            let rect = ui.max_rect();
+            ui.painter()
+                .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "Houdini graph state is not installed for this frame.",
+                FontId::proportional(13.0),
+                ui.visuals().weak_text_color(),
+            );
+        }
     }
 }
 
