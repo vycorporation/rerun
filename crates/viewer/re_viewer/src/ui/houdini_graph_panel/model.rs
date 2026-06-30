@@ -1114,10 +1114,8 @@ impl GraphDocument {
             .get(source_node_index)
             .map(|node| node.layout_position)
             .unwrap_or(GraphPoint::new(0.5, 0.5));
-        projection_node.layout_position = GraphPoint::new(
-            ((source_position.x + 0.08).min(0.96)).max(0.04),
-            (source_position.y + 0.12).clamp(0.04, 0.96),
-        );
+        projection_node.layout_position =
+            GraphPoint::new(source_position.x + 0.08, source_position.y + 0.12);
 
         let insert_index = reference_node_index.min(self.nodes.len());
         self.nodes.insert(insert_index, projection_node);
@@ -8526,6 +8524,9 @@ mod tests {
             .add_reference_input_node(first_null_index)
             .expect("first null output should be referenceable");
         assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+        for node in &mut graph.nodes {
+            node.layout_position = GraphPoint::new(-1.25, 1.80);
+        }
 
         let projection_index = graph
             .create_assisted_projection_for_first_repairable_reference_target(reference_index)
@@ -8540,6 +8541,16 @@ mod tests {
         assert_eq!(
             graph.nodes[projection_index].kind,
             NodeKind::SubstrateProjection
+        );
+        assert!(
+            (graph.nodes[projection_index].layout_position.x - -1.17).abs() < 0.0001,
+            "{:?}",
+            graph.nodes[projection_index].layout_position
+        );
+        assert!(
+            (graph.nodes[projection_index].layout_position.y - 1.92).abs() < 0.0001,
+            "{:?}",
+            graph.nodes[projection_index].layout_position
         );
         assert!(
             graph.nodes[projection_index]
