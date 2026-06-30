@@ -61,6 +61,7 @@ pub(crate) struct HoudiniGraphPanel {
     tab_menu_open: bool,
     tab_menu_anchor: Pos2,
     tab_menu_filter_needs_focus: bool,
+    tab_menu_selection_index: usize,
     last_parquet_path: Option<String>,
     parquet_status: Option<String>,
     graph_document_status: Option<String>,
@@ -106,6 +107,7 @@ impl Default for HoudiniGraphPanel {
             tab_menu_open: false,
             tab_menu_anchor: Pos2::ZERO,
             tab_menu_filter_needs_focus: false,
+            tab_menu_selection_index: 0,
             last_parquet_path: None,
             parquet_status: None,
             graph_document_status: None,
@@ -578,6 +580,7 @@ impl HoudiniGraphPanel {
         self.tab_menu_open = true;
         self.tab_menu_anchor = anchor + egui::vec2(6.0, 6.0);
         self.tab_menu_filter_needs_focus = true;
+        self.tab_menu_selection_index = 0;
         self.active_graph_pane = GraphWorkbenchPane::Operators;
     }
 
@@ -728,12 +731,12 @@ impl HoudiniGraphPanel {
         applied_action
     }
 
-    fn first_matching_operator_palette_action(
+    fn matching_operator_palette_actions(
         &self,
         graph: &GraphDocument,
         include_organization: bool,
         include_layers: bool,
-    ) -> Option<OperatorPaletteAction> {
+    ) -> Vec<OperatorPaletteAction> {
         let filter = self.operator_filter.trim().to_lowercase();
         let entries = operator_palette_entries(
             graph,
@@ -741,17 +744,15 @@ impl HoudiniGraphPanel {
             include_organization,
             include_layers,
         );
-        OperatorPaletteCategory::ALL
-            .into_iter()
-            .find_map(|category| {
-                entries
-                    .iter()
-                    .find(|entry| {
-                        entry.category == category
-                            && operator_matches(&filter, entry.label, entry.aliases)
-                    })
-                    .map(|entry| entry.action)
-            })
+        let mut actions = Vec::new();
+        for category in OperatorPaletteCategory::ALL {
+            actions.extend(entries.iter().filter_map(|entry| {
+                (entry.category == category
+                    && operator_matches(&filter, entry.label, entry.aliases))
+                .then_some(entry.action)
+            }));
+        }
+        actions
     }
 
     fn apply_operator_palette_action(
@@ -2364,13 +2365,36 @@ impl HoudiniGraphPanel {
                         filter_response.request_focus();
                         self.tab_menu_filter_needs_focus = false;
                     }
+                    if filter_response.changed() {
+                        self.tab_menu_selection_index = 0;
+                    }
                     if ui.small_button("Clear").clicked() {
                         self.operator_filter.clear();
+                        self.tab_menu_selection_index = 0;
                         filter_response.request_focus();
                     }
                 });
+                let matching_actions = self.matching_operator_palette_actions(graph, true, false);
+                if self.tab_menu_selection_index >= matching_actions.len() {
+                    self.tab_menu_selection_index = 0;
+                }
+                if !matching_actions.is_empty() {
+                    ui.input(|input| {
+                        if input.key_pressed(egui::Key::ArrowDown) {
+                            self.tab_menu_selection_index =
+                                (self.tab_menu_selection_index + 1) % matching_actions.len();
+                        }
+                        if input.key_pressed(egui::Key::ArrowUp) {
+                            self.tab_menu_selection_index = if self.tab_menu_selection_index == 0 {
+                                matching_actions.len() - 1
+                            } else {
+                                self.tab_menu_selection_index - 1
+                            };
+                        }
+                    });
+                }
                 let highlighted_action =
-                    self.first_matching_operator_palette_action(graph, true, false);
+                    matching_actions.get(self.tab_menu_selection_index).copied();
                 let accepted_keyboard_action = ui
                     .input(|input| input.key_pressed(egui::Key::Enter))
                     && highlighted_action
