@@ -501,6 +501,15 @@ impl HoudiniGraphPanel {
                     self.resize_all_network_boxes_to_contents(graph);
                     ui.close();
                 }
+                ui.separator();
+                if ui.button("Collapse Boxes and Notes").clicked() {
+                    self.set_all_annotation_collapsed(graph, true);
+                    ui.close();
+                }
+                if ui.button("Expand Boxes and Notes").clicked() {
+                    self.set_all_annotation_collapsed(graph, false);
+                    ui.close();
+                }
             });
 
             ui.separator();
@@ -584,6 +593,12 @@ impl HoudiniGraphPanel {
             .collect::<Vec<_>>();
         for index in network_box_indices {
             graph.resize_network_box_to_contents(index);
+        }
+    }
+
+    fn set_all_annotation_collapsed(&mut self, graph: &mut GraphDocument, collapsed: bool) {
+        for annotation in &mut graph.annotations {
+            annotation.collapsed = collapsed;
         }
     }
 
