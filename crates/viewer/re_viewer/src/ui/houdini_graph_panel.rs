@@ -74,6 +74,7 @@ pub(crate) struct HoudiniGraphPanel {
     benchmark_polygon_count: usize,
     operator_filter: String,
     operator_history: Vec<OperatorPaletteAction>,
+    graph_search_filter: String,
     node_info_open: bool,
     node_info_pinned: bool,
     node_info_refresh_automatically: bool,
@@ -122,6 +123,7 @@ impl Default for HoudiniGraphPanel {
             benchmark_polygon_count: 1_000,
             operator_filter: String::new(),
             operator_history: Vec::new(),
+            graph_search_filter: String::new(),
             node_info_open: true,
             node_info_pinned: false,
             node_info_refresh_automatically: true,
@@ -176,6 +178,7 @@ impl HoudiniGraphWorkspace {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GraphWorkbenchPane {
     Operators,
+    Find,
     Parameters,
     Info,
     Display,
@@ -183,8 +186,9 @@ enum GraphWorkbenchPane {
 }
 
 impl GraphWorkbenchPane {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Operators,
+        Self::Find,
         Self::Parameters,
         Self::Info,
         Self::Display,
@@ -194,6 +198,7 @@ impl GraphWorkbenchPane {
     fn label(self) -> &'static str {
         match self {
             Self::Operators => "Ops",
+            Self::Find => "Find",
             Self::Parameters => "Parms",
             Self::Info => "Info",
             Self::Display => "Display",
@@ -261,6 +266,20 @@ struct OperatorPaletteUiOptions {
     include_organization: bool,
     include_layers: bool,
     highlighted_action: Option<OperatorPaletteAction>,
+}
+
+#[derive(Clone, Debug)]
+struct GraphSearchResult {
+    target: GraphSearchTarget,
+    label: String,
+    kind: &'static str,
+    detail: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphSearchTarget {
+    Node(usize),
+    Annotation(usize),
 }
 
 impl HoudiniGraphPanel {
@@ -452,6 +471,10 @@ impl HoudiniGraphPanel {
             ui.menu_button("Tools", |ui| {
                 if ui.button("Operators").clicked() {
                     self.active_graph_pane = GraphWorkbenchPane::Operators;
+                    ui.close();
+                }
+                if ui.button("Find").clicked() {
+                    self.active_graph_pane = GraphWorkbenchPane::Find;
                     ui.close();
                 }
                 if ui.button("Parameters").clicked() {
@@ -1361,6 +1384,9 @@ impl HoudiniGraphPanel {
                 ui.add_space(8.0);
                 self.network_organization_ui(ui, graph);
             }
+            GraphWorkbenchPane::Find => {
+                self.graph_search_ui(ui, graph);
+            }
             GraphWorkbenchPane::Parameters => {
                 self.selected_node_controls_ui(ui, graph);
             }
@@ -2210,6 +2236,128 @@ impl HoudiniGraphPanel {
                 highlighted_action: None,
             },
         );
+    }
+
+    fn graph_search_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.horizontal(|ui| {
+            ui.weak("Find");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.graph_search_filter)
+                    .desired_width((ui.available_width() - 48.0).clamp(120.0, 220.0))
+                    .hint_text("node, note, box"),
+            );
+            if ui.small_button("Clear").clicked() {
+                self.graph_search_filter.clear();
+            }
+        });
+        ui.weak("Search graph metadata; dataset records are unchanged.");
+
+        let results = self.graph_search_results(graph);
+        if self.graph_search_filter.trim().is_empty() {
+            ui.weak("Type to find nodes, comments, graph notes, or network boxes.");
+            return;
+        }
+        if results.is_empty() {
+            ui.weak("No matching graph items.");
+            return;
+        }
+
+        ui.separator();
+        for result in results {
+            let selected = match result.target {
+                GraphSearchTarget::Node(index) => {
+                    self.selected_annotation.is_none() && self.selected_node == index
+                }
+                GraphSearchTarget::Annotation(index) => self.selected_annotation == Some(index),
+            };
+            let clicked = ui
+                .selectable_label(selected, format!("{}  {}", result.kind, result.label))
+                .on_hover_text(&result.detail)
+                .clicked();
+            ui.weak(&result.detail);
+            if clicked {
+                self.apply_graph_search_result(result.target);
+            }
+        }
+    }
+
+    fn graph_search_results(&self, graph: &GraphDocument) -> Vec<GraphSearchResult> {
+        let filter = self.graph_search_filter.trim().to_lowercase();
+        if filter.is_empty() {
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+        for (index, node) in graph.nodes.iter().enumerate() {
+            let parameter_value = format!("{:.2}", node.parameter.value);
+            let haystack = [
+                node.name.as_str(),
+                node.kind.as_str(),
+                node.parameter.name,
+                node.parameter.kind.as_str(),
+                parameter_value.as_str(),
+                node.comment.as_str(),
+                node.info,
+            ]
+            .join(" ")
+            .to_lowercase();
+            if haystack.contains(&filter) {
+                results.push(GraphSearchResult {
+                    target: GraphSearchTarget::Node(index),
+                    label: node.name.clone(),
+                    kind: "Node",
+                    detail: format!(
+                        "{}; {} = {:.2}",
+                        node.kind.as_str(),
+                        node.parameter.name,
+                        node.parameter.value
+                    ),
+                });
+            }
+        }
+
+        for (index, annotation) in graph.annotations.iter().enumerate() {
+            let haystack = [
+                annotation.title.as_str(),
+                annotation.text.as_str(),
+                annotation.kind.as_str(),
+            ]
+            .join(" ")
+            .to_lowercase();
+            if haystack.contains(&filter) {
+                results.push(GraphSearchResult {
+                    target: GraphSearchTarget::Annotation(index),
+                    label: annotation.title.clone(),
+                    kind: annotation.kind.as_str(),
+                    detail: if annotation.text.trim().is_empty() {
+                        format!("{} layout item", annotation.kind.as_str())
+                    } else {
+                        format_sticky_note_text(&annotation.text)
+                    },
+                });
+            }
+        }
+
+        results
+    }
+
+    fn apply_graph_search_result(&mut self, target: GraphSearchTarget) {
+        match target {
+            GraphSearchTarget::Node(index) => {
+                self.selected_node = index;
+                self.selected_annotation = None;
+                self.context_menu_canvas = false;
+                self.node_info_open = true;
+                self.pending_frame_selected = true;
+                self.active_workspace = HoudiniGraphWorkspace::Graph;
+            }
+            GraphSearchTarget::Annotation(index) => {
+                self.selected_annotation = Some(index);
+                self.context_menu_canvas = false;
+                self.active_workspace = HoudiniGraphWorkspace::Graph;
+                self.active_graph_pane = GraphWorkbenchPane::Find;
+            }
+        }
     }
 
     fn compact_layer_stack_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
