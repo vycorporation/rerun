@@ -1948,6 +1948,34 @@ impl HoudiniGraphPanel {
             self.resizing_annotation = None;
         }
 
+        let hovered_ring_action = if response.hovered() {
+            ui.input(|input| input.pointer.hover_pos())
+                .and_then(|pointer_pos| {
+                    node_rects
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, node_rect)| {
+                            let ring_visible = match network_view.node_ring_visibility {
+                                NetworkNodeRingVisibility::Hidden => false,
+                                NetworkNodeRingVisibility::Selected => self.selected_node == index,
+                                NetworkNodeRingVisibility::Always => true,
+                            };
+                            ring_visible
+                                .then(|| {
+                                    node_ring_action_at(
+                                        *node_rect,
+                                        pointer_pos,
+                                        self.graph_view_zoom,
+                                    )
+                                    .map(|action| (index, action, pointer_pos))
+                                })
+                                .flatten()
+                        })
+                })
+        } else {
+            None
+        };
+
         let connector_color = ui.visuals().widgets.noninteractive.fg_stroke.color;
         for edge in graph.graph_layout().edges {
             let from_rect = node_rects[edge.from_node];
@@ -1977,7 +2005,17 @@ impl HoudiniGraphPanel {
                 NetworkNodeRingVisibility::Always => true,
             };
             if show_ring {
-                draw_node_ring(&painter, node_rect, selected, node, ui.visuals());
+                let hovered_action = hovered_ring_action.and_then(|(node_index, action, _)| {
+                    (node_index == layout_node.node_index).then_some(action)
+                });
+                draw_node_ring(
+                    &painter,
+                    node_rect,
+                    selected,
+                    node,
+                    hovered_action,
+                    ui.visuals(),
+                );
             }
 
             let fill = if selected {
@@ -2033,6 +2071,19 @@ impl HoudiniGraphPanel {
                 );
             }
             draw_node_badges(&painter, node_rect, node, network_view, ui.visuals());
+        }
+
+        if let Some((node_index, action, pointer_pos)) = hovered_ring_action
+            && let Some(node) = graph.nodes.get(node_index)
+        {
+            draw_node_ring_action_tooltip(
+                &painter,
+                canvas_rect,
+                pointer_pos,
+                node,
+                action,
+                ui.visuals(),
+            );
         }
 
         painter.text(
@@ -3253,6 +3304,7 @@ fn draw_node_ring(
     node_rect: Rect,
     selected: bool,
     node: &self::model::GraphNode,
+    hovered_action: Option<NodeRingAction>,
     visuals: &egui::Visuals,
 ) {
     let center = node_rect.center();
@@ -3264,45 +3316,49 @@ fn draw_node_ring(
     );
 
     let status_color = evaluation_color_from_visuals(visuals, node.evaluation.state);
-    let entries = [
-        (
-            "i",
-            -std::f32::consts::PI,
-            visuals.widgets.noninteractive.bg_fill,
-        ),
-        (
-            "D",
-            -0.38 * std::f32::consts::PI,
-            if node.participates_in_output {
-                visuals.selection.stroke.color
-            } else {
-                visuals.widgets.inactive.bg_fill
-            },
-        ),
-        (
-            "M",
-            0.38 * std::f32::consts::PI,
-            if node.evaluation.manual {
-                visuals.warn_fg_color
-            } else {
-                visuals.widgets.inactive.bg_fill
-            },
-        ),
-        ("!", 0.78 * std::f32::consts::PI, status_color),
-    ];
-
-    for (label, angle, fill) in entries {
+    for action in NODE_RING_ACTIONS {
+        let fill = match action {
+            NodeRingAction::Info => visuals.widgets.noninteractive.bg_fill,
+            NodeRingAction::Display => {
+                if node.participates_in_output {
+                    visuals.selection.stroke.color
+                } else {
+                    visuals.widgets.inactive.bg_fill
+                }
+            }
+            NodeRingAction::Manual => {
+                if node.evaluation.manual {
+                    visuals.warn_fg_color
+                } else {
+                    visuals.widgets.inactive.bg_fill
+                }
+            }
+            NodeRingAction::Run => status_color,
+        };
+        let highlighted = hovered_action == Some(action);
+        let angle = action.angle();
         let pos = center + egui::vec2(angle.cos(), angle.sin()) * ring_radius;
-        painter.circle_filled(pos, 11.0, faded_color(fill, 0.85));
+        painter.circle_filled(
+            pos,
+            if highlighted { 13.0 } else { 11.0 },
+            faded_color(fill, if highlighted { 1.0 } else { 0.85 }),
+        );
         painter.circle_stroke(
             pos,
-            11.0,
-            Stroke::new(1.0, visuals.widgets.inactive.fg_stroke.color),
+            if highlighted { 13.0 } else { 11.0 },
+            Stroke::new(
+                if highlighted { 2.0 } else { 1.0 },
+                if highlighted {
+                    visuals.selection.stroke.color
+                } else {
+                    visuals.widgets.inactive.fg_stroke.color
+                },
+            ),
         );
         painter.text(
             pos,
             Align2::CENTER_CENTER,
-            label,
+            action.glyph(),
             FontId::monospace(10.0),
             visuals.text_color(),
         );
@@ -3317,24 +3373,107 @@ enum NodeRingAction {
     Run,
 }
 
+const NODE_RING_ACTIONS: [NodeRingAction; 4] = [
+    NodeRingAction::Info,
+    NodeRingAction::Display,
+    NodeRingAction::Manual,
+    NodeRingAction::Run,
+];
+
+impl NodeRingAction {
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Info => "i",
+            Self::Display => "D",
+            Self::Manual => "M",
+            Self::Run => "!",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Info => "Node Info",
+            Self::Display => "Display Output",
+            Self::Manual => "Manual Cook",
+            Self::Run => "Run Node",
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            Self::Info => "Open concise info.",
+            Self::Display => "Toggle output participation.",
+            Self::Manual => "Toggle manual evaluation.",
+            Self::Run => "Cook this node now.",
+        }
+    }
+
+    fn angle(self) -> f32 {
+        match self {
+            Self::Info => -std::f32::consts::PI,
+            Self::Display => -0.38 * std::f32::consts::PI,
+            Self::Manual => 0.38 * std::f32::consts::PI,
+            Self::Run => 0.78 * std::f32::consts::PI,
+        }
+    }
+}
+
 fn node_ring_action_at(node_rect: Rect, pointer_pos: Pos2, zoom: f32) -> Option<NodeRingAction> {
     let center = node_rect.center();
     let ring_radius = node_rect.width() * 0.76;
     let hit_radius = (13.0 * zoom).clamp(9.0, 18.0);
-    let entries = [
-        (NodeRingAction::Info, -std::f32::consts::PI),
-        (NodeRingAction::Display, -0.38 * std::f32::consts::PI),
-        (NodeRingAction::Manual, 0.38 * std::f32::consts::PI),
-        (NodeRingAction::Run, 0.78 * std::f32::consts::PI),
-    ];
 
-    entries
-        .into_iter()
-        .find(|(_, angle)| {
-            let pos = center + egui::vec2(angle.cos(), angle.sin()) * ring_radius;
-            pos.distance(pointer_pos) <= hit_radius
-        })
-        .map(|(action, _)| action)
+    NODE_RING_ACTIONS.into_iter().find(|action| {
+        let angle = action.angle();
+        let pos = center + egui::vec2(angle.cos(), angle.sin()) * ring_radius;
+        pos.distance(pointer_pos) <= hit_radius
+    })
+}
+
+fn draw_node_ring_action_tooltip(
+    painter: &egui::Painter,
+    canvas_rect: Rect,
+    pointer_pos: Pos2,
+    node: &self::model::GraphNode,
+    action: NodeRingAction,
+    visuals: &egui::Visuals,
+) {
+    let tooltip_size = egui::vec2(292.0, 52.0);
+    let min_x = canvas_rect.left() + 8.0;
+    let min_y = canvas_rect.top() + 8.0;
+    let max_x = (canvas_rect.right() - tooltip_size.x - 8.0).max(min_x);
+    let max_y = (canvas_rect.bottom() - tooltip_size.y - 8.0).max(min_y);
+    let min = Pos2::new(
+        (pointer_pos.x + 14.0).clamp(min_x, max_x),
+        (pointer_pos.y + 14.0).clamp(min_y, max_y),
+    );
+    let rect = Rect::from_min_size(min, tooltip_size);
+
+    painter.rect_filled(rect, 5.0, visuals.extreme_bg_color);
+    painter.rect_stroke(
+        rect,
+        5.0,
+        Stroke::new(1.0, visuals.selection.stroke.color),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(10.0, 8.0),
+        Align2::LEFT_TOP,
+        format!("{}  {}", action.glyph(), action.label()),
+        FontId::proportional(13.0),
+        visuals.text_color(),
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(10.0, 27.0),
+        Align2::LEFT_TOP,
+        format!(
+            "{}: {}",
+            format_node_name(&node.name, 116.0),
+            action.detail()
+        ),
+        FontId::proportional(11.0),
+        visuals.weak_text_color(),
+    );
 }
 
 fn draw_node_badges(
