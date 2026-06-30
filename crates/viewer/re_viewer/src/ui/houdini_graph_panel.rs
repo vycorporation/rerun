@@ -57,6 +57,7 @@ pub(crate) struct HoudiniGraphPanel {
     resizing_annotation: Option<usize>,
     graph_view_zoom: f32,
     graph_view_pan: Vec2,
+    pending_frame_selected: bool,
     tab_menu_open: bool,
     tab_menu_anchor: Pos2,
     last_parquet_path: Option<String>,
@@ -100,6 +101,7 @@ impl Default for HoudiniGraphPanel {
             resizing_annotation: None,
             graph_view_zoom: 1.0,
             graph_view_pan: Vec2::ZERO,
+            pending_frame_selected: false,
             tab_menu_open: false,
             tab_menu_anchor: Pos2::ZERO,
             last_parquet_path: None,
@@ -371,8 +373,18 @@ impl HoudiniGraphPanel {
                 self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddReference);
                 self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddRepairProjection);
                 ui.separator();
-                self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddNetworkBox);
-                self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddStickyNote);
+                self.operator_menu_action_ui_with_label(
+                    ui,
+                    graph,
+                    OperatorPaletteAction::AddNetworkBox,
+                    "Network Box from Selected    Shift+O",
+                );
+                self.operator_menu_action_ui_with_label(
+                    ui,
+                    graph,
+                    OperatorPaletteAction::AddStickyNote,
+                    "Sticky Note    Shift+P",
+                );
             });
 
             ui.menu_button("Edit", |ui| {
@@ -399,9 +411,12 @@ impl HoudiniGraphPanel {
             });
 
             ui.menu_button("Go", |ui| {
-                if ui.button("Home Network").clicked() {
-                    self.graph_view_zoom = 1.0;
-                    self.graph_view_pan = Vec2::ZERO;
+                if ui.button("Home Network    H").clicked() {
+                    self.reset_graph_view();
+                    ui.close();
+                }
+                if ui.button("Frame Selected    F").clicked() {
+                    self.pending_frame_selected = true;
                     ui.close();
                 }
             });
@@ -463,39 +478,19 @@ impl HoudiniGraphPanel {
             });
 
             ui.menu_button("Layout", |ui| {
-                if ui.button("Reset View").clicked() {
-                    self.graph_view_zoom = 1.0;
-                    self.graph_view_pan = Vec2::ZERO;
+                if ui.button("Reset View    H").clicked() {
+                    self.reset_graph_view();
                     ui.close();
                 }
-                if ui.button("Resize Selected Box to Contents").clicked() {
-                    if let Some(annotation_index) =
-                        graph.annotations.iter().position(|annotation| {
-                            annotation.kind == GraphAnnotationKind::NetworkBox
-                                && graph.nodes.get(self.selected_node).is_some_and(|node| {
-                                    annotation
-                                        .member_node_ids
-                                        .iter()
-                                        .any(|member_id| member_id == &node.node_id)
-                                })
-                        })
-                    {
-                        graph.resize_network_box_to_contents(annotation_index);
-                    }
+                if ui
+                    .button("Resize Selected Box to Contents    Shift+M")
+                    .clicked()
+                {
+                    self.resize_selected_network_box_to_contents(graph);
                     ui.close();
                 }
                 if ui.button("Resize Boxes to Contents").clicked() {
-                    let network_box_indices = graph
-                        .annotations
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(index, annotation)| {
-                            (annotation.kind == GraphAnnotationKind::NetworkBox).then_some(index)
-                        })
-                        .collect::<Vec<_>>();
-                    for index in network_box_indices {
-                        graph.resize_network_box_to_contents(index);
-                    }
+                    self.resize_all_network_boxes_to_contents(graph);
                     ui.close();
                 }
             });
@@ -521,6 +516,60 @@ impl HoudiniGraphPanel {
         self.graph_view_zoom = (self.graph_view_zoom * factor).clamp(0.45, 2.6);
     }
 
+    fn reset_graph_view(&mut self) {
+        self.graph_view_zoom = 1.0;
+        self.graph_view_pan = Vec2::ZERO;
+    }
+
+    fn frame_selected_node_in_rect(
+        &mut self,
+        graph: &GraphDocument,
+        layout_rect: Rect,
+        node_size: Vec2,
+    ) -> bool {
+        let Some(node) = graph.nodes.get(self.selected_node) else {
+            return false;
+        };
+        let selected_center = map_node_layout_point(
+            layout_rect,
+            node.layout_position,
+            node_size,
+            self.graph_view_zoom,
+            Vec2::ZERO,
+        );
+        self.graph_view_pan = layout_rect.center() - selected_center;
+        true
+    }
+
+    fn resize_selected_network_box_to_contents(&mut self, graph: &mut GraphDocument) -> bool {
+        let Some(annotation_index) = graph.annotations.iter().position(|annotation| {
+            annotation.kind == GraphAnnotationKind::NetworkBox
+                && graph.nodes.get(self.selected_node).is_some_and(|node| {
+                    annotation
+                        .member_node_ids
+                        .iter()
+                        .any(|member_id| member_id == &node.node_id)
+                })
+        }) else {
+            return false;
+        };
+        graph.resize_network_box_to_contents(annotation_index)
+    }
+
+    fn resize_all_network_boxes_to_contents(&mut self, graph: &mut GraphDocument) {
+        let network_box_indices = graph
+            .annotations
+            .iter()
+            .enumerate()
+            .filter_map(|(index, annotation)| {
+                (annotation.kind == GraphAnnotationKind::NetworkBox).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        for index in network_box_indices {
+            graph.resize_network_box_to_contents(index);
+        }
+    }
+
     fn open_operator_chooser_at(&mut self, anchor: Pos2) {
         self.operator_filter.clear();
         self.tab_menu_open = true;
@@ -534,11 +583,22 @@ impl HoudiniGraphPanel {
         graph: &mut GraphDocument,
         action: OperatorPaletteAction,
     ) {
+        let entry = operator_palette_entry(action);
+        self.operator_menu_action_ui_with_label(ui, graph, action, entry.label);
+    }
+
+    fn operator_menu_action_ui_with_label(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        action: OperatorPaletteAction,
+        label: &str,
+    ) {
         if !operator_palette_action_available(graph, self.selected_node, action) {
             return;
         }
         let entry = operator_palette_entry(action);
-        if ui.button(entry.label).on_hover_text(entry.detail).clicked() {
+        if ui.button(label).on_hover_text(entry.detail).clicked() {
             self.apply_operator_palette_action(graph, action);
             ui.close();
         }
@@ -1760,12 +1820,88 @@ impl HoudiniGraphPanel {
             self.graph_view_zoom,
             self.graph_view_pan,
         );
-        let annotation_rects = layout_annotation_rects(
+        let mut annotation_rects = layout_annotation_rects(
             graph,
             layout_rect,
             self.graph_view_zoom,
             self.graph_view_pan,
         );
+
+        let mut layout_changed = false;
+        if self.pending_frame_selected {
+            layout_changed |= self.frame_selected_node_in_rect(graph, layout_rect, node_size);
+            self.pending_frame_selected = false;
+        }
+        if response.hovered() {
+            let shortcut = ui.input(|input| {
+                let shift_only = modifiers_are_shift_only(input.modifiers);
+                (
+                    input.key_pressed(egui::Key::D) && input.modifiers.is_none(),
+                    input.key_pressed(egui::Key::Tab),
+                    input
+                        .pointer
+                        .hover_pos()
+                        .unwrap_or_else(|| canvas_rect.center()),
+                    input.key_pressed(egui::Key::H) && input.modifiers.is_none(),
+                    input.key_pressed(egui::Key::F) && input.modifiers.is_none(),
+                    input.key_pressed(egui::Key::O) && shift_only,
+                    input.key_pressed(egui::Key::P) && shift_only,
+                    input.key_pressed(egui::Key::M) && shift_only,
+                )
+            });
+            let (
+                display_options_pressed,
+                tab_pressed,
+                pointer_anchor,
+                home_pressed,
+                frame_selected_pressed,
+                add_network_box_pressed,
+                add_sticky_note_pressed,
+                resize_box_pressed,
+            ) = shortcut;
+
+            if display_options_pressed {
+                self.active_graph_pane = GraphWorkbenchPane::Display;
+                toggle_network_display_options(ui);
+            }
+            if tab_pressed {
+                self.open_operator_chooser_at(pointer_anchor);
+            }
+            if home_pressed {
+                self.reset_graph_view();
+                layout_changed = true;
+            }
+            if frame_selected_pressed {
+                layout_changed |= self.frame_selected_node_in_rect(graph, layout_rect, node_size);
+            }
+            if add_network_box_pressed {
+                layout_changed |=
+                    self.apply_operator_palette_action(graph, OperatorPaletteAction::AddNetworkBox);
+            }
+            if add_sticky_note_pressed {
+                layout_changed |=
+                    self.apply_operator_palette_action(graph, OperatorPaletteAction::AddStickyNote);
+            }
+            if resize_box_pressed {
+                layout_changed |= self.resize_selected_network_box_to_contents(graph);
+            }
+        }
+        if layout_changed {
+            node_rects = layout_node_rects(
+                graph,
+                layout_rect,
+                node_size,
+                self.graph_view_zoom,
+                self.graph_view_pan,
+            );
+            annotation_rects = layout_annotation_rects(
+                graph,
+                layout_rect,
+                self.graph_view_zoom,
+                self.graph_view_pan,
+            );
+        }
+
         let generated_lane_y = transform_layout_pos(
             layout_rect,
             Pos2::new(
@@ -1802,18 +1938,6 @@ impl HoudiniGraphPanel {
             );
         }
 
-        if response.hovered()
-            && ui.input(|input| input.key_pressed(egui::Key::D) && input.modifiers.is_none())
-        {
-            self.active_graph_pane = GraphWorkbenchPane::Display;
-            toggle_network_display_options(ui);
-        }
-        if response.hovered() && ui.input(|input| input.key_pressed(egui::Key::Tab)) {
-            let anchor = ui
-                .input(|input| input.pointer.hover_pos())
-                .unwrap_or_else(|| canvas_rect.center());
-            self.open_operator_chooser_at(anchor);
-        }
         if response.hovered() {
             self.update_graph_viewport(ui, layout_rect);
         }
@@ -2181,22 +2305,22 @@ impl HoudiniGraphPanel {
         self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddOutNull);
         self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddReference);
         self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddRepairProjection);
-        self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddNetworkBox);
-        self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddStickyNote);
+        self.operator_menu_action_ui_with_label(
+            ui,
+            graph,
+            OperatorPaletteAction::AddNetworkBox,
+            "Network Box from Selected    Shift+O",
+        );
+        self.operator_menu_action_ui_with_label(
+            ui,
+            graph,
+            OperatorPaletteAction::AddStickyNote,
+            "Sticky Note    Shift+P",
+        );
 
         ui.separator();
-        if ui.button("Resize Box to Contents").clicked() {
-            if let Some(annotation_index) = graph.annotations.iter().position(|annotation| {
-                annotation.kind == GraphAnnotationKind::NetworkBox
-                    && graph.nodes.get(self.selected_node).is_some_and(|node| {
-                        annotation
-                            .member_node_ids
-                            .iter()
-                            .any(|member_id| member_id == &node.node_id)
-                    })
-            }) {
-                graph.resize_network_box_to_contents(annotation_index);
-            }
+        if ui.button("Resize Box to Contents    Shift+M").clicked() {
+            self.resize_selected_network_box_to_contents(graph);
             ui.close();
         }
         if ui.button("Display Options").clicked() {
@@ -2204,9 +2328,8 @@ impl HoudiniGraphPanel {
             toggle_network_display_options(ui);
             ui.close();
         }
-        if ui.button("Reset View").clicked() {
-            self.graph_view_zoom = 1.0;
-            self.graph_view_pan = Vec2::ZERO;
+        if ui.button("Reset View    H").clicked() {
+            self.reset_graph_view();
             ui.close();
         }
     }
@@ -3232,6 +3355,10 @@ fn toggle_network_display_options(ui: &Ui) {
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
     state.toggle(ui);
     state.store(ui.ctx());
+}
+
+fn modifiers_are_shift_only(modifiers: egui::Modifiers) -> bool {
+    modifiers.shift && !modifiers.alt && !modifiers.ctrl && !modifiers.mac_cmd && !modifiers.command
 }
 
 fn format_node_name(name: impl AsRef<str>, max_width: f32) -> String {
