@@ -2311,6 +2311,15 @@ impl HoudiniGraphPanel {
             self.active_graph_pane = GraphWorkbenchPane::Info;
             ui.close();
         }
+        if ui.button("Run Selected").clicked() {
+            graph.request_node_run(self.selected_node);
+            graph.complete_node_run(self.selected_node);
+            ui.close();
+        }
+        if ui.button("Evaluate Output").clicked() {
+            graph.demand_output_evaluation();
+            ui.close();
+        }
 
         ui.separator();
         if ui.button("TAB Menu...").clicked() {
@@ -2349,6 +2358,10 @@ impl HoudiniGraphPanel {
         }
         if ui.button("Reset View    H").clicked() {
             self.reset_graph_view();
+            ui.close();
+        }
+        if ui.button("Frame Selected    F").clicked() {
+            self.pending_frame_selected = true;
             ui.close();
         }
     }
