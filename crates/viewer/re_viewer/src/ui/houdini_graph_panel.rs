@@ -10,9 +10,9 @@ pub(crate) mod model;
 
 use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState, GeometryBounds,
-    GraphDocument, GraphPoint, GraphStyle, HoudiniNodeBinding, LayerKind, NodeStatus,
-    PythonEnvironmentResolveTrigger, PythonEnvironmentStatus, PythonOperatorDependencyStatus,
-    SourceMetadata, SubstrateCoordinateContract,
+    GraphAnnotationKind, GraphDocument, GraphPoint, GraphStyle, HoudiniNodeBinding, LayerKind,
+    NodeStatus, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
+    PythonOperatorDependencyStatus, SourceMetadata, SubstrateCoordinateContract,
 };
 
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
@@ -318,6 +318,10 @@ impl HoudiniGraphPanel {
         self.network_view_options_ui(ui);
 
         ui.add_space(8.0);
+        ui.strong("Organization");
+        self.network_organization_ui(ui, graph);
+
+        ui.add_space(8.0);
         ui.strong("Parameters");
         self.selected_node_controls_ui(ui, graph);
 
@@ -364,6 +368,83 @@ impl HoudiniGraphPanel {
                     ui.label("1.0");
                 });
                 ui.weak("Badge visibility and comment badges are tracked in issue #65.");
+            });
+    }
+
+    fn network_organization_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        egui::CollapsingHeader::new("Boxes and Notes")
+            .id_salt("houdini_graph_network_organization")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Network Box").clicked() {
+                        graph.add_network_box_for_node(self.selected_node);
+                    }
+                    if ui.button("Sticky Note").clicked() {
+                        graph.add_sticky_note_near_node(self.selected_node);
+                    }
+                });
+
+                for annotation in &mut graph.annotations {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.weak(annotation.kind.as_str());
+                        ui.re_checkbox(&mut annotation.collapsed, "Collapsed");
+                    });
+                    ui.add(
+                        egui::TextEdit::singleline(&mut annotation.title)
+                            .desired_width(ui.available_width().max(80.0))
+                            .hint_text("title"),
+                    );
+                    if annotation.kind == GraphAnnotationKind::StickyNote {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut annotation.text)
+                                .desired_rows(2)
+                                .hint_text("note"),
+                        );
+                    } else {
+                        ui.weak(format!(
+                            "{} member node{}",
+                            annotation.member_node_ids.len(),
+                            if annotation.member_node_ids.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        ));
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.weak("Size");
+                        ui.add(
+                            DragValue::new(&mut annotation.size.x)
+                                .speed(0.01)
+                                .range(0.08..=0.95),
+                        );
+                        ui.add(
+                            DragValue::new(&mut annotation.size.y)
+                                .speed(0.01)
+                                .range(0.08..=0.95),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.weak("Pos");
+                        ui.add(
+                            DragValue::new(&mut annotation.position.x)
+                                .speed(0.01)
+                                .range(0.0..=0.95),
+                        );
+                        ui.add(
+                            DragValue::new(&mut annotation.position.y)
+                                .speed(0.01)
+                                .range(0.0..=0.95),
+                        );
+                    });
+                }
+
+                if graph.annotations.is_empty() {
+                    ui.weak("No graph annotations.");
+                }
             });
     }
 
@@ -1188,6 +1269,10 @@ impl HoudiniGraphPanel {
             FontId::monospace(10.0),
             ui.visuals().weak_text_color(),
         );
+
+        for annotation in &graph.annotations {
+            draw_graph_annotation(&painter, layout_rect, annotation, ui.visuals());
+        }
 
         if let Some(pointer_pos) = response.interact_pointer_pos() {
             if response.clicked() || response.drag_started() {
@@ -2283,6 +2368,102 @@ fn layout_node_rects(graph: &GraphDocument, rect: Rect, node_size: Vec2) -> Vec<
         );
     }
     node_rects
+}
+
+fn map_annotation_rect(rect: Rect, position: GraphPoint, size: GraphPoint) -> Rect {
+    let left = rect.left() + rect.width() * position.x.clamp(0.0, 1.0);
+    let top = rect.top() + rect.height() * position.y.clamp(0.0, 1.0);
+    let width = (rect.width() * size.x.clamp(0.04, 1.0)).max(44.0);
+    let height = (rect.height() * size.y.clamp(0.04, 1.0)).max(28.0);
+    Rect::from_min_size(Pos2::new(left, top), egui::vec2(width, height))
+}
+
+fn draw_graph_annotation(
+    painter: &egui::Painter,
+    layout_rect: Rect,
+    annotation: &self::model::GraphAnnotation,
+    visuals: &egui::Visuals,
+) {
+    let full_annotation_rect =
+        map_annotation_rect(layout_rect, annotation.position, annotation.size);
+    let annotation_rect = if annotation.collapsed {
+        Rect::from_min_size(
+            full_annotation_rect.min,
+            egui::vec2(full_annotation_rect.width(), 20.0),
+        )
+    } else {
+        full_annotation_rect
+    };
+    match annotation.kind {
+        GraphAnnotationKind::NetworkBox => {
+            let body_fill = Color32::from_rgba_unmultiplied(150, 150, 150, 72);
+            let header_fill = Color32::from_rgba_unmultiplied(185, 185, 185, 132);
+            let stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 210, 210, 150));
+            painter.rect_filled(annotation_rect, 6.0, body_fill);
+            painter.rect_stroke(annotation_rect, 6.0, stroke, StrokeKind::Inside);
+
+            let header_rect = Rect::from_min_max(
+                annotation_rect.min,
+                Pos2::new(annotation_rect.right(), annotation_rect.top() + 18.0),
+            );
+            painter.rect_filled(header_rect, 6.0, header_fill);
+            painter.text(
+                header_rect.left_center() + egui::vec2(6.0, 0.0),
+                Align2::LEFT_CENTER,
+                format!(
+                    "{} {}",
+                    if annotation.collapsed { "+" } else { "-" },
+                    annotation.title
+                ),
+                FontId::proportional(12.0),
+                visuals.text_color(),
+            );
+        }
+        GraphAnnotationKind::StickyNote => {
+            let body_fill = Color32::from_rgba_unmultiplied(214, 90, 176, 150);
+            let header_fill = Color32::from_rgba_unmultiplied(244, 106, 205, 185);
+            let stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(230, 210, 72, 210));
+            painter.rect_filled(annotation_rect, 5.0, body_fill);
+            painter.rect_stroke(annotation_rect, 5.0, stroke, StrokeKind::Inside);
+
+            let header_rect = Rect::from_min_max(
+                annotation_rect.min,
+                Pos2::new(annotation_rect.right(), annotation_rect.top() + 18.0),
+            );
+            painter.rect_filled(header_rect, 5.0, header_fill);
+            painter.text(
+                header_rect.left_center() + egui::vec2(6.0, 0.0),
+                Align2::LEFT_CENTER,
+                format!(
+                    "{} {}",
+                    if annotation.collapsed { "+" } else { "-" },
+                    annotation.title
+                ),
+                FontId::proportional(12.0),
+                Color32::BLACK,
+            );
+
+            if !annotation.collapsed && !annotation.text.trim().is_empty() {
+                painter.text(
+                    annotation_rect.left_top() + egui::vec2(8.0, 26.0),
+                    Align2::LEFT_TOP,
+                    format_sticky_note_text(&annotation.text),
+                    FontId::proportional(11.0),
+                    Color32::BLACK,
+                );
+            }
+        }
+    }
+}
+
+fn format_sticky_note_text(text: &str) -> String {
+    let text = text.trim().replace('\n', " ");
+    if text.chars().count() <= 56 {
+        text
+    } else {
+        let prefix = text.chars().take(55).collect::<String>();
+        format!("{prefix}…")
+    }
 }
 
 fn draw_arrowhead(painter: &egui::Painter, tip: Pos2, color: Color32) {

@@ -31,6 +31,7 @@ impl GraphPoint {
 pub(crate) struct GraphDocument {
     pub source: GraphSource,
     pub nodes: Vec<GraphNode>,
+    pub annotations: Vec<GraphAnnotation>,
     pub layers: Vec<Layer>,
     pub style: GraphStyle,
     pub geometry: Vec<Geometry>,
@@ -199,6 +200,22 @@ impl GraphDocument {
                     info: "Prepares adaptive viewer geometry only at the output edge.",
                 },
             ],
+            annotations: vec![
+                GraphAnnotation::network_box(
+                    "box.prep".to_owned(),
+                    "Prep".to_owned(),
+                    GraphPoint::new(0.03, 0.24),
+                    GraphPoint::new(0.62, 0.48),
+                    vec!["source.main".to_owned(), "filter.main".to_owned()],
+                ),
+                GraphAnnotation::sticky_note(
+                    "note.review".to_owned(),
+                    "Review".to_owned(),
+                    "Check score cutoff before publishing output.".to_owned(),
+                    GraphPoint::new(0.60, 0.12),
+                    GraphPoint::new(0.30, 0.28),
+                ),
+            ],
             layers: vec![
                 Layer {
                     name: "Polygons".to_owned(),
@@ -350,6 +367,78 @@ impl GraphDocument {
             style: source_layer.style,
         });
         true
+    }
+
+    pub fn add_network_box_for_node(&mut self, node_index: usize) -> Option<usize> {
+        let node = self.nodes.get(node_index)?;
+        let position = GraphPoint::new(
+            (node.layout_position.x - 0.08).clamp(0.0, 0.78),
+            (node.layout_position.y - 0.16).clamp(0.0, 0.68),
+        );
+        let annotation = GraphAnnotation::network_box(
+            self.unique_annotation_id("box"),
+            self.unique_annotation_title("Network Box"),
+            position,
+            GraphPoint::new(0.22, 0.24),
+            vec![node.node_id.clone()],
+        );
+        self.annotations.push(annotation);
+        Some(self.annotations.len() - 1)
+    }
+
+    pub fn add_sticky_note_near_node(&mut self, node_index: usize) -> Option<usize> {
+        let node = self.nodes.get(node_index)?;
+        let position = GraphPoint::new(
+            (node.layout_position.x + 0.08).clamp(0.0, 0.78),
+            (node.layout_position.y - 0.18).clamp(0.0, 0.70),
+        );
+        let annotation = GraphAnnotation::sticky_note(
+            self.unique_annotation_id("note"),
+            self.unique_annotation_title("Sticky Note"),
+            String::new(),
+            position,
+            GraphPoint::new(0.22, 0.20),
+        );
+        self.annotations.push(annotation);
+        Some(self.annotations.len() - 1)
+    }
+
+    fn unique_annotation_id(&self, prefix: &str) -> String {
+        let mut suffix = 1;
+        loop {
+            let annotation_id = format!("{prefix}.{suffix}");
+            if !self
+                .annotations
+                .iter()
+                .any(|annotation| annotation.annotation_id == annotation_id)
+            {
+                return annotation_id;
+            }
+            suffix += 1;
+        }
+    }
+
+    fn unique_annotation_title(&self, candidate: &str) -> String {
+        if !self
+            .annotations
+            .iter()
+            .any(|annotation| annotation.title == candidate)
+        {
+            return candidate.to_owned();
+        }
+
+        let mut suffix = 2;
+        loop {
+            let title = format!("{candidate} {suffix}");
+            if !self
+                .annotations
+                .iter()
+                .any(|annotation| annotation.title == title)
+            {
+                return title;
+            }
+            suffix += 1;
+        }
     }
 
     pub fn emits(&self, geometry: &Geometry) -> bool {
@@ -3803,6 +3892,8 @@ struct HoudiniGraphSidecar {
     version: u32,
     source: GraphSourceSidecar,
     nodes: Vec<NodeSidecar>,
+    #[serde(default)]
+    annotations: Vec<GraphAnnotation>,
     layers: Vec<LayerSidecar>,
     #[serde(default)]
     style: GraphStyle,
@@ -3857,6 +3948,7 @@ impl HoudiniGraphSidecar {
                     show_comment_in_network: node.show_comment_in_network,
                 })
                 .collect(),
+            annotations: graph.annotations.clone(),
             layers: graph
                 .layers
                 .iter()
@@ -3898,6 +3990,7 @@ impl HoudiniGraphSidecar {
         };
         graph.geometry = self.demo_geometry;
         graph.recording_geometry = self.recording_geometry;
+        graph.annotations = self.annotations;
         graph.style = self.style;
         graph.python_operator_declarations = self.python_operator_declarations;
         graph.procedural_asset_declarations = self.procedural_asset_declarations;
@@ -4182,6 +4275,73 @@ pub(crate) struct GraphNode {
     pub show_comment_in_network: bool,
     pub parameter: NodeParameter,
     pub info: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct GraphAnnotation {
+    pub annotation_id: String,
+    pub kind: GraphAnnotationKind,
+    pub title: String,
+    pub text: String,
+    pub position: GraphPoint,
+    pub size: GraphPoint,
+    pub collapsed: bool,
+    pub member_node_ids: Vec<String>,
+}
+
+impl GraphAnnotation {
+    fn network_box(
+        annotation_id: String,
+        title: String,
+        position: GraphPoint,
+        size: GraphPoint,
+        member_node_ids: Vec<String>,
+    ) -> Self {
+        Self {
+            annotation_id,
+            kind: GraphAnnotationKind::NetworkBox,
+            title,
+            text: String::new(),
+            position,
+            size,
+            collapsed: false,
+            member_node_ids,
+        }
+    }
+
+    fn sticky_note(
+        annotation_id: String,
+        title: String,
+        text: String,
+        position: GraphPoint,
+        size: GraphPoint,
+    ) -> Self {
+        Self {
+            annotation_id,
+            kind: GraphAnnotationKind::StickyNote,
+            title,
+            text,
+            position,
+            size,
+            collapsed: false,
+            member_node_ids: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum GraphAnnotationKind {
+    NetworkBox,
+    StickyNote,
+}
+
+impl GraphAnnotationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NetworkBox => "Network Box",
+            Self::StickyNote => "Sticky Note",
+        }
+    }
 }
 
 impl GraphNode {
@@ -6967,28 +7127,29 @@ fn sanitize_entity_path_part(value: &str) -> String {
 mod tests {
     use super::{
         AttributeTableQuery, AttributeTableSort, EvaluationState, ExportGeometry,
-        GeneratedNodeSource, Geometry, GeometryKind, GraphColor, GraphDocument, GraphNode,
-        GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema, HoudiniDataKind,
-        HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
-        HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
-        NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
-        NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
-        NativeOperatorProvenance, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
-        NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
-        OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
-        ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
-        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
-        PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
-        PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
-        PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
-        PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
-        PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
-        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
-        PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
-        PythonRequirementsSource, ReferenceDiagnosticStatus, ReferenceTargetEntry,
-        ReferenceTargetIdentity, ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem,
-        SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
-        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        GeneratedNodeSource, Geometry, GeometryKind, GraphAnnotationKind, GraphColor,
+        GraphDocument, GraphNode, GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema,
+        HoudiniDataKind, HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange,
+        HoudiniOperatorPort, HoudiniParameterDeclaration, HoudiniParameterKind,
+        HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
+        NativeOperatorFailureMode, NativeOperatorImplementation, NativeOperatorLoadStatus,
+        NativeOperatorOutputCounts, NativeOperatorProvenance, NodeEvaluation, NodeKind,
+        NodeParameter, NodeParameterKind, NodeStatus, OperatorVersionStatus,
+        OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode, OutputTargetId,
+        PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
+        ProceduralAssetSource, ProceduralAssetSubgraphReference, PythonDependencyHealth,
+        PythonEnvironmentDescriptor, PythonEnvironmentPathMode, PythonEnvironmentPaths,
+        PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
+        PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
+        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorDependencyStatus,
+        PythonOperatorEntryPoint, PythonOperatorNumericRange, PythonOperatorOutputCounts,
+        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
+        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
+        PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
+        ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
+        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
+        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
+        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -9293,6 +9454,49 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 opacity: 0.4,
                 stroke_scale: 0.6,
             }
+        );
+    }
+
+    #[test]
+    fn graph_annotations_round_trip_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        graph.annotations.clear();
+        let selected_node_index = 1;
+        graph
+            .add_network_box_for_node(selected_node_index)
+            .expect("network box should be created for selected node");
+        graph
+            .add_sticky_note_near_node(selected_node_index)
+            .expect("sticky note should be created near selected node");
+
+        graph.annotations[0].title = "Filter Prep".to_owned();
+        graph.annotations[0].collapsed = true;
+        graph.annotations[1].title = "Publish Note".to_owned();
+        graph.annotations[1].text = "Raise threshold before output.".to_owned();
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(restored.annotations.len(), 2);
+        assert_eq!(
+            restored.annotations[0].kind,
+            GraphAnnotationKind::NetworkBox
+        );
+        assert_eq!(restored.annotations[0].title, "Filter Prep");
+        assert!(restored.annotations[0].collapsed);
+        assert_eq!(
+            restored.annotations[0].member_node_ids,
+            vec![graph.nodes[selected_node_index].node_id.clone()]
+        );
+        assert_eq!(
+            restored.annotations[1].kind,
+            GraphAnnotationKind::StickyNote
+        );
+        assert_eq!(restored.annotations[1].title, "Publish Note");
+        assert_eq!(
+            restored.annotations[1].text,
+            "Raise threshold before output."
         );
     }
 
