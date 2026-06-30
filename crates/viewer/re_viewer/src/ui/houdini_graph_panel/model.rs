@@ -32,6 +32,7 @@ pub(crate) struct GraphDocument {
     pub source: GraphSource,
     pub nodes: Vec<GraphNode>,
     pub annotations: Vec<GraphAnnotation>,
+    pub network_view: NetworkViewDisplayOptions,
     pub layers: Vec<Layer>,
     pub style: GraphStyle,
     pub geometry: Vec<Geometry>,
@@ -216,6 +217,7 @@ impl GraphDocument {
                     GraphPoint::new(0.30, 0.28),
                 ),
             ],
+            network_view: NetworkViewDisplayOptions::default(),
             layers: vec![
                 Layer {
                     name: "Polygons".to_owned(),
@@ -3961,6 +3963,8 @@ struct HoudiniGraphSidecar {
     nodes: Vec<NodeSidecar>,
     #[serde(default)]
     annotations: Vec<GraphAnnotation>,
+    #[serde(default)]
+    network_view: NetworkViewDisplayOptions,
     layers: Vec<LayerSidecar>,
     #[serde(default)]
     style: GraphStyle,
@@ -4016,6 +4020,7 @@ impl HoudiniGraphSidecar {
                 })
                 .collect(),
             annotations: graph.annotations.clone(),
+            network_view: graph.network_view,
             layers: graph
                 .layers
                 .iter()
@@ -4058,6 +4063,7 @@ impl HoudiniGraphSidecar {
         graph.geometry = self.demo_geometry;
         graph.recording_geometry = self.recording_geometry;
         graph.annotations = self.annotations;
+        graph.network_view = self.network_view;
         graph.style = self.style;
         graph.python_operator_declarations = self.python_operator_declarations;
         graph.procedural_asset_declarations = self.procedural_asset_declarations;
@@ -4407,6 +4413,101 @@ impl GraphAnnotationKind {
         match self {
             Self::NetworkBox => "Network Box",
             Self::StickyNote => "Sticky Note",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct NetworkViewDisplayOptions {
+    #[serde(default)]
+    pub node_ring_visibility: NetworkNodeRingVisibility,
+    #[serde(default = "default_max_node_name_width")]
+    pub max_node_name_width: f32,
+    #[serde(default = "default_long_wire_fading")]
+    pub long_wire_fading: f32,
+    #[serde(default = "default_grid_spacing")]
+    pub grid_spacing: f32,
+    #[serde(default)]
+    pub error_badge: NetworkBadgeVisibility,
+    #[serde(default)]
+    pub warning_badge: NetworkBadgeVisibility,
+    #[serde(default)]
+    pub comment_badge: NetworkBadgeVisibility,
+    #[serde(default)]
+    pub time_dependent_badge: NetworkBadgeVisibility,
+}
+
+impl Default for NetworkViewDisplayOptions {
+    fn default() -> Self {
+        Self {
+            node_ring_visibility: NetworkNodeRingVisibility::Selected,
+            max_node_name_width: default_max_node_name_width(),
+            long_wire_fading: default_long_wire_fading(),
+            grid_spacing: default_grid_spacing(),
+            error_badge: NetworkBadgeVisibility::Large,
+            warning_badge: NetworkBadgeVisibility::Normal,
+            comment_badge: NetworkBadgeVisibility::Large,
+            time_dependent_badge: NetworkBadgeVisibility::Normal,
+        }
+    }
+}
+
+fn default_max_node_name_width() -> f32 {
+    96.0
+}
+
+fn default_long_wire_fading() -> f32 {
+    0.7
+}
+
+fn default_grid_spacing() -> f32 {
+    2.0
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum NetworkNodeRingVisibility {
+    Hidden,
+    #[default]
+    Selected,
+    Always,
+}
+
+impl NetworkNodeRingVisibility {
+    pub const ALL: [Self; 3] = [Self::Selected, Self::Always, Self::Hidden];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hidden => "Hidden",
+            Self::Selected => "Selected",
+            Self::Always => "Always",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum NetworkBadgeVisibility {
+    Hide,
+    #[default]
+    Normal,
+    Large,
+}
+
+impl NetworkBadgeVisibility {
+    pub const ALL: [Self; 3] = [Self::Large, Self::Normal, Self::Hide];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hide => "Hide",
+            Self::Normal => "Normal",
+            Self::Large => "Large",
+        }
+    }
+
+    pub fn radius(self) -> Option<f32> {
+        match self {
+            Self::Hide => None,
+            Self::Normal => Some(4.0),
+            Self::Large => Some(5.5),
         }
     }
 }
@@ -7250,23 +7351,23 @@ mod tests {
         HoudiniOperatorPort, HoudiniParameterDeclaration, HoudiniParameterKind,
         HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
         NativeOperatorFailureMode, NativeOperatorImplementation, NativeOperatorLoadStatus,
-        NativeOperatorOutputCounts, NativeOperatorProvenance, NodeEvaluation, NodeKind,
-        NodeParameter, NodeParameterKind, NodeStatus, OperatorVersionStatus,
-        OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode, OutputTargetId,
-        PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
-        ProceduralAssetSource, ProceduralAssetSubgraphReference, PythonDependencyHealth,
-        PythonEnvironmentDescriptor, PythonEnvironmentPathMode, PythonEnvironmentPaths,
-        PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
-        PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
-        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorDependencyStatus,
-        PythonOperatorEntryPoint, PythonOperatorNumericRange, PythonOperatorOutputCounts,
-        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
-        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
-        PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
-        ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
-        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
-        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
-        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        NativeOperatorOutputCounts, NativeOperatorProvenance, NetworkBadgeVisibility,
+        NetworkNodeRingVisibility, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
+        NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
+        OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
+        ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
+        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
+        PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
+        PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
+        PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
+        PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
+        PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
+        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
+        PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
+        PythonRequirementsSource, ReferenceDiagnosticStatus, ReferenceTargetEntry,
+        ReferenceTargetIdentity, ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem,
+        SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
+        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -9614,6 +9715,55 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(
             restored.annotations[1].text,
             "Raise threshold before output."
+        );
+    }
+
+    #[test]
+    fn network_view_display_options_round_trip_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        graph.network_view.node_ring_visibility = NetworkNodeRingVisibility::Always;
+        graph.network_view.max_node_name_width = 132.0;
+        graph.network_view.long_wire_fading = 0.25;
+        graph.network_view.grid_spacing = 3.0;
+        graph.network_view.error_badge = NetworkBadgeVisibility::Hide;
+        graph.network_view.warning_badge = NetworkBadgeVisibility::Large;
+        graph.network_view.comment_badge = NetworkBadgeVisibility::Normal;
+        graph.network_view.time_dependent_badge = NetworkBadgeVisibility::Hide;
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(restored.network_view, graph.network_view);
+    }
+
+    #[test]
+    fn sidecar_without_network_view_uses_display_defaults() {
+        let graph = GraphDocument::sample();
+        let mut value =
+            serde_json::from_str::<serde_json::Value>(&graph.to_sidecar_json().unwrap())
+                .expect("sidecar should be valid json");
+        value
+            .as_object_mut()
+            .expect("sidecar should be an object")
+            .remove("network_view");
+        let json = serde_json::to_string_pretty(&value).unwrap();
+
+        let mut restored = GraphDocument::sample();
+        restored.network_view.node_ring_visibility = NetworkNodeRingVisibility::Hidden;
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(
+            restored.network_view.node_ring_visibility,
+            NetworkNodeRingVisibility::Selected
+        );
+        assert_eq!(
+            restored.network_view.error_badge,
+            NetworkBadgeVisibility::Large
+        );
+        assert_eq!(
+            restored.network_view.comment_badge,
+            NetworkBadgeVisibility::Large
         );
     }
 
