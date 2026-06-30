@@ -361,11 +361,7 @@ impl HoudiniGraphPanel {
     }
 
     fn network_editor_toolbar_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
-        let selected_name = graph
-            .nodes
-            .get(self.selected_node)
-            .map(|node| node.name.clone())
-            .unwrap_or_else(|| "none".to_owned());
+        let selected_label = self.selected_item_label(graph);
 
         ui.horizontal_wrapped(|ui| {
             ui.weak("/obj/main");
@@ -513,7 +509,7 @@ impl HoudiniGraphPanel {
             });
 
             ui.separator();
-            ui.weak(selected_name);
+            ui.weak(selected_label);
             ui.separator();
             if ui.small_button("-").clicked() {
                 self.zoom_graph_view(1.0 / 1.15);
@@ -536,6 +532,20 @@ impl HoudiniGraphPanel {
     fn reset_graph_view(&mut self) {
         self.graph_view_zoom = 1.0;
         self.graph_view_pan = Vec2::ZERO;
+    }
+
+    fn selected_item_label(&self, graph: &GraphDocument) -> String {
+        if let Some(annotation_index) = self.selected_annotation
+            && let Some(annotation) = graph.annotations.get(annotation_index)
+        {
+            return format!("{}: {}", annotation.kind.as_str(), annotation.title);
+        }
+
+        graph
+            .nodes
+            .get(self.selected_node)
+            .map(|node| format!("{} ({})", node.name, node.kind.as_str()))
+            .unwrap_or_else(|| "none".to_owned())
     }
 
     fn frame_selected_node_in_rect(
@@ -2184,9 +2194,7 @@ impl HoudiniGraphPanel {
             }
         });
 
-        if let Some(node) = graph.nodes.get(self.selected_node) {
-            ui.weak(format!("Selected: {} ({})", node.name, node.kind.as_str()));
-        }
+        ui.weak(format!("Selected: {}", self.selected_item_label(graph)));
 
         self.operator_palette_ui(
             ui,
@@ -2195,7 +2203,7 @@ impl HoudiniGraphPanel {
                 id_salt: "houdini_operator_side_palette",
                 grouped: true,
                 show_recent: true,
-                include_organization: false,
+                include_organization: true,
                 include_layers: true,
                 highlighted_action: None,
             },
