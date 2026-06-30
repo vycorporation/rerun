@@ -914,6 +914,7 @@ impl HoudiniGraphPanel {
             ui.weak("Flags");
             if let Some(node) = graph.nodes.get_mut(self.selected_node) {
                 ui.re_checkbox(&mut node.participates_in_output, "Display output");
+                ui.re_checkbox(&mut node.show_comment_in_network, "Show comment");
             }
 
             let mut manual = graph.nodes[self.selected_node].evaluation.manual;
@@ -2486,6 +2487,24 @@ impl HoudiniGraphPanel {
         self.node_flag_menu_action_ui(ui, graph, NodeRingAction::Display, "Display Output    Q");
         self.node_flag_menu_action_ui(ui, graph, NodeRingAction::Manual, "Manual Cook    M");
         self.node_flag_menu_action_ui(ui, graph, NodeRingAction::Run, "Run Node    R");
+
+        ui.separator();
+        ui.weak("Comment");
+        if ui.button("Edit Comment").clicked() {
+            self.node_info_open = true;
+            self.active_graph_pane = GraphWorkbenchPane::Info;
+            ui.close();
+        }
+        if let Some(node) = graph.nodes.get_mut(self.selected_node) {
+            let mut show_comment = node.show_comment_in_network;
+            if ui
+                .checkbox(&mut show_comment, "Show Comment in Network")
+                .changed()
+            {
+                node.show_comment_in_network = show_comment;
+                ui.close();
+            }
+        }
 
         ui.separator();
         if ui.button("TAB Menu...").clicked() {
