@@ -2412,6 +2412,44 @@ impl HoudiniGraphPanel {
                     ui.end_row();
                 }
             });
+
+        let generated_nodes = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| node.generated.map(|generated| (index, node, generated)))
+            .collect::<Vec<_>>();
+        if generated_nodes.is_empty() {
+            return;
+        }
+
+        ui.add_space(6.0);
+        ui.weak("Graph-backed layer controls");
+        egui::Grid::new("houdini_graph_generated_layer_bindings")
+            .num_columns(3)
+            .spacing([8.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.weak("Node");
+                ui.weak("Binding");
+                ui.weak("Source");
+                ui.end_row();
+
+                for (index, node, generated) in generated_nodes {
+                    if ui
+                        .selectable_label(self.selected_node == index, &node.name)
+                        .clicked()
+                    {
+                        self.selected_node = index;
+                        self.selected_annotation = None;
+                        self.pending_frame_selected = true;
+                    }
+                    ui.label(generated.binding_state.as_str())
+                        .on_hover_text(generated.binding_state.description());
+                    ui.weak(generated.source.as_str());
+                    ui.end_row();
+                }
+            });
     }
 
     fn import_parquet_path(
@@ -2963,11 +3001,11 @@ impl HoudiniGraphPanel {
                 FontId::monospace(9.0),
                 evaluation_color(ui, node.evaluation.state),
             );
-            if node.generated.is_some() {
+            if let Some(generated) = node.generated {
                 painter.text(
                     node_rect.right_top() + egui::vec2(-6.0, 6.0),
                     Align2::RIGHT_TOP,
-                    "gen",
+                    generated.binding_state.badge(),
                     FontId::monospace(10.0),
                     ui.visuals().warn_fg_color,
                 );
@@ -3483,6 +3521,14 @@ impl HoudiniGraphPanel {
                     if let Some(generated) = info.generated {
                         ui.weak("Generated");
                         ui.colored_label(ui.visuals().warn_fg_color, generated.as_str());
+                        ui.end_row();
+
+                        ui.weak("Layer binding");
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            generated.binding_state.as_str(),
+                        )
+                        .on_hover_text(generated.binding_state.description());
                         ui.end_row();
                     }
 

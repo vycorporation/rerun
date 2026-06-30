@@ -638,9 +638,9 @@ impl GraphDocument {
             comparison: FilterComparison::GreaterOrEqual,
         });
         filter_node.layout_position = GraphPoint::new(0.33, GENERATED_NODE_LANE_Y);
-        filter_node.generated = Some(GeneratedNodeInfo {
-            source: GeneratedNodeSource::AttributeTableCommit,
-        });
+        filter_node.generated = Some(GeneratedNodeInfo::managed(
+            GeneratedNodeSource::AttributeTableCommit,
+        ));
         true
     }
 
@@ -6317,9 +6317,18 @@ fn native_operator_node_status(
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct GeneratedNodeInfo {
     pub source: GeneratedNodeSource,
+    #[serde(default)]
+    pub binding_state: GeneratedNodeBindingState,
 }
 
 impl GeneratedNodeInfo {
+    fn managed(source: GeneratedNodeSource) -> Self {
+        Self {
+            source,
+            binding_state: GeneratedNodeBindingState::Managed,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         self.source.as_str()
     }
@@ -6334,6 +6343,46 @@ impl GeneratedNodeSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AttributeTableCommit => "Generated from attribute table commit",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum GeneratedNodeBindingState {
+    #[default]
+    Managed,
+    Adopted,
+    Unbound,
+}
+
+impl GeneratedNodeBindingState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Managed => "Managed layer binding",
+            Self::Adopted => "Adopted graph node",
+            Self::Unbound => "Unbound generated node",
+        }
+    }
+
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::Managed => "mgd",
+            Self::Adopted => "adp",
+            Self::Unbound => "gen",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Managed => {
+                "Layer-facing controls may still update compatible parameters on this graph node."
+            }
+            Self::Adopted => {
+                "The node began as generated graph material, but structural graph edits made it user-owned."
+            }
+            Self::Unbound => {
+                "The node is generated graph material without an active layer-facing control."
+            }
         }
     }
 }
@@ -7421,16 +7470,17 @@ fn sanitize_entity_path_part(value: &str) -> String {
 mod tests {
     use super::{
         AttributeTableQuery, AttributeTableSort, EvaluationState, ExportGeometry,
-        GeneratedNodeSource, Geometry, GeometryKind, GraphAnnotationKind, GraphColor,
-        GraphDocument, GraphNode, GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema,
-        HoudiniDataKind, HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange,
-        HoudiniOperatorPort, HoudiniParameterDeclaration, HoudiniParameterKind,
-        HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
-        NativeOperatorFailureMode, NativeOperatorImplementation, NativeOperatorLoadStatus,
-        NativeOperatorOutputCounts, NativeOperatorProvenance, NetworkBadgeVisibility,
-        NetworkNodeRingVisibility, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
-        NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
-        OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
+        GeneratedNodeBindingState, GeneratedNodeSource, Geometry, GeometryKind,
+        GraphAnnotationKind, GraphColor, GraphDocument, GraphNode, GraphPoint, GraphStyle,
+        HoudiniCubicBezierParquetSchema, HoudiniDataKind, HoudiniGeometryRecord,
+        HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
+        HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
+        NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
+        NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
+        NativeOperatorProvenance, NetworkBadgeVisibility, NetworkNodeRingVisibility,
+        NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind, NodeStatus,
+        OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode,
+        OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
         ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
         PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
         PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
@@ -8812,22 +8862,22 @@ mod tests {
             .iter()
             .find(|node| node.kind == NodeKind::Filter)
             .expect("sample graph should include filter node");
+        let generated = filter_node.generated.expect("filter should be generated");
+        assert_eq!(generated.source, GeneratedNodeSource::AttributeTableCommit);
+        assert_eq!(generated.binding_state, GeneratedNodeBindingState::Managed);
+        assert!(filter_node.layout_position.y >= 0.8);
+        let generated_info = graph
+            .selected_node_info(1)
+            .expect("filter node info should exist")
+            .generated
+            .expect("filter node info should expose generated metadata");
         assert_eq!(
-            filter_node
-                .generated
-                .expect("filter should be generated")
-                .source,
+            generated_info.source,
             GeneratedNodeSource::AttributeTableCommit
         );
-        assert!(filter_node.layout_position.y >= 0.8);
         assert_eq!(
-            graph
-                .selected_node_info(1)
-                .expect("filter node info should exist")
-                .generated
-                .expect("filter node info should expose generated metadata")
-                .source,
-            GeneratedNodeSource::AttributeTableCommit
+            generated_info.binding_state,
+            GeneratedNodeBindingState::Managed
         );
     }
 
@@ -8888,12 +8938,16 @@ mod tests {
             .iter()
             .find(|node| node.kind == NodeKind::Filter)
             .expect("restored graph should include filter node");
+        let restored_generated = restored_filter
+            .generated
+            .expect("generated filter metadata should round trip");
         assert_eq!(
-            restored_filter
-                .generated
-                .expect("generated filter metadata should round trip")
-                .source,
+            restored_generated.source,
             GeneratedNodeSource::AttributeTableCommit
+        );
+        assert_eq!(
+            restored_generated.binding_state,
+            GeneratedNodeBindingState::Managed
         );
         assert!(restored_filter.layout_position.y >= 0.8);
         assert_eq!(restored.visible_output_count(), 1);
