@@ -934,6 +934,10 @@ impl HoudiniGraphPanel {
                 ui.add(
                     Slider::new(&mut options.long_wire_fading, 0.0..=1.0).text("Long Wire Fading"),
                 );
+                ui.add(
+                    Slider::new(&mut options.background_brightness, 0.0..=1.0)
+                        .text("Background Brightness"),
+                );
                 ui.horizontal(|ui| {
                     ui.weak("Grid Spacing");
                     ui.add(DragValue::new(&mut options.grid_spacing).range(0.5..=6.0));
@@ -1795,7 +1799,11 @@ impl HoudiniGraphPanel {
         let (response, painter) = ui.allocate_painter(desired_size, Sense::click_and_drag());
         let canvas_rect = response.rect;
         let network_view = graph.network_view;
-        painter.rect_filled(canvas_rect, 4.0, ui.visuals().extreme_bg_color);
+        painter.rect_filled(
+            canvas_rect,
+            4.0,
+            network_background_color(ui.visuals(), network_view.background_brightness),
+        );
         painter.rect_stroke(
             canvas_rect,
             4.0,
@@ -3391,6 +3399,26 @@ fn faded_color(color: Color32, alpha: f32) -> Color32 {
         color.g(),
         color.b(),
         ((color.a() as f32) * alpha.clamp(0.0, 1.0)).round() as u8,
+    )
+}
+
+fn network_background_color(visuals: &egui::Visuals, brightness: f32) -> Color32 {
+    lerp_color(
+        visuals.extreme_bg_color,
+        visuals.widgets.noninteractive.bg_fill,
+        brightness,
+    )
+}
+
+fn lerp_color(from: Color32, to: Color32, amount: f32) -> Color32 {
+    let amount = amount.clamp(0.0, 1.0);
+    let lerp_channel =
+        |from: u8, to: u8| ((from as f32) + ((to as f32) - (from as f32)) * amount).round() as u8;
+    Color32::from_rgba_unmultiplied(
+        lerp_channel(from.r(), to.r()),
+        lerp_channel(from.g(), to.g()),
+        lerp_channel(from.b(), to.b()),
+        lerp_channel(from.a(), to.a()),
     )
 }
 

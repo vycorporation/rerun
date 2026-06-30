@@ -4440,6 +4440,8 @@ pub(crate) struct NetworkViewDisplayOptions {
     pub long_wire_fading: f32,
     #[serde(default = "default_grid_spacing")]
     pub grid_spacing: f32,
+    #[serde(default = "default_background_brightness")]
+    pub background_brightness: f32,
     #[serde(default)]
     pub error_badge: NetworkBadgeVisibility,
     #[serde(default)]
@@ -4457,6 +4459,7 @@ impl Default for NetworkViewDisplayOptions {
             max_node_name_width: default_max_node_name_width(),
             long_wire_fading: default_long_wire_fading(),
             grid_spacing: default_grid_spacing(),
+            background_brightness: default_background_brightness(),
             error_badge: NetworkBadgeVisibility::Large,
             warning_badge: NetworkBadgeVisibility::Normal,
             comment_badge: NetworkBadgeVisibility::Large,
@@ -4475,6 +4478,10 @@ fn default_long_wire_fading() -> f32 {
 
 fn default_grid_spacing() -> f32 {
     2.0
+}
+
+fn default_background_brightness() -> f32 {
+    0.12
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -9744,6 +9751,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         graph.network_view.max_node_name_width = 132.0;
         graph.network_view.long_wire_fading = 0.25;
         graph.network_view.grid_spacing = 3.0;
+        graph.network_view.background_brightness = 0.68;
         graph.network_view.error_badge = NetworkBadgeVisibility::Hide;
         graph.network_view.warning_badge = NetworkBadgeVisibility::Large;
         graph.network_view.comment_badge = NetworkBadgeVisibility::Normal;
