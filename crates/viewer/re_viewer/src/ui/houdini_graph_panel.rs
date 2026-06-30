@@ -61,6 +61,10 @@ pub(crate) struct HoudiniGraphPanel {
     node_info_refresh_automatically: bool,
     node_info_show_additional: bool,
     node_info_show_debug: bool,
+    node_ring_visibility: HoudiniNodeRingVisibility,
+    network_max_node_name_width: f32,
+    network_long_wire_fading: f32,
+    network_grid_spacing: f32,
     table_search: String,
     table_minimum_score_enabled: bool,
     table_minimum_score: f32,
@@ -95,6 +99,10 @@ impl Default for HoudiniGraphPanel {
             node_info_refresh_automatically: true,
             node_info_show_additional: false,
             node_info_show_debug: false,
+            node_ring_visibility: HoudiniNodeRingVisibility::Selected,
+            network_max_node_name_width: 96.0,
+            network_long_wire_fading: 0.7,
+            network_grid_spacing: 2.0,
             table_search: String::new(),
             table_minimum_score_enabled: false,
             table_minimum_score: 0.0,
@@ -137,6 +145,25 @@ impl HoudiniGraphWorkspace {
             Self::Data => "Data",
             Self::Outputs => "Outputs",
             Self::Project => "Project",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoudiniNodeRingVisibility {
+    Hidden,
+    Selected,
+    Always,
+}
+
+impl HoudiniNodeRingVisibility {
+    const ALL: [Self; 3] = [Self::Selected, Self::Always, Self::Hidden];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Hidden => "Hidden",
+            Self::Selected => "Selected",
+            Self::Always => "Always",
         }
     }
 }
@@ -287,6 +314,10 @@ impl HoudiniGraphPanel {
         self.operator_strip_ui(ui, graph);
 
         ui.add_space(8.0);
+        ui.strong("Network View");
+        self.network_view_options_ui(ui);
+
+        ui.add_space(8.0);
         ui.strong("Parameters");
         self.selected_node_controls_ui(ui, graph);
 
@@ -297,6 +328,43 @@ impl HoudiniGraphPanel {
         ui.add_space(8.0);
         ui.strong("Layers");
         self.compact_layer_stack_ui(ui, graph);
+    }
+
+    fn network_view_options_ui(&mut self, ui: &mut Ui) {
+        egui::CollapsingHeader::new("Display Options")
+            .id_salt("houdini_graph_network_display_options")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.weak("Show Node Ring");
+                    egui::ComboBox::from_id_salt("houdini_graph_node_ring_visibility")
+                        .selected_text(self.node_ring_visibility.label())
+                        .show_ui(ui, |ui| {
+                            for visibility in HoudiniNodeRingVisibility::ALL {
+                                ui.selectable_value(
+                                    &mut self.node_ring_visibility,
+                                    visibility,
+                                    visibility.label(),
+                                );
+                            }
+                        });
+                });
+                ui.add(
+                    Slider::new(&mut self.network_max_node_name_width, 48.0..=180.0)
+                        .text("Maximum Node Name Width"),
+                );
+                ui.add(
+                    Slider::new(&mut self.network_long_wire_fading, 0.0..=1.0)
+                        .text("Long Wire Fading"),
+                );
+                ui.horizontal(|ui| {
+                    ui.weak("Grid Spacing");
+                    ui.add(DragValue::new(&mut self.network_grid_spacing).range(0.5..=6.0));
+                    ui.weak("x");
+                    ui.label("1.0");
+                });
+                ui.weak("Badge visibility and comment badges are tracked in issue #65.");
+            });
     }
 
     fn graph_workbench_node_info_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) {
@@ -1073,6 +1141,12 @@ impl HoudiniGraphPanel {
             ui.visuals().widgets.noninteractive.bg_stroke,
             StrokeKind::Inside,
         );
+        draw_network_grid(
+            &painter,
+            canvas_rect,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+            self.network_grid_spacing,
+        );
 
         let layout_rect = canvas_rect.shrink2(egui::vec2(12.0, 10.0));
         let node_size = Vec2::new(116.0, 48.0);
@@ -1126,13 +1200,19 @@ impl HoudiniGraphPanel {
             self.dragging_node = None;
         }
 
-        let connector_stroke =
-            Stroke::new(1.5, ui.visuals().widgets.noninteractive.fg_stroke.color);
+        let connector_color = ui.visuals().widgets.noninteractive.fg_stroke.color;
         for edge in graph.graph_layout().edges {
             let from_rect = node_rects[edge.from_node];
             let to_rect = node_rects[edge.to_node];
             let start = Pos2::new(from_rect.right(), from_rect.center().y);
             let end = Pos2::new(to_rect.left(), to_rect.center().y);
+            let wire_length = (end.x - start.x).hypot(end.y - start.y);
+            let fade = if wire_length > layout_rect.width() * 0.34 {
+                1.0 - self.network_long_wire_fading * 0.65
+            } else {
+                1.0
+            };
+            let connector_stroke = Stroke::new(1.5, faded_color(connector_color, fade));
             painter.line_segment([start, end], connector_stroke);
             draw_arrowhead(&painter, end, connector_stroke.color);
         }
@@ -1143,6 +1223,15 @@ impl HoudiniGraphPanel {
             };
             let node_rect = node_rects[layout_node.node_index];
             let selected = self.selected_node == layout_node.node_index;
+            let show_ring = match self.node_ring_visibility {
+                HoudiniNodeRingVisibility::Hidden => false,
+                HoudiniNodeRingVisibility::Selected => selected,
+                HoudiniNodeRingVisibility::Always => true,
+            };
+            if show_ring {
+                draw_node_ring(&painter, node_rect, selected, node, ui.visuals());
+            }
+
             let fill = if selected {
                 ui.visuals().selection.bg_fill
             } else {
@@ -1159,7 +1248,7 @@ impl HoudiniGraphPanel {
             painter.text(
                 node_rect.center_top() + egui::vec2(0.0, 10.0),
                 Align2::CENTER_TOP,
-                layout_node.name,
+                format_node_name(layout_node.name, self.network_max_node_name_width),
                 FontId::proportional(13.0),
                 ui.visuals().text_color(),
             );
@@ -2005,6 +2094,124 @@ fn operator_palette_button_ui(ui: &mut Ui, label: &str, detail: &str) -> bool {
         ui.weak(detail);
     });
     clicked
+}
+
+fn format_node_name(name: impl AsRef<str>, max_width: f32) -> String {
+    let name = name.as_ref();
+    let max_chars = (max_width / 7.0).round().clamp(6.0, 32.0) as usize;
+    if name.chars().count() <= max_chars {
+        name.to_owned()
+    } else {
+        let prefix = name
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>();
+        format!("{prefix}…")
+    }
+}
+
+fn faded_color(color: Color32, alpha: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(
+        color.r(),
+        color.g(),
+        color.b(),
+        ((color.a() as f32) * alpha.clamp(0.0, 1.0)).round() as u8,
+    )
+}
+
+fn draw_network_grid(painter: &egui::Painter, rect: Rect, color: Color32, spacing_scale: f32) {
+    let spacing = (24.0 * spacing_scale).clamp(12.0, 144.0);
+    let grid_color = faded_color(color, 0.32);
+    let stroke = Stroke::new(1.0, grid_color);
+
+    let mut x = rect.left() + spacing;
+    while x < rect.right() {
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+            stroke,
+        );
+        x += spacing;
+    }
+
+    let mut y = rect.top() + spacing;
+    while y < rect.bottom() {
+        painter.line_segment(
+            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+            stroke,
+        );
+        y += spacing;
+    }
+}
+
+fn draw_node_ring(
+    painter: &egui::Painter,
+    node_rect: Rect,
+    selected: bool,
+    node: &self::model::GraphNode,
+    visuals: &egui::Visuals,
+) {
+    let center = node_rect.center();
+    let ring_radius = node_rect.width() * if selected { 0.76 } else { 0.68 };
+    painter.circle_stroke(
+        center,
+        ring_radius,
+        Stroke::new(2.0, faded_color(visuals.weak_text_color(), 0.55)),
+    );
+
+    let status_color = evaluation_color_from_visuals(visuals, node.evaluation.state);
+    let entries = [
+        (
+            "i",
+            -std::f32::consts::PI,
+            visuals.widgets.noninteractive.bg_fill,
+        ),
+        (
+            "D",
+            -0.38 * std::f32::consts::PI,
+            if node.participates_in_output {
+                visuals.selection.stroke.color
+            } else {
+                visuals.widgets.inactive.bg_fill
+            },
+        ),
+        (
+            "M",
+            0.38 * std::f32::consts::PI,
+            if node.evaluation.manual {
+                visuals.warn_fg_color
+            } else {
+                visuals.widgets.inactive.bg_fill
+            },
+        ),
+        ("!", 0.78 * std::f32::consts::PI, status_color),
+    ];
+
+    for (label, angle, fill) in entries {
+        let pos = center + egui::vec2(angle.cos(), angle.sin()) * ring_radius;
+        painter.circle_filled(pos, 11.0, faded_color(fill, 0.85));
+        painter.circle_stroke(
+            pos,
+            11.0,
+            Stroke::new(1.0, visuals.widgets.inactive.fg_stroke.color),
+        );
+        painter.text(
+            pos,
+            Align2::CENTER_CENTER,
+            label,
+            FontId::monospace(10.0),
+            visuals.text_color(),
+        );
+    }
+}
+
+fn evaluation_color_from_visuals(visuals: &egui::Visuals, state: EvaluationState) -> Color32 {
+    match state {
+        EvaluationState::Clean => visuals.text_color(),
+        EvaluationState::Cached => visuals.weak_text_color(),
+        EvaluationState::Stale | EvaluationState::Manual => visuals.warn_fg_color,
+        EvaluationState::Running => visuals.selection.stroke.color,
+        EvaluationState::Failed => visuals.error_fg_color,
+    }
 }
 
 fn map_node_layout_point(rect: Rect, point: GraphPoint, node_size: Vec2) -> Pos2 {
