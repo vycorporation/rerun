@@ -19,6 +19,7 @@ use self::model::{
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
 const ATTRIBUTE_TABLE_PREVIEW_ROWS: usize = 200;
 const NETWORK_BOX_FAST_DRAG_PEAK_DELTA_PIXELS: f32 = 18.0;
+const NETWORK_DISPLAY_OPTIONS_ID: &str = "houdini_graph_network_display_options";
 
 pub(crate) type SharedHoudiniGraph = Arc<Mutex<GraphDocument>>;
 
@@ -316,10 +317,12 @@ impl HoudiniGraphPanel {
     }
 
     fn network_view_options_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
-        egui::CollapsingHeader::new("Display Options")
-            .id_salt("houdini_graph_network_display_options")
-            .default_open(false)
-            .show(ui, |ui| {
+        let id = ui.make_persistent_id(NETWORK_DISPLAY_OPTIONS_ID);
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+            .show_header(ui, |ui| {
+                ui.label("Display Options");
+            })
+            .body(|ui| {
                 let options = &mut graph.network_view;
                 ui.horizontal(|ui| {
                     ui.weak("Show Node Ring");
@@ -1289,6 +1292,12 @@ impl HoudiniGraphPanel {
 
         for annotation in &graph.annotations {
             draw_graph_annotation(&painter, layout_rect, annotation, ui.visuals());
+        }
+
+        if response.hovered()
+            && ui.input(|input| input.key_pressed(egui::Key::D) && input.modifiers.is_none())
+        {
+            toggle_network_display_options(ui);
         }
 
         if let Some(pointer_pos) = response.interact_pointer_pos() {
@@ -2293,6 +2302,14 @@ fn badge_visibility_combo_ui(ui: &mut Ui, label: &str, visibility: &mut NetworkB
                 }
             });
     });
+}
+
+fn toggle_network_display_options(ui: &Ui) {
+    let id = ui.make_persistent_id(NETWORK_DISPLAY_OPTIONS_ID);
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    state.toggle(ui);
+    state.store(ui.ctx());
 }
 
 fn format_node_name(name: impl AsRef<str>, max_width: f32) -> String {
