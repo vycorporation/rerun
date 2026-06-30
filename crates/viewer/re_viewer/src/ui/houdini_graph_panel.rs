@@ -2305,6 +2305,7 @@ impl HoudiniGraphPanel {
                     ui.visuals().weak_text_color(),
                 );
             }
+            draw_node_flag_strip(&painter, node_rect, node, ui.visuals());
             draw_node_badges(&painter, node_rect, node, network_view, ui.visuals());
         }
 
@@ -3890,6 +3891,54 @@ fn draw_node_badges(
             );
         }
         offset += radius * 2.0 + 3.0;
+    }
+}
+
+fn draw_node_flag_strip(
+    painter: &egui::Painter,
+    node_rect: Rect,
+    node: &self::model::GraphNode,
+    visuals: &egui::Visuals,
+) {
+    let flags = [
+        (
+            "D",
+            node.participates_in_output,
+            visuals.selection.stroke.color,
+        ),
+        ("M", node.evaluation.manual, visuals.warn_fg_color),
+    ];
+
+    let flag_size = egui::vec2(13.0, 13.0);
+    let origin = node_rect.right_bottom() + egui::vec2(-32.0, -19.0);
+    for (index, (label, active, active_color)) in flags.into_iter().enumerate() {
+        let rect = Rect::from_min_size(origin + egui::vec2(index as f32 * 15.0, 0.0), flag_size);
+        let fill = if active {
+            faded_color(active_color, 0.86)
+        } else {
+            visuals.widgets.inactive.bg_fill
+        };
+        painter.rect_filled(rect, 2.0, fill);
+        painter.rect_stroke(
+            rect,
+            2.0,
+            Stroke::new(
+                1.0,
+                if active {
+                    active_color
+                } else {
+                    visuals.widgets.inactive.fg_stroke.color
+                },
+            ),
+            StrokeKind::Inside,
+        );
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::monospace(8.0),
+            visuals.text_color(),
+        );
     }
 }
 
