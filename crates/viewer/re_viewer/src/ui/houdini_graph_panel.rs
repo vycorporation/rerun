@@ -1384,6 +1384,16 @@ impl HoudiniGraphPanel {
                 }
             }
 
+            if response.clicked_by(egui::PointerButton::Secondary) {
+                for (index, node_rect) in node_rects.iter().enumerate() {
+                    if node_rect.contains(pointer_pos) {
+                        self.selected_node = index;
+                        self.node_info_open = true;
+                        break;
+                    }
+                }
+            }
+
             if response.dragged_by(egui::PointerButton::Primary) {
                 if let Some(dragging_node) = self.dragging_node {
                     let pointer_delta = ui.input(|input| input.pointer.delta());
@@ -1538,7 +1548,74 @@ impl HoudiniGraphPanel {
             ui.visuals().weak_text_color(),
         );
 
+        response.context_menu(|ui| self.node_graph_context_menu_ui(ui, graph));
+
         response
+    }
+
+    fn node_graph_context_menu_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        if let Some(node) = graph.nodes.get(self.selected_node) {
+            ui.strong(&node.name);
+            ui.weak(node.kind.as_str());
+            ui.separator();
+        }
+
+        if ui.button("Show Node Information").clicked() {
+            self.node_info_open = true;
+            ui.close();
+        }
+        if ui.button("Pin Node Information").clicked() {
+            self.node_info_open = true;
+            self.node_info_pinned = true;
+            ui.close();
+        }
+
+        ui.separator();
+        if ui.button("Add OUT Null").clicked() {
+            self.selected_node = graph.add_null_operator_node("OUT_MAIN");
+            self.node_info_open = true;
+            ui.close();
+        }
+        if ui.button("Add Reference").clicked() {
+            if let Some(index) = graph.add_reference_input_node(self.selected_node) {
+                self.selected_node = index;
+                self.node_info_open = true;
+            }
+            ui.close();
+        }
+        if ui.button("Add Network Box").clicked() {
+            graph.add_network_box_for_node(self.selected_node);
+            ui.close();
+        }
+        if ui.button("Add Sticky Note").clicked() {
+            graph.add_sticky_note_near_node(self.selected_node);
+            ui.close();
+        }
+
+        ui.separator();
+        if ui.button("Resize Box to Contents").clicked() {
+            if let Some(annotation_index) = graph.annotations.iter().position(|annotation| {
+                annotation.kind == GraphAnnotationKind::NetworkBox
+                    && graph.nodes.get(self.selected_node).is_some_and(|node| {
+                        annotation
+                            .member_node_ids
+                            .iter()
+                            .any(|member_id| member_id == &node.node_id)
+                    })
+            }) {
+                graph.resize_network_box_to_contents(annotation_index);
+            }
+            ui.close();
+        }
+        if ui.button("Display Options").clicked() {
+            toggle_network_display_options(ui);
+            ui.close();
+        }
+        if ui.button("Reset View").clicked() {
+            self.graph_view_zoom = 1.0;
+            self.graph_view_pan = Vec2::ZERO;
+            ui.close();
+        }
     }
 
     fn update_graph_viewport(&mut self, ui: &mut Ui, layout_rect: Rect) {
