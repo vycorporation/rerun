@@ -462,8 +462,22 @@ impl HoudiniGraphPanel {
             ui.separator();
             ui.weak(selected_name);
             ui.separator();
+            if ui.small_button("-").clicked() {
+                self.zoom_graph_view(1.0 / 1.15);
+            }
+            if ui.small_button("1:1").clicked() {
+                self.graph_view_zoom = 1.0;
+                self.graph_view_pan = Vec2::ZERO;
+            }
+            if ui.small_button("+").clicked() {
+                self.zoom_graph_view(1.15);
+            }
             ui.weak(format!("{:.0}%", self.graph_view_zoom * 100.0));
         });
+    }
+
+    fn zoom_graph_view(&mut self, factor: f32) {
+        self.graph_view_zoom = (self.graph_view_zoom * factor).clamp(0.45, 2.6);
     }
 
     fn inspect_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -1598,9 +1612,11 @@ impl HoudiniGraphPanel {
         if response.hovered()
             && ui.input(|input| input.key_pressed(egui::Key::D) && input.modifiers.is_none())
         {
+            self.active_graph_pane = GraphWorkbenchPane::Display;
             toggle_network_display_options(ui);
         }
         if response.hovered() && ui.input(|input| input.key_pressed(egui::Key::Tab)) {
+            self.active_graph_pane = GraphWorkbenchPane::Operators;
             self.tab_menu_open = true;
             self.tab_menu_anchor = ui
                 .input(|input| input.pointer.hover_pos())
