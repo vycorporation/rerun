@@ -108,6 +108,8 @@ impl GraphDocument {
                     native_operator: None,
                     evaluation: NodeEvaluation::clean(),
                     participates_in_output: true,
+                    comment: String::new(),
+                    show_comment_in_network: false,
                     parameter: NodeParameter::scalar(
                         "Read",
                         1.0,
@@ -132,6 +134,8 @@ impl GraphDocument {
                     native_operator: None,
                     evaluation: NodeEvaluation::clean(),
                     participates_in_output: true,
+                    comment: String::new(),
+                    show_comment_in_network: false,
                     parameter: NodeParameter::attribute_rule(
                         "Minimum score",
                         "score",
@@ -158,6 +162,8 @@ impl GraphDocument {
                     native_operator: None,
                     evaluation: NodeEvaluation::clean(),
                     participates_in_output: true,
+                    comment: String::new(),
+                    show_comment_in_network: false,
                     parameter: NodeParameter::scalar(
                         "Stroke scale",
                         0.75,
@@ -182,6 +188,8 @@ impl GraphDocument {
                     native_operator: None,
                     evaluation: NodeEvaluation::clean(),
                     participates_in_output: true,
+                    comment: String::new(),
+                    show_comment_in_network: false,
                     parameter: NodeParameter::scalar(
                         "Adaptive segments",
                         1.0,
@@ -3845,6 +3853,8 @@ impl HoudiniGraphSidecar {
                     python_operator: node.python_operator.clone(),
                     procedural_asset: node.procedural_asset.clone(),
                     native_operator: node.native_operator.clone(),
+                    comment: node.comment.clone(),
+                    show_comment_in_network: node.show_comment_in_network,
                 })
                 .collect(),
             layers: graph
@@ -3923,6 +3933,8 @@ impl HoudiniGraphSidecar {
                 node.substrate_projection = node_snapshot.substrate_projection;
                 node.procedural_asset = node_snapshot.procedural_asset;
                 node.native_operator = node_snapshot.native_operator;
+                node.comment = node_snapshot.comment;
+                node.show_comment_in_network = node_snapshot.show_comment_in_network;
             } else if node_snapshot.is_instance_node() {
                 let insert_index = snapshot_index.min(graph.nodes.len());
                 graph
@@ -3987,6 +3999,10 @@ struct NodeSidecar {
     procedural_asset: Option<ProceduralAssetInstanceNode>,
     #[serde(default)]
     native_operator: Option<NativeOperatorNode>,
+    #[serde(default)]
+    comment: String,
+    #[serde(default)]
+    show_comment_in_network: bool,
 }
 
 impl NodeSidecar {
@@ -4060,6 +4076,8 @@ impl NodeSidecar {
             native_operator: self.native_operator,
             evaluation: NodeEvaluation::clean(),
             participates_in_output: true,
+            comment: self.comment,
+            show_comment_in_network: self.show_comment_in_network,
             parameter: NodeParameter::scalar(
                 "Run",
                 self.parameter_value.clamp(0.0, 1.0),
@@ -4160,6 +4178,8 @@ pub(crate) struct GraphNode {
     pub native_operator: Option<NativeOperatorNode>,
     pub evaluation: NodeEvaluation,
     pub participates_in_output: bool,
+    pub comment: String,
+    pub show_comment_in_network: bool,
     pub parameter: NodeParameter,
     pub info: &'static str,
 }
@@ -4185,6 +4205,8 @@ impl GraphNode {
             native_operator: None,
             evaluation: NodeEvaluation::clean(),
             participates_in_output: true,
+            comment: String::new(),
+            show_comment_in_network: false,
             parameter: NodeParameter::scalar(
                 "Pass-through",
                 1.0,
@@ -4214,6 +4236,8 @@ impl GraphNode {
             native_operator: None,
             evaluation: NodeEvaluation::clean(),
             participates_in_output: true,
+            comment: String::new(),
+            show_comment_in_network: false,
             parameter: NodeParameter::scalar(
                 "Live reference",
                 1.0,
@@ -4241,6 +4265,8 @@ impl GraphNode {
             native_operator: None,
             evaluation: NodeEvaluation::clean(),
             participates_in_output: true,
+            comment: String::new(),
+            show_comment_in_network: false,
             parameter: NodeParameter::scalar(
                 "Projected",
                 1.0,
@@ -4279,6 +4305,8 @@ impl GraphNode {
                 message: Some("Python execution is not enabled for this node yet.".to_owned()),
             },
             participates_in_output: true,
+            comment: String::new(),
+            show_comment_in_network: false,
             parameter: NodeParameter::scalar(
                 "Run",
                 0.0,
@@ -4317,6 +4345,8 @@ impl GraphNode {
             native_operator: None,
             evaluation: NodeEvaluation::clean(),
             participates_in_output: true,
+            comment: String::new(),
+            show_comment_in_network: false,
             parameter: NodeParameter::scalar(
                 "Bypass",
                 0.0,
@@ -4353,6 +4383,8 @@ impl GraphNode {
             }),
             evaluation: NodeEvaluation::clean(),
             participates_in_output: true,
+            comment: String::new(),
+            show_comment_in_network: false,
             parameter: NodeParameter::scalar(
                 "Bypass",
                 0.0,
@@ -8414,6 +8446,8 @@ mod tests {
                 message: None,
             },
             participates_in_output: false,
+            comment: String::new(),
+            show_comment_in_network: false,
             parameter: NodeParameter::attribute_rule(
                 "Scratch score",
                 "score",

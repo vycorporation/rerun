@@ -367,7 +367,7 @@ impl HoudiniGraphPanel {
             });
     }
 
-    fn graph_workbench_node_info_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) {
+    fn graph_workbench_node_info_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         ui.horizontal_wrapped(|ui| {
             ui.re_checkbox(&mut self.node_info_pinned, "Pin");
             ui.re_checkbox(
@@ -412,6 +412,8 @@ impl HoudiniGraphPanel {
             ui.colored_label(ui.visuals().warn_fg_color, warning);
         }
 
+        self.selected_node_comment_ui(ui, graph);
+
         ui.re_checkbox(&mut self.node_info_show_additional, "Show additional info");
         if self.node_info_show_additional {
             self.graph_workbench_additional_node_info_ui(ui, &info);
@@ -426,6 +428,26 @@ impl HoudiniGraphPanel {
                     self.node_info_ui(ui, graph);
                 });
         }
+    }
+
+    fn selected_node_comment_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        let Some(node) = graph.nodes.get_mut(self.selected_node) else {
+            return;
+        };
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.colored_label(ui.visuals().selection.stroke.color, "Comment");
+            if node.comment.trim().is_empty() {
+                ui.weak("empty");
+            }
+        });
+        ui.add(
+            egui::TextEdit::multiline(&mut node.comment)
+                .desired_rows(2)
+                .hint_text("Click to enter a comment"),
+        );
+        ui.re_checkbox(&mut node.show_comment_in_network, "Show comment in Network");
     }
 
     fn graph_workbench_additional_node_info_ui(
@@ -1275,6 +1297,15 @@ impl HoudiniGraphPanel {
                     ui.visuals().warn_fg_color,
                 );
             }
+            if node.show_comment_in_network && !node.comment.trim().is_empty() {
+                painter.text(
+                    node_rect.right_center() + egui::vec2(10.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    format_node_comment(&node.comment),
+                    FontId::proportional(12.0),
+                    ui.visuals().weak_text_color(),
+                );
+            }
         }
 
         response
@@ -2106,6 +2137,16 @@ fn format_node_name(name: impl AsRef<str>, max_width: f32) -> String {
             .chars()
             .take(max_chars.saturating_sub(1))
             .collect::<String>();
+        format!("{prefix}…")
+    }
+}
+
+fn format_node_comment(comment: &str) -> String {
+    let comment = comment.trim().replace('\n', " ");
+    if comment.chars().count() <= 34 {
+        comment
+    } else {
+        let prefix = comment.chars().take(33).collect::<String>();
         format!("{prefix}…")
     }
 }
