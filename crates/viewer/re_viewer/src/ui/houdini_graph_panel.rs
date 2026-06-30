@@ -55,6 +55,7 @@ pub(crate) struct HoudiniGraphPanel {
     benchmark_status: Option<String>,
     benchmark_curve_count: usize,
     benchmark_polygon_count: usize,
+    operator_filter: String,
     table_search: String,
     table_minimum_score_enabled: bool,
     table_minimum_score: f32,
@@ -83,6 +84,7 @@ impl Default for HoudiniGraphPanel {
             benchmark_status: None,
             benchmark_curve_count: 10_000,
             benchmark_polygon_count: 1_000,
+            operator_filter: String::new(),
             table_search: String::new(),
             table_minimum_score_enabled: false,
             table_minimum_score: 0.0,
@@ -841,40 +843,102 @@ impl HoudiniGraphPanel {
     }
 
     fn operator_strip_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("OUT Null").clicked() {
-                let index = graph.add_null_operator_node("OUT_MAIN");
-                self.selected_node = index;
-            }
-            if ui.button("Reference").clicked()
-                && let Some(index) = graph.add_reference_input_node(self.selected_node)
-            {
-                self.selected_node = index;
-            }
-            if graph
-                .reference_coordinate_repair_summary(self.selected_node)
-                .is_some()
-                && ui.button("Repair").clicked()
-                && let Some(index) = graph
-                    .create_assisted_projection_for_first_repairable_reference_target(
-                        self.selected_node,
-                    )
-            {
-                self.selected_node = index;
-            }
-        });
-
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Duplicate polygons").clicked() {
-                graph.duplicate_layer_view(LayerKind::Polygons, "Polygons Copy");
-            }
-            if ui.button("Duplicate curves").clicked() {
-                graph.duplicate_layer_view(LayerKind::Curves, "Curves Copy");
+        ui.horizontal(|ui| {
+            ui.weak("Tab");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.operator_filter)
+                    .desired_width((ui.available_width() - 44.0).clamp(96.0, 180.0))
+                    .hint_text("operator"),
+            );
+            if ui.small_button("Clear").clicked() {
+                self.operator_filter.clear();
             }
         });
 
         if let Some(node) = graph.nodes.get(self.selected_node) {
             ui.weak(format!("Selected: {} ({})", node.name, node.kind.as_str()));
+        }
+
+        let filter = self.operator_filter.trim().to_lowercase();
+        let mut shown_operator = false;
+
+        egui::CollapsingHeader::new("Create")
+            .id_salt("houdini_operator_create_palette")
+            .default_open(true)
+            .show(ui, |ui| {
+                if operator_matches(&filter, "OUT Null", &["null", "anchor", "out"]) {
+                    shown_operator = true;
+                    if operator_palette_button_ui(
+                        ui,
+                        "OUT Null",
+                        "Typed pass-through anchor using the OUT_* naming convention.",
+                    ) {
+                        let index = graph.add_null_operator_node("OUT_MAIN");
+                        self.selected_node = index;
+                    }
+                }
+
+                if operator_matches(&filter, "Reference", &["object merge", "import", "target"]) {
+                    shown_operator = true;
+                    if operator_palette_button_ui(
+                        ui,
+                        "Reference",
+                        "Visible live reference to the selected node output.",
+                    ) && let Some(index) = graph.add_reference_input_node(self.selected_node)
+                    {
+                        self.selected_node = index;
+                    }
+                }
+
+                if graph
+                    .reference_coordinate_repair_summary(self.selected_node)
+                    .is_some()
+                    && operator_matches(&filter, "Repair Projection", &["projection", "repair"])
+                {
+                    shown_operator = true;
+                    if operator_palette_button_ui(
+                        ui,
+                        "Repair Projection",
+                        "Insert a visible substrate projection node for the selected reference.",
+                    ) && let Some(index) = graph
+                        .create_assisted_projection_for_first_repairable_reference_target(
+                            self.selected_node,
+                        )
+                    {
+                        self.selected_node = index;
+                    }
+                }
+            });
+
+        egui::CollapsingHeader::new("Layer Actions")
+            .id_salt("houdini_operator_layer_palette")
+            .default_open(filter.is_empty())
+            .show(ui, |ui| {
+                if operator_matches(&filter, "Duplicate Polygons", &["polygon", "layer"]) {
+                    shown_operator = true;
+                    if operator_palette_button_ui(
+                        ui,
+                        "Duplicate Polygons",
+                        "Create another graph-backed polygon layer view.",
+                    ) {
+                        graph.duplicate_layer_view(LayerKind::Polygons, "Polygons Copy");
+                    }
+                }
+
+                if operator_matches(&filter, "Duplicate Curves", &["curve", "bezier", "layer"]) {
+                    shown_operator = true;
+                    if operator_palette_button_ui(
+                        ui,
+                        "Duplicate Curves",
+                        "Create another graph-backed native cubic layer view.",
+                    ) {
+                        graph.duplicate_layer_view(LayerKind::Curves, "Curves Copy");
+                    }
+                }
+            });
+
+        if !shown_operator {
+            ui.weak("No matching graph-backed operators.");
         }
     }
 
@@ -1877,6 +1941,21 @@ fn format_bindings(bindings: &[HoudiniNodeBinding]) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+fn operator_matches(filter: &str, label: &str, aliases: &[&str]) -> bool {
+    filter.is_empty()
+        || label.to_lowercase().contains(filter)
+        || aliases.iter().any(|alias| alias.contains(filter))
+}
+
+fn operator_palette_button_ui(ui: &mut Ui, label: &str, detail: &str) -> bool {
+    let mut clicked = false;
+    ui.horizontal_wrapped(|ui| {
+        clicked = ui.button(label).clicked();
+        ui.weak(detail);
+    });
+    clicked
 }
 
 fn map_node_layout_point(rect: Rect, point: GraphPoint, node_size: Vec2) -> Pos2 {
