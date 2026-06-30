@@ -1420,6 +1420,7 @@ impl HoudiniGraphPanel {
                 badge_visibility_combo_ui(ui, "Has Data Badge", &mut options.has_data_badge);
                 badge_visibility_combo_ui(ui, "Cached Code Badge", &mut options.cached_code_badge);
                 badge_visibility_combo_ui(ui, "Constraint Badge", &mut options.constraint_badge);
+                badge_visibility_combo_ui(ui, "Compilable Badge", &mut options.compilable_badge);
             });
     }
 
@@ -2703,15 +2704,27 @@ impl HoudiniGraphPanel {
 
             let fill = if selected {
                 ui.visuals().selection.bg_fill
+            } else if hovered {
+                ui.visuals().widgets.hovered.bg_fill
             } else {
                 ui.visuals().widgets.inactive.bg_fill
             };
             let stroke = if selected {
-                Stroke::new(1.5, ui.visuals().selection.stroke.color)
+                Stroke::new(2.0, ui.visuals().selection.stroke.color)
+            } else if hovered {
+                Stroke::new(1.5, ui.visuals().widgets.hovered.fg_stroke.color)
             } else {
                 ui.visuals().widgets.inactive.fg_stroke
             };
 
+            if selected {
+                painter.rect_stroke(
+                    node_rect.expand(3.0),
+                    7.0,
+                    Stroke::new(1.0, faded_color(ui.visuals().selection.stroke.color, 0.72)),
+                    StrokeKind::Inside,
+                );
+            }
             painter.rect_filled(node_rect, 6.0, fill);
             painter.rect_stroke(node_rect, 6.0, stroke, StrokeKind::Inside);
             painter.text(
@@ -4500,6 +4513,13 @@ fn draw_node_badges(
             network_view.constraint_badge,
         ));
     }
+    if node_info.as_ref().is_some_and(node_info_is_compilable) {
+        badges.push((
+            "P",
+            Color32::from_rgb(178, 132, 222),
+            network_view.compilable_badge,
+        ));
+    }
 
     let mut offset = 0.0;
     for (label, color, visibility) in badges {
@@ -4524,6 +4544,16 @@ fn draw_node_badges(
         }
         offset += radius * 2.0 + 3.0;
     }
+}
+
+fn node_info_is_compilable(info: &self::model::NodeInfo) -> bool {
+    info.python_operator
+        .as_ref()
+        .is_some_and(|operator| operator.dependency_status == PythonOperatorDependencyStatus::Ready)
+        || info
+            .native_operator
+            .as_ref()
+            .is_some_and(|operator| operator.load_status == NativeOperatorLoadStatus::Ready)
 }
 
 fn draw_node_flag_strip(

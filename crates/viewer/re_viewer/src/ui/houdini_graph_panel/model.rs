@@ -4501,6 +4501,8 @@ pub(crate) struct NetworkViewDisplayOptions {
     pub cached_code_badge: NetworkBadgeVisibility,
     #[serde(default)]
     pub constraint_badge: NetworkBadgeVisibility,
+    #[serde(default)]
+    pub compilable_badge: NetworkBadgeVisibility,
 }
 
 impl Default for NetworkViewDisplayOptions {
@@ -4519,6 +4521,7 @@ impl Default for NetworkViewDisplayOptions {
             has_data_badge: NetworkBadgeVisibility::Normal,
             cached_code_badge: NetworkBadgeVisibility::Normal,
             constraint_badge: NetworkBadgeVisibility::Normal,
+            compilable_badge: NetworkBadgeVisibility::Normal,
         }
     }
 }
@@ -9855,6 +9858,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         graph.network_view.has_data_badge = NetworkBadgeVisibility::Hide;
         graph.network_view.cached_code_badge = NetworkBadgeVisibility::Large;
         graph.network_view.constraint_badge = NetworkBadgeVisibility::Normal;
+        graph.network_view.compilable_badge = NetworkBadgeVisibility::Hide;
 
         let json = graph.to_sidecar_json().unwrap();
         let mut restored = GraphDocument::sample();
@@ -9905,6 +9909,10 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         );
         assert_eq!(
             restored.network_view.constraint_badge,
+            NetworkBadgeVisibility::Normal
+        );
+        assert_eq!(
+            restored.network_view.compilable_badge,
             NetworkBadgeVisibility::Normal
         );
     }
