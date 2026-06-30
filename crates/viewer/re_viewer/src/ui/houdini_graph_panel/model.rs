@@ -620,13 +620,17 @@ impl GraphDocument {
             return false;
         };
 
-        let Some(filter_node) = self
+        let Some(filter_node_index) = self
             .nodes
-            .iter_mut()
-            .find(|node| node.kind == NodeKind::Filter)
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
         else {
             return false;
         };
+        if !self.node_accepts_layer_managed_update(filter_node_index) {
+            return false;
+        }
+        let filter_node = &mut self.nodes[filter_node_index];
 
         filter_node.parameter.value = minimum_score.clamp(
             *filter_node.parameter.range.start(),
@@ -641,6 +645,38 @@ impl GraphDocument {
         filter_node.generated = Some(GeneratedNodeInfo::managed(
             GeneratedNodeSource::AttributeTableCommit,
         ));
+        true
+    }
+
+    pub fn set_node_parameter_value(&mut self, node_index: usize, value: f32) -> bool {
+        let Some(node) = self.nodes.get_mut(node_index) else {
+            return false;
+        };
+        let clamped_value = value.clamp(*node.parameter.range.start(), *node.parameter.range.end());
+        if (node.parameter.value - clamped_value).abs() <= f32::EPSILON {
+            return false;
+        }
+        node.parameter.value = clamped_value;
+        true
+    }
+
+    #[allow(dead_code)]
+    pub fn set_output_operator_for_node(
+        &mut self,
+        node_index: usize,
+        output_operator: OutputOperatorNode,
+    ) -> bool {
+        let Some(node) = self.nodes.get_mut(node_index) else {
+            return false;
+        };
+        if node.kind != NodeKind::Output {
+            return false;
+        }
+        if node.output_operator.as_ref() == Some(&output_operator) {
+            return false;
+        }
+        node.output_operator = Some(output_operator);
+        self.adopt_generated_node_for_structural_edit(node_index);
         true
     }
 
@@ -661,6 +697,31 @@ impl GraphDocument {
         }
         generated.binding_state = binding_state;
         true
+    }
+
+    #[allow(dead_code)]
+    pub fn adopt_generated_node_for_structural_edit(&mut self, node_index: usize) -> bool {
+        let Some(generated) = self
+            .nodes
+            .get_mut(node_index)
+            .and_then(|node| node.generated.as_mut())
+        else {
+            return false;
+        };
+        if generated.binding_state != GeneratedNodeBindingState::Managed {
+            return false;
+        }
+        generated.binding_state = GeneratedNodeBindingState::Adopted;
+        true
+    }
+
+    fn node_accepts_layer_managed_update(&self, node_index: usize) -> bool {
+        self.nodes
+            .get(node_index)
+            .is_some_and(|node| match node.generated {
+                None => true,
+                Some(generated) => generated.binding_state == GeneratedNodeBindingState::Managed,
+            })
     }
 
     #[allow(dead_code)]
@@ -7492,7 +7553,7 @@ fn sanitize_entity_path_part(value: &str) -> String {
 mod tests {
     use super::{
         AttributeTableQuery, AttributeTableSort, EvaluationState, ExportGeometry,
-        GeneratedNodeBindingState, GeneratedNodeSource, Geometry, GeometryKind,
+        GeneratedNodeBindingState, GeneratedNodeInfo, GeneratedNodeSource, Geometry, GeometryKind,
         GraphAnnotationKind, GraphColor, GraphDocument, GraphNode, GraphPoint, GraphStyle,
         HoudiniCubicBezierParquetSchema, HoudiniDataKind, HoudiniGeometryRecord,
         HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
@@ -8935,6 +8996,119 @@ mod tests {
     }
 
     #[test]
+    fn compatible_parameter_edit_preserves_managed_generated_binding() {
+        let mut graph = GraphDocument::sample();
+        assert!(
+            graph.commit_attribute_table_query_as_filter(&AttributeTableQuery {
+                search: String::new(),
+                minimum_score: Some(0.8),
+                sort: AttributeTableSort::RecordIndex,
+                sort_descending: false,
+            })
+        );
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+
+        assert!(graph.set_node_parameter_value(filter_index, 0.6));
+
+        let filter_info = graph
+            .selected_node_info(filter_index)
+            .expect("filter node info should exist");
+        assert_eq!(
+            filter_info
+                .generated
+                .expect("filter should remain generated")
+                .binding_state,
+            GeneratedNodeBindingState::Managed
+        );
+        assert_eq!(
+            graph
+                .filter_rule()
+                .expect("generated filter should still expose typed rule")
+                .value
+                .as_f32(),
+            Some(0.6)
+        );
+    }
+
+    #[test]
+    fn layer_commit_does_not_rewrite_adopted_or_unbound_generated_filter() {
+        let mut graph = GraphDocument::sample();
+        assert!(
+            graph.commit_attribute_table_query_as_filter(&AttributeTableQuery {
+                search: String::new(),
+                minimum_score: Some(0.8),
+                sort: AttributeTableSort::RecordIndex,
+                sort_descending: false,
+            })
+        );
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+
+        assert!(graph.set_generated_node_binding_state(
+            filter_index,
+            GeneratedNodeBindingState::Adopted,
+        ));
+        assert!(
+            !graph.commit_attribute_table_query_as_filter(&AttributeTableQuery {
+                search: String::new(),
+                minimum_score: Some(0.3),
+                sort: AttributeTableSort::RecordIndex,
+                sort_descending: false,
+            })
+        );
+        assert_eq!(
+            graph
+                .filter_rule()
+                .expect("adopted filter should keep its graph-owned rule")
+                .value
+                .as_f32(),
+            Some(0.8)
+        );
+        assert_eq!(
+            graph.nodes[filter_index]
+                .generated
+                .expect("filter should remain generated")
+                .binding_state,
+            GeneratedNodeBindingState::Adopted
+        );
+
+        assert!(graph.set_generated_node_binding_state(
+            filter_index,
+            GeneratedNodeBindingState::Unbound,
+        ));
+        assert!(
+            !graph.commit_attribute_table_query_as_filter(&AttributeTableQuery {
+                search: String::new(),
+                minimum_score: Some(0.2),
+                sort: AttributeTableSort::RecordIndex,
+                sort_descending: false,
+            })
+        );
+        assert_eq!(
+            graph
+                .filter_rule()
+                .expect("unbound filter should keep its graph-owned rule")
+                .value
+                .as_f32(),
+            Some(0.8)
+        );
+        assert_eq!(
+            graph.nodes[filter_index]
+                .generated
+                .expect("filter should remain generated")
+                .binding_state,
+            GeneratedNodeBindingState::Unbound
+        );
+    }
+
+    #[test]
     fn generated_node_binding_state_is_graph_owned_and_durable() {
         let mut graph = GraphDocument::sample();
         assert!(
@@ -8985,6 +9159,41 @@ mod tests {
                 .expect("restored filter node should expose generated metadata")
                 .binding_state,
             GeneratedNodeBindingState::Adopted
+        );
+    }
+
+    #[test]
+    fn structural_output_replacement_adopts_managed_generated_node() {
+        let mut graph = GraphDocument::sample();
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .expect("sample graph should include output node");
+        graph.nodes[output_index].generated = Some(GeneratedNodeInfo::managed(
+            GeneratedNodeSource::AttributeTableCommit,
+        ));
+
+        assert!(
+            graph.set_output_operator_for_node(output_index, OutputOperatorNode::generic_scene(),)
+        );
+
+        let output_info = graph
+            .selected_node_info(output_index)
+            .expect("output node info should exist");
+        assert_eq!(
+            output_info
+                .generated
+                .expect("output should retain generated provenance")
+                .binding_state,
+            GeneratedNodeBindingState::Adopted
+        );
+        assert_eq!(
+            output_info
+                .output_operator
+                .expect("output operator info should exist")
+                .kind,
+            OutputOperatorKind::Generic
         );
     }
 

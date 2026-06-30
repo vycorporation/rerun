@@ -1055,7 +1055,7 @@ impl HoudiniGraphPanel {
             .default_open(true)
             .show(ui, |ui| {
                 let mut selected_parameter_changed = false;
-                if let Some(node) = graph.nodes.get_mut(self.selected_node) {
+                if let Some(node) = graph.nodes.get(self.selected_node) {
                     egui::Grid::new("houdini_graph_parms_parameter_metadata")
                         .num_columns(2)
                         .spacing([12.0, 4.0])
@@ -1075,14 +1075,19 @@ impl HoudiniGraphPanel {
                             }
                         });
 
+                    let mut parameter_value = node.parameter.value;
                     selected_parameter_changed = ui
                         .add(
-                            Slider::new(&mut node.parameter.value, node.parameter.range.clone())
+                            Slider::new(&mut parameter_value, node.parameter.range.clone())
                                 .text(node.parameter.name),
                         )
                         .on_hover_text(node.parameter.help)
                         .changed();
                     ui.weak(node.parameter.help);
+                    if selected_parameter_changed {
+                        selected_parameter_changed =
+                            graph.set_node_parameter_value(self.selected_node, parameter_value);
+                    }
                 }
 
                 if selected_parameter_changed {
