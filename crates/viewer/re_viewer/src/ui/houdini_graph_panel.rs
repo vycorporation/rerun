@@ -248,7 +248,9 @@ impl HoudiniGraphPanel {
                         ui.set_min_size(egui::vec2(canvas_width, pane_height));
                         ui.strong("Network Editor");
                         ui.add_space(4.0);
-                        self.node_graph_ui(ui, graph, (pane_height - 30.0).max(320.0));
+                        self.network_editor_toolbar_ui(ui, graph);
+                        ui.add_space(4.0);
+                        self.node_graph_ui(ui, graph, (pane_height - 58.0).max(320.0));
                     },
                 );
 
@@ -271,6 +273,8 @@ impl HoudiniGraphPanel {
             });
         } else {
             ui.strong("Network Editor");
+            self.network_editor_toolbar_ui(ui, graph);
+            ui.add_space(4.0);
             self.node_graph_ui(ui, graph, 340.0);
 
             ui.add_space(8.0);
@@ -282,6 +286,81 @@ impl HoudiniGraphPanel {
                     self.graph_workbench_side_strip_ui(ui, graph);
                 });
         }
+    }
+
+    fn network_editor_toolbar_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        let selected_name = graph
+            .nodes
+            .get(self.selected_node)
+            .map(|node| node.name.clone())
+            .unwrap_or_else(|| "none".to_owned());
+
+        ui.horizontal_wrapped(|ui| {
+            ui.weak("/obj/main");
+            ui.separator();
+
+            ui.menu_button("Add", |ui| {
+                if ui.button("OUT Null").clicked() {
+                    self.selected_node = graph.add_null_operator_node("OUT_MAIN");
+                    self.node_info_open = true;
+                    self.active_graph_pane = GraphWorkbenchPane::Parameters;
+                    ui.close();
+                }
+                if ui.button("Reference").clicked() {
+                    if let Some(index) = graph.add_reference_input_node(self.selected_node) {
+                        self.selected_node = index;
+                        self.node_info_open = true;
+                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
+                    }
+                    ui.close();
+                }
+                if ui.button("Network Box").clicked() {
+                    graph.add_network_box_for_node(self.selected_node);
+                    self.active_graph_pane = GraphWorkbenchPane::Operators;
+                    ui.close();
+                }
+                if ui.button("Sticky Note").clicked() {
+                    graph.add_sticky_note_near_node(self.selected_node);
+                    self.active_graph_pane = GraphWorkbenchPane::Operators;
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("View", |ui| {
+                if ui.button("Display Options").clicked() {
+                    self.active_graph_pane = GraphWorkbenchPane::Display;
+                    toggle_network_display_options(ui);
+                    ui.close();
+                }
+                if ui.button("Reset View").clicked() {
+                    self.graph_view_zoom = 1.0;
+                    self.graph_view_pan = Vec2::ZERO;
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Layout", |ui| {
+                if ui.button("Resize Boxes to Contents").clicked() {
+                    let network_box_indices = graph
+                        .annotations
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, annotation)| {
+                            (annotation.kind == GraphAnnotationKind::NetworkBox).then_some(index)
+                        })
+                        .collect::<Vec<_>>();
+                    for index in network_box_indices {
+                        graph.resize_network_box_to_contents(index);
+                    }
+                    ui.close();
+                }
+            });
+
+            ui.separator();
+            ui.weak(selected_name);
+            ui.separator();
+            ui.weak(format!("{:.0}%", self.graph_view_zoom * 100.0));
+        });
     }
 
     fn inspect_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
