@@ -4448,6 +4448,8 @@ pub(crate) struct NetworkViewDisplayOptions {
     pub comment_badge: NetworkBadgeVisibility,
     #[serde(default)]
     pub time_dependent_badge: NetworkBadgeVisibility,
+    #[serde(default)]
+    pub lock_badge: NetworkBadgeVisibility,
 }
 
 impl Default for NetworkViewDisplayOptions {
@@ -4462,6 +4464,7 @@ impl Default for NetworkViewDisplayOptions {
             warning_badge: NetworkBadgeVisibility::Normal,
             comment_badge: NetworkBadgeVisibility::Large,
             time_dependent_badge: NetworkBadgeVisibility::Normal,
+            lock_badge: NetworkBadgeVisibility::Normal,
         }
     }
 }
@@ -9767,6 +9770,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         graph.network_view.warning_badge = NetworkBadgeVisibility::Large;
         graph.network_view.comment_badge = NetworkBadgeVisibility::Normal;
         graph.network_view.time_dependent_badge = NetworkBadgeVisibility::Hide;
+        graph.network_view.lock_badge = NetworkBadgeVisibility::Large;
 
         let json = graph.to_sidecar_json().unwrap();
         let mut restored = GraphDocument::sample();
@@ -9802,6 +9806,10 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(
             restored.network_view.comment_badge,
             NetworkBadgeVisibility::Large
+        );
+        assert_eq!(
+            restored.network_view.lock_badge,
+            NetworkBadgeVisibility::Normal
         );
     }
 

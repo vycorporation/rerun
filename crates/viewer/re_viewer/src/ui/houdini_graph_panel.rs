@@ -990,6 +990,7 @@ impl HoudiniGraphPanel {
                     "Time Dependent Badge",
                     &mut options.time_dependent_badge,
                 );
+                badge_visibility_combo_ui(ui, "Asset Lock Badge", &mut options.lock_badge);
             });
     }
 
@@ -3750,6 +3751,17 @@ fn draw_node_badges(
             "C",
             Color32::from_rgb(42, 178, 168),
             network_view.comment_badge,
+        ));
+    }
+    if let Some(asset) = &node.procedural_asset {
+        badges.push((
+            if asset.contents_unlocked { "U" } else { "L" },
+            if asset.contents_unlocked {
+                Color32::from_rgb(242, 176, 61)
+            } else {
+                Color32::from_rgb(122, 154, 212)
+            },
+            network_view.lock_badge,
         ));
     }
 
