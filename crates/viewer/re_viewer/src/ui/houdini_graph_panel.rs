@@ -185,15 +185,6 @@ enum GraphWorkbenchPane {
 }
 
 impl GraphWorkbenchPane {
-    const ALL: [Self; 6] = [
-        Self::Operators,
-        Self::Find,
-        Self::Parameters,
-        Self::Info,
-        Self::Display,
-        Self::Layers,
-    ];
-
     fn label(self) -> &'static str {
         match self {
             Self::Operators => "Ops",
@@ -282,19 +273,6 @@ enum GraphSearchTarget {
 }
 
 impl HoudiniGraphPanel {
-    fn graph_workbench_pane_tabs_ui(&mut self, ui: &mut Ui) {
-        ui.horizontal_wrapped(|ui| {
-            for pane in GraphWorkbenchPane::ALL {
-                if ui
-                    .selectable_label(self.active_graph_pane == pane, pane.label())
-                    .clicked()
-                {
-                    self.active_graph_pane = pane;
-                }
-            }
-        });
-    }
-
     pub(crate) fn show_network_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
         install_shared_houdini_graph(ui.ctx(), shared_graph);
         let mut graph = lock_houdini_graph(shared_graph);
@@ -305,14 +283,28 @@ impl HoudiniGraphPanel {
         .show(ui, |ui| self.network_view_contents_ui(ui, &mut graph));
     }
 
-    pub(crate) fn show_inspector_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
-        install_shared_houdini_graph(ui.ctx(), shared_graph);
-        let mut graph = lock_houdini_graph(shared_graph);
-        egui::Frame {
-            inner_margin: egui::Margin::same(8),
-            ..Default::default()
-        }
-        .show(ui, |ui| self.inspector_view_contents_ui(ui, &mut graph));
+    pub(crate) fn show_parameters_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
+        self.show_workbench_view(ui, shared_graph, GraphWorkbenchPane::Parameters);
+    }
+
+    pub(crate) fn show_info_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
+        self.show_workbench_view(ui, shared_graph, GraphWorkbenchPane::Info);
+    }
+
+    pub(crate) fn show_display_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
+        self.show_workbench_view(ui, shared_graph, GraphWorkbenchPane::Display);
+    }
+
+    pub(crate) fn show_operators_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
+        self.show_workbench_view(ui, shared_graph, GraphWorkbenchPane::Operators);
+    }
+
+    pub(crate) fn show_find_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
+        self.show_workbench_view(ui, shared_graph, GraphWorkbenchPane::Find);
+    }
+
+    pub(crate) fn show_layers_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
+        self.show_workbench_view(ui, shared_graph, GraphWorkbenchPane::Layers);
     }
 
     pub(crate) fn show_data_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
@@ -355,16 +347,28 @@ impl HoudiniGraphPanel {
         self.node_graph_ui(ui, graph, (ui.available_height() - 4.0).max(300.0));
     }
 
-    fn inspector_view_contents_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
-        self.graph_workbench_pane_tabs_ui(ui);
-        ui.separator();
-        egui::ScrollArea::vertical()
-            .id_salt("houdini_graph_inspector_view_scroll")
-            .auto_shrink([false, false])
-            .max_height(ui.available_height().max(240.0))
-            .show(ui, |ui| {
-                self.graph_workbench_side_strip_ui(ui, graph);
-            });
+    fn show_workbench_view(
+        &mut self,
+        ui: &mut Ui,
+        shared_graph: &SharedHoudiniGraph,
+        pane: GraphWorkbenchPane,
+    ) {
+        self.active_graph_pane = pane;
+        install_shared_houdini_graph(ui.ctx(), shared_graph);
+        let mut graph = lock_houdini_graph(shared_graph);
+        egui::Frame {
+            inner_margin: egui::Margin::same(8),
+            ..Default::default()
+        }
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(format!("houdini_graph_workbench_view_{}", pane.label()))
+                .auto_shrink([false, false])
+                .max_height(ui.available_height().max(240.0))
+                .show(ui, |ui| {
+                    self.graph_workbench_content_ui(ui, &mut graph, self.active_graph_pane);
+                });
+        });
     }
 
     fn network_editor_toolbar_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -1383,8 +1387,13 @@ impl HoudiniGraphPanel {
             .unwrap_or_else(|| "/obj/main/<none>".to_owned())
     }
 
-    fn graph_workbench_side_strip_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
-        match self.active_graph_pane {
+    fn graph_workbench_content_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        pane: GraphWorkbenchPane,
+    ) {
+        match pane {
             GraphWorkbenchPane::Operators => {
                 self.operator_strip_ui(ui, graph);
                 ui.add_space(8.0);

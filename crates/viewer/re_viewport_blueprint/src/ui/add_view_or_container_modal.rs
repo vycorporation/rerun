@@ -110,7 +110,13 @@ fn modal_ui(
     let (stable_views, experimental_views): (Vec<_>, Vec<_>) = ctx
         .view_class_registry()
         .iter_registry()
-        .map(|entry| ViewBlueprint::new_with_root_wildcard(entry.identifier))
+        .map(|entry| {
+            let mut view = ViewBlueprint::new_with_root_wildcard(entry.identifier);
+            if let Some(display_name) = entry.class.default_spawned_display_name() {
+                view.display_name = Some(display_name.to_owned());
+            }
+            view
+        })
         .partition(|view| !view.class(ctx.view_class_registry()).is_experimental());
 
     let add_view_row = |ui: &mut egui::Ui, view: ViewBlueprint, is_experimental: bool| {

@@ -51,7 +51,32 @@ fn populate_view_class_registry_with_builtin(
         app_options,
         fallback_registry,
     )?;
-    view_class_registry.add_class::<crate::ui::HoudiniInspectorView>(
+    view_class_registry.add_class::<crate::ui::HoudiniParametersView>(
+        reflection,
+        app_options,
+        fallback_registry,
+    )?;
+    view_class_registry.add_class::<crate::ui::HoudiniInfoView>(
+        reflection,
+        app_options,
+        fallback_registry,
+    )?;
+    view_class_registry.add_class::<crate::ui::HoudiniDisplayView>(
+        reflection,
+        app_options,
+        fallback_registry,
+    )?;
+    view_class_registry.add_class::<crate::ui::HoudiniOperatorsView>(
+        reflection,
+        app_options,
+        fallback_registry,
+    )?;
+    view_class_registry.add_class::<crate::ui::HoudiniFindView>(
+        reflection,
+        app_options,
+        fallback_registry,
+    )?;
+    view_class_registry.add_class::<crate::ui::HoudiniLayersView>(
         reflection,
         app_options,
         fallback_registry,

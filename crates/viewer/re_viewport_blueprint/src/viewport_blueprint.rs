@@ -414,7 +414,11 @@ impl ViewportBlueprint {
 
             self.add_views(
                 final_recommendations.map(|(_, recommendation)| {
-                    ViewBlueprint::new(class_id, recommendation.clone())
+                    let mut view = ViewBlueprint::new(class_id, recommendation.clone());
+                    if let Some(display_name) = entry.class.default_spawned_display_name() {
+                        view.display_name = Some(display_name.to_owned());
+                    }
+                    view
                 }),
                 None,
                 None,
@@ -902,12 +906,18 @@ impl ViewportBlueprint {
                 let visible = self.tree.is_visible(*tile_id);
 
                 // TODO(jleibs): Make this only update the changed fields.
-                let blueprint = ContainerBlueprint::from_egui_tiles_container(
+                let mut blueprint = ContainerBlueprint::from_egui_tiles_container(
                     *container_id,
                     container,
                     visible,
                     &contents_from_tile_id,
                 );
+                if blueprint.display_name.is_none()
+                    && let Some(display_name) =
+                        super::auto_layout::default_tab_group_container_name(*container_id)
+                {
+                    blueprint.display_name = Some(display_name.to_owned());
+                }
 
                 blueprint.save_to_blueprint_store(ctx);
             }

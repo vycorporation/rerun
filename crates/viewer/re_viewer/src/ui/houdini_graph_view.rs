@@ -33,7 +33,22 @@ pub(crate) struct HoudiniGraphView;
 pub(crate) struct HoudiniNetworkView;
 
 #[derive(Default)]
-pub(crate) struct HoudiniInspectorView;
+pub(crate) struct HoudiniParametersView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniInfoView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniDisplayView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniOperatorsView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniFindView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniLayersView;
 
 #[derive(Default)]
 pub(crate) struct HoudiniDataView;
@@ -227,6 +242,10 @@ impl ViewClass for HoudiniNetworkView {
         "Network"
     }
 
+    fn default_spawned_display_name(&self) -> Option<&'static str> {
+        Some("Network")
+    }
+
     fn is_experimental(&self) -> bool {
         true
     }
@@ -297,87 +316,128 @@ impl ViewClass for HoudiniNetworkView {
     }
 }
 
-impl ViewClass for HoudiniInspectorView {
-    fn identifier() -> ViewClassIdentifier {
-        re_viewer_context::external::re_string_interner::intern_static!(
-            ViewClassIdentifier,
-            "HoudiniInspector"
-        )
-    }
+macro_rules! houdini_workbench_view_class {
+    ($type:ty, $identifier:literal, $display_name:literal, $help:literal, $render_method:ident) => {
+        impl ViewClass for $type {
+            fn identifier() -> ViewClassIdentifier {
+                re_viewer_context::external::re_string_interner::intern_static!(
+                    ViewClassIdentifier,
+                    $identifier
+                )
+            }
 
-    fn display_name(&self) -> &'static str {
-        "Inspector"
-    }
+            fn display_name(&self) -> &'static str {
+                $display_name
+            }
 
-    fn is_experimental(&self) -> bool {
-        true
-    }
+            fn default_spawned_display_name(&self) -> Option<&'static str> {
+                Some($display_name)
+            }
 
-    fn icon(&self) -> &'static re_ui::Icon {
-        &icons::VIEW_GENERIC
-    }
+            fn default_spawned_tab_group(&self) -> Option<&'static str> {
+                Some("Inspector")
+            }
 
-    fn help(&self, _os: egui::os::OperatingSystem) -> Help {
-        Help::new("Houdini inspector")
-            .markdown("Parameters, operators, find, display, and layer controls for the shared Houdini graph.")
-    }
+            fn is_experimental(&self) -> bool {
+                true
+            }
 
-    fn on_register(
-        &self,
-        _system_registry: &mut ViewSystemRegistrator<'_>,
-    ) -> Result<(), ViewClassRegistryError> {
-        Ok(())
-    }
+            fn icon(&self) -> &'static re_ui::Icon {
+                &icons::VIEW_GENERIC
+            }
 
-    fn new_state(&self) -> Box<dyn ViewState> {
-        Box::<HoudiniPanelViewState>::default()
-    }
+            fn help(&self, _os: egui::os::OperatingSystem) -> Help {
+                Help::new($display_name).markdown($help)
+            }
 
-    fn preferred_tile_aspect_ratio(&self, _state: &dyn ViewState) -> Option<f32> {
-        Some(4.0 / 5.0)
-    }
+            fn on_register(
+                &self,
+                _system_registry: &mut ViewSystemRegistrator<'_>,
+            ) -> Result<(), ViewClassRegistryError> {
+                Ok(())
+            }
 
-    fn layout_priority(&self) -> ViewClassLayoutPriority {
-        ViewClassLayoutPriority::Medium
-    }
+            fn new_state(&self) -> Box<dyn ViewState> {
+                Box::<HoudiniPanelViewState>::default()
+            }
 
-    fn spawn_heuristics(
-        &self,
-        _ctx: &ViewerContext<'_>,
-        _include_entity: &dyn Fn(&EntityPath) -> bool,
-    ) -> ViewSpawnHeuristics {
-        ViewSpawnHeuristics::root().with_max_views_spawned(1)
-    }
+            fn preferred_tile_aspect_ratio(&self, _state: &dyn ViewState) -> Option<f32> {
+                Some(4.0 / 5.0)
+            }
 
-    fn selection_ui(
-        &self,
-        _ctx: &ViewerContext<'_>,
-        ui: &mut egui::Ui,
-        state: &mut dyn ViewState,
-        _space_origin: &EntityPath,
-        _view_id: re_viewer_context::ViewId,
-    ) -> Result<(), ViewSystemExecutionError> {
-        state.downcast_ref::<HoudiniPanelViewState>()?;
-        ui.label("Blueprint view for the shared Houdini inspector.");
-        Ok(())
-    }
+            fn layout_priority(&self) -> ViewClassLayoutPriority {
+                ViewClassLayoutPriority::Medium
+            }
 
-    fn ui(
-        &self,
-        _ctx: &ViewerContext<'_>,
-        _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
-        ui: &mut egui::Ui,
-        state: &mut dyn ViewState,
-        _query: &ViewQuery<'_>,
-        _system_output: SystemExecutionOutput,
-    ) -> Result<(), ViewSystemExecutionError> {
-        state.downcast_ref::<HoudiniPanelViewState>()?;
-        show_houdini_panel_view(ui, |panel, ui, graph| {
-            panel.show_inspector_view(ui, graph);
-        });
-        Ok(())
-    }
+            fn spawn_heuristics(
+                &self,
+                _ctx: &ViewerContext<'_>,
+                _include_entity: &dyn Fn(&EntityPath) -> bool,
+            ) -> ViewSpawnHeuristics {
+                ViewSpawnHeuristics::root().with_max_views_spawned(1)
+            }
+
+            fn ui(
+                &self,
+                _ctx: &ViewerContext<'_>,
+                _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
+                ui: &mut egui::Ui,
+                state: &mut dyn ViewState,
+                _query: &ViewQuery<'_>,
+                _system_output: SystemExecutionOutput,
+            ) -> Result<(), ViewSystemExecutionError> {
+                state.downcast_ref::<HoudiniPanelViewState>()?;
+                show_houdini_panel_view(ui, |panel, ui, graph| {
+                    panel.$render_method(ui, graph);
+                });
+                Ok(())
+            }
+        }
+    };
 }
+
+houdini_workbench_view_class!(
+    HoudiniParametersView,
+    "HoudiniParameters",
+    "Parameters",
+    "Parameters for the selected Houdini graph node.",
+    show_parameters_view
+);
+houdini_workbench_view_class!(
+    HoudiniInfoView,
+    "HoudiniInfo",
+    "Info",
+    "Node information and pipeline trace for the shared Houdini graph.",
+    show_info_view
+);
+houdini_workbench_view_class!(
+    HoudiniDisplayView,
+    "HoudiniDisplay",
+    "Display",
+    "Network display controls for the shared Houdini graph.",
+    show_display_view
+);
+houdini_workbench_view_class!(
+    HoudiniOperatorsView,
+    "HoudiniOperators",
+    "Operators",
+    "Operator palette and organization tools for the shared Houdini graph.",
+    show_operators_view
+);
+houdini_workbench_view_class!(
+    HoudiniFindView,
+    "HoudiniFind",
+    "Find",
+    "Search controls for the shared Houdini graph.",
+    show_find_view
+);
+houdini_workbench_view_class!(
+    HoudiniLayersView,
+    "HoudiniLayers",
+    "Layers",
+    "Layer visibility and output ordering for the shared Houdini graph.",
+    show_layers_view
+);
 
 impl ViewClass for HoudiniDataView {
     fn identifier() -> ViewClassIdentifier {
@@ -389,6 +449,10 @@ impl ViewClass for HoudiniDataView {
 
     fn display_name(&self) -> &'static str {
         "Data"
+    }
+
+    fn default_spawned_display_name(&self) -> Option<&'static str> {
+        Some("Data")
     }
 
     fn is_experimental(&self) -> bool {
@@ -452,6 +516,10 @@ impl ViewClass for HoudiniOutputsView {
         "Outputs"
     }
 
+    fn default_spawned_display_name(&self) -> Option<&'static str> {
+        Some("Outputs")
+    }
+
     fn is_experimental(&self) -> bool {
         true
     }
@@ -511,6 +579,10 @@ impl ViewClass for HoudiniProjectView {
 
     fn display_name(&self) -> &'static str {
         "Project"
+    }
+
+    fn default_spawned_display_name(&self) -> Option<&'static str> {
+        Some("Project")
     }
 
     fn is_experimental(&self) -> bool {
@@ -603,6 +675,10 @@ impl ViewClass for HoudiniGraphView {
 
     fn display_name(&self) -> &'static str {
         "Houdini Graph"
+    }
+
+    fn default_spawned_display_name(&self) -> Option<&'static str> {
+        Some("Houdini Graph")
     }
 
     fn is_experimental(&self) -> bool {

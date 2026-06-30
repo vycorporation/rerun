@@ -159,6 +159,20 @@ pub trait ViewClass: Send + Sync {
     /// Used for UI display.
     fn display_name(&self) -> &'static str;
 
+    /// User-facing name to assign to views spawned automatically for this class.
+    ///
+    /// If absent, auto-spawned views use the default placeholder based on their space origin.
+    fn default_spawned_display_name(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// User-facing tab group name for auto-layout of views spawned automatically for this class.
+    ///
+    /// Classes returning the same group name are initially placed in the same tab container.
+    fn default_spawned_tab_group(&self) -> Option<&'static str> {
+        None
+    }
+
     // TODO(RR-4506): Remove this flag (and all sites that branch on it) once the Status view
     // graduates from experimental.
     /// Whether this view class is still experimental.
