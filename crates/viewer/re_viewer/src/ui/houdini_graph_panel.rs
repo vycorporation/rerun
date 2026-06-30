@@ -196,32 +196,60 @@ impl HoudiniGraphPanel {
     }
 
     fn graph_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
-        let wide_workbench = ui.available_width() >= 680.0;
+        let available_width = ui.available_width();
+        let available_height = ui.available_height();
+        let pane_height = if available_height.is_finite() && available_height > 0.0 {
+            available_height.clamp(380.0, 720.0)
+        } else {
+            520.0
+        };
+        let wide_workbench = available_width >= 680.0;
 
         if wide_workbench {
-            let side_width = (ui.available_width() * 0.28).clamp(240.0, 320.0);
-            let canvas_width = (ui.available_width() - side_width - 12.0).max(320.0);
+            let side_width = (available_width * 0.30).clamp(260.0, 360.0);
+            let canvas_width = (available_width - side_width - 14.0).max(360.0);
 
             ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_width(canvas_width);
-                    ui.strong("Graph Canvas");
-                    self.node_graph_ui(ui, graph, 248.0);
-                });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(canvas_width, pane_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_size(egui::vec2(canvas_width, pane_height));
+                        ui.strong("Network Editor");
+                        ui.add_space(4.0);
+                        self.node_graph_ui(ui, graph, (pane_height - 30.0).max(320.0));
+                    },
+                );
 
                 ui.separator();
 
-                ui.vertical(|ui| {
-                    ui.set_width(side_width);
-                    self.graph_workbench_side_strip_ui(ui, graph);
-                });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(side_width, pane_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_size(egui::vec2(side_width, pane_height));
+                        egui::ScrollArea::vertical()
+                            .id_salt("houdini_graph_workbench_pane_scroll")
+                            .auto_shrink([false, false])
+                            .max_height(pane_height)
+                            .show(ui, |ui| {
+                                self.graph_workbench_side_strip_ui(ui, graph);
+                            });
+                    },
+                );
             });
         } else {
-            ui.strong("Graph Canvas");
-            self.node_graph_ui(ui, graph, 220.0);
+            ui.strong("Network Editor");
+            self.node_graph_ui(ui, graph, 340.0);
 
             ui.add_space(8.0);
-            self.graph_workbench_side_strip_ui(ui, graph);
+            egui::ScrollArea::vertical()
+                .id_salt("houdini_graph_workbench_narrow_pane_scroll")
+                .auto_shrink([false, false])
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    self.graph_workbench_side_strip_ui(ui, graph);
+                });
         }
     }
 
@@ -1789,6 +1817,12 @@ impl HoudiniGraphPanel {
 
         let (zoom_delta, scroll_delta) =
             ui.input(|input| (input.zoom_delta(), input.smooth_scroll_delta()));
+        if scroll_delta != Vec2::ZERO {
+            ui.input_mut(|input| {
+                input.smooth_scroll_delta = Vec2::ZERO;
+            });
+        }
+
         let wheel_zoom_delta = if scroll_delta.y.abs() > 0.0 {
             (scroll_delta.y / 360.0).exp()
         } else {
