@@ -53,6 +53,7 @@ pub(crate) struct HoudiniGraphPanel {
     selected_annotation: Option<usize>,
     context_menu_canvas: bool,
     active_workspace: HoudiniGraphWorkspace,
+    active_editor_pane: GraphEditorPane,
     active_graph_pane: GraphWorkbenchPane,
     dragging_node: Option<usize>,
     node_drag_peak_delta_pixels: f32,
@@ -102,6 +103,7 @@ impl Default for HoudiniGraphPanel {
             selected_annotation: None,
             context_menu_canvas: false,
             active_workspace: HoudiniGraphWorkspace::Graph,
+            active_editor_pane: GraphEditorPane::Network,
             active_graph_pane: GraphWorkbenchPane::Parameters,
             dragging_node: None,
             node_drag_peak_delta_pixels: 0.0,
@@ -171,6 +173,25 @@ impl HoudiniGraphWorkspace {
             Self::Data => "Data",
             Self::Outputs => "Outputs",
             Self::Project => "Project",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphEditorPane {
+    Network,
+    Table,
+    Output,
+}
+
+impl GraphEditorPane {
+    const ALL: [Self; 3] = [Self::Network, Self::Table, Self::Output];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Network => "Network",
+            Self::Table => "Table",
+            Self::Output => "Output",
         }
     }
 }
@@ -339,11 +360,7 @@ impl HoudiniGraphPanel {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.set_min_size(egui::vec2(canvas_width, pane_height));
-                        ui.strong("Network Editor");
-                        ui.add_space(4.0);
-                        self.network_editor_toolbar_ui(ui, graph);
-                        ui.add_space(4.0);
-                        self.node_graph_ui(ui, graph, (pane_height - 58.0).max(320.0));
+                        self.graph_editor_panel_ui(ui, graph, pane_height);
                     },
                 );
 
@@ -354,31 +371,102 @@ impl HoudiniGraphPanel {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.set_min_size(egui::vec2(side_width, pane_height));
-                        egui::ScrollArea::vertical()
-                            .id_salt("houdini_graph_workbench_pane_scroll")
-                            .auto_shrink([false, false])
-                            .max_height(pane_height)
-                            .show(ui, |ui| {
-                                self.graph_workbench_side_strip_ui(ui, graph);
-                            });
+                        self.graph_inspector_panel_ui(ui, graph, pane_height);
                     },
                 );
             });
         } else {
-            ui.strong("Network Editor");
-            self.network_editor_toolbar_ui(ui, graph);
-            ui.add_space(4.0);
-            self.node_graph_ui(ui, graph, 340.0);
+            self.graph_editor_panel_ui(ui, graph, 420.0);
 
             ui.add_space(8.0);
-            egui::ScrollArea::vertical()
-                .id_salt("houdini_graph_workbench_narrow_pane_scroll")
-                .auto_shrink([false, false])
-                .max_height(360.0)
-                .show(ui, |ui| {
-                    self.graph_workbench_side_strip_ui(ui, graph);
-                });
+            self.graph_inspector_panel_ui(ui, graph, 380.0);
         }
+    }
+
+    fn graph_editor_panel_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument, panel_height: f32) {
+        Self::panel_tabs_ui(
+            ui,
+            "Editor",
+            GraphEditorPane::ALL,
+            self.active_editor_pane,
+            |pane| pane.label(),
+            |pane| self.active_editor_pane = pane,
+        );
+        ui.separator();
+
+        match self.active_editor_pane {
+            GraphEditorPane::Network => {
+                self.network_editor_toolbar_ui(ui, graph);
+                ui.add_space(4.0);
+                self.node_graph_ui(ui, graph, (panel_height - 62.0).max(300.0));
+            }
+            GraphEditorPane::Table => {
+                egui::ScrollArea::vertical()
+                    .id_salt("houdini_graph_editor_table_scroll")
+                    .auto_shrink([false, false])
+                    .max_height((panel_height - 34.0).max(240.0))
+                    .show(ui, |ui| {
+                        self.attribute_table_ui(ui, graph);
+                        ui.add_space(8.0);
+                        self.source_summary_ui(ui, graph);
+                    });
+            }
+            GraphEditorPane::Output => {
+                egui::ScrollArea::vertical()
+                    .id_salt("houdini_graph_editor_output_scroll")
+                    .auto_shrink([false, false])
+                    .max_height((panel_height - 34.0).max(240.0))
+                    .show(ui, |ui| {
+                        self.output_summary_ui(ui, graph);
+                        ui.add_space(8.0);
+                        self.recording_export_ui(ui, graph);
+                    });
+            }
+        }
+    }
+
+    fn graph_inspector_panel_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        panel_height: f32,
+    ) {
+        Self::panel_tabs_ui(
+            ui,
+            "Inspector",
+            GraphWorkbenchPane::ALL,
+            self.active_graph_pane,
+            |pane| pane.label(),
+            |pane| self.active_graph_pane = pane,
+        );
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .id_salt("houdini_graph_inspector_panel_scroll")
+            .auto_shrink([false, false])
+            .max_height((panel_height - 34.0).max(240.0))
+            .show(ui, |ui| {
+                self.graph_workbench_side_strip_ui(ui, graph);
+            });
+    }
+
+    fn panel_tabs_ui<T: Copy + PartialEq>(
+        ui: &mut Ui,
+        title: &'static str,
+        panes: impl IntoIterator<Item = T>,
+        active: T,
+        label: impl Fn(T) -> &'static str,
+        mut select: impl FnMut(T),
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(title);
+            ui.separator();
+            for pane in panes {
+                if ui.selectable_label(active == pane, label(pane)).clicked() {
+                    select(pane);
+                }
+            }
+        });
     }
 
     fn network_editor_toolbar_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -437,16 +525,29 @@ impl HoudiniGraphPanel {
 
             ui.menu_button("Go", |ui| {
                 if ui.button("Home Network    H").clicked() {
+                    self.active_editor_pane = GraphEditorPane::Network;
                     self.reset_graph_view();
                     ui.close();
                 }
                 if ui.button("Frame Selected    F").clicked() {
+                    self.active_editor_pane = GraphEditorPane::Network;
                     self.pending_frame_selected = true;
                     ui.close();
                 }
             });
 
             ui.menu_button("View", |ui| {
+                ui.weak("Editor");
+                for pane in GraphEditorPane::ALL {
+                    if ui
+                        .selectable_label(self.active_editor_pane == pane, pane.label())
+                        .clicked()
+                    {
+                        self.active_editor_pane = pane;
+                        ui.close();
+                    }
+                }
+                ui.separator();
                 if ui.button("Display Options").clicked() {
                     self.active_graph_pane = GraphWorkbenchPane::Display;
                     toggle_network_display_options(ui);
@@ -674,6 +775,7 @@ impl HoudiniGraphPanel {
         self.tab_menu_anchor = anchor + egui::vec2(6.0, 6.0);
         self.tab_menu_filter_needs_focus = true;
         self.tab_menu_selection_index = 0;
+        self.active_editor_pane = GraphEditorPane::Network;
         self.active_graph_pane = GraphWorkbenchPane::Operators;
     }
 
@@ -856,6 +958,7 @@ impl HoudiniGraphPanel {
         let applied = match action {
             OperatorPaletteAction::AddOutNull => {
                 self.selected_node = graph.add_null_operator_node("OUT_MAIN");
+                self.active_editor_pane = GraphEditorPane::Network;
                 self.node_info_open = true;
                 self.active_graph_pane = GraphWorkbenchPane::Parameters;
                 true
@@ -863,6 +966,7 @@ impl HoudiniGraphPanel {
             OperatorPaletteAction::AddReference => {
                 if let Some(index) = graph.add_reference_input_node(self.selected_node) {
                     self.selected_node = index;
+                    self.active_editor_pane = GraphEditorPane::Network;
                     self.node_info_open = true;
                     self.active_graph_pane = GraphWorkbenchPane::Parameters;
                     true
@@ -877,6 +981,7 @@ impl HoudiniGraphPanel {
                     )
                 {
                     self.selected_node = index;
+                    self.active_editor_pane = GraphEditorPane::Network;
                     self.node_info_open = true;
                     self.active_graph_pane = GraphWorkbenchPane::Parameters;
                     true
@@ -886,11 +991,13 @@ impl HoudiniGraphPanel {
             }
             OperatorPaletteAction::AddNetworkBox => {
                 self.selected_annotation = graph.add_network_box_for_node(self.selected_node);
+                self.active_editor_pane = GraphEditorPane::Network;
                 self.active_graph_pane = GraphWorkbenchPane::Operators;
                 true
             }
             OperatorPaletteAction::AddStickyNote => {
                 self.selected_annotation = graph.add_sticky_note_near_node(self.selected_node);
+                self.active_editor_pane = GraphEditorPane::Network;
                 self.active_graph_pane = GraphWorkbenchPane::Operators;
                 true
             }
@@ -1411,9 +1518,6 @@ impl HoudiniGraphPanel {
     }
 
     fn graph_workbench_side_strip_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
-        self.graph_workbench_pane_tabs_ui(ui);
-        ui.separator();
-
         match self.active_graph_pane {
             GraphWorkbenchPane::Operators => {
                 self.operator_strip_ui(ui, graph);
@@ -1443,19 +1547,6 @@ impl HoudiniGraphPanel {
                 self.compact_layer_stack_ui(ui, graph);
             }
         }
-    }
-
-    fn graph_workbench_pane_tabs_ui(&mut self, ui: &mut Ui) {
-        ui.horizontal_wrapped(|ui| {
-            for pane in GraphWorkbenchPane::ALL {
-                if ui
-                    .selectable_label(self.active_graph_pane == pane, pane.label())
-                    .clicked()
-                {
-                    self.active_graph_pane = pane;
-                }
-            }
-        });
     }
 
     fn network_view_options_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -2429,12 +2520,14 @@ impl HoudiniGraphPanel {
                 self.node_info_open = true;
                 self.pending_frame_selected = true;
                 self.active_workspace = HoudiniGraphWorkspace::Graph;
+                self.active_editor_pane = GraphEditorPane::Network;
             }
             GraphSearchTarget::Annotation(index) => {
                 self.selected_annotation = Some(index);
                 self.context_menu_canvas = false;
                 self.pending_frame_selected = true;
                 self.active_workspace = HoudiniGraphWorkspace::Graph;
+                self.active_editor_pane = GraphEditorPane::Network;
                 self.active_graph_pane = GraphWorkbenchPane::Find;
             }
         }
@@ -2642,14 +2735,17 @@ impl HoudiniGraphPanel {
                 self.open_operator_chooser_at(pointer_anchor);
             }
             if home_pressed {
+                self.active_editor_pane = GraphEditorPane::Network;
                 self.reset_graph_view();
                 layout_changed = true;
             }
             if frame_selected_pressed {
+                self.active_editor_pane = GraphEditorPane::Network;
                 layout_changed |= self.frame_selected_item_in_rect(graph, layout_rect, node_size);
             }
             if find_pressed {
                 self.active_workspace = HoudiniGraphWorkspace::Graph;
+                self.active_editor_pane = GraphEditorPane::Network;
                 self.active_graph_pane = GraphWorkbenchPane::Find;
             }
             if add_network_box_pressed {
