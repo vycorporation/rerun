@@ -46,6 +46,7 @@ fn shared_houdini_graph_id() -> egui::Id {
 
 pub(crate) struct HoudiniGraphPanel {
     selected_node: usize,
+    active_workspace: HoudiniGraphWorkspace,
     dragging_node: Option<usize>,
     last_parquet_path: Option<String>,
     parquet_status: Option<String>,
@@ -73,6 +74,7 @@ impl Default for HoudiniGraphPanel {
     fn default() -> Self {
         Self {
             selected_node: 1,
+            active_workspace: HoudiniGraphWorkspace::Graph,
             dragging_node: None,
             last_parquet_path: None,
             parquet_status: None,
@@ -98,6 +100,35 @@ impl Default for HoudiniGraphPanel {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoudiniGraphWorkspace {
+    Graph,
+    Inspect,
+    Data,
+    Outputs,
+    Project,
+}
+
+impl HoudiniGraphWorkspace {
+    const ALL: [Self; 5] = [
+        Self::Graph,
+        Self::Inspect,
+        Self::Data,
+        Self::Outputs,
+        Self::Project,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Graph => "Graph",
+            Self::Inspect => "Inspect",
+            Self::Data => "Data",
+            Self::Outputs => "Outputs",
+            Self::Project => "Project",
+        }
+    }
+}
+
 impl HoudiniGraphPanel {
     pub(crate) fn show(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
         install_shared_houdini_graph(ui.ctx(), shared_graph);
@@ -107,109 +138,203 @@ impl HoudiniGraphPanel {
             ..Default::default()
         }
         .show(ui, |ui| {
-            ui.strong("Houdini Graph");
-            ui.small("Product-fork spike panel");
+            self.workspace_tabs_ui(ui);
             ui.add_space(6.0);
 
-            ui.strong("Graph Canvas");
-            self.node_graph_ui(ui, &mut graph);
-
-            ui.add_space(8.0);
-            ui.strong("Layers");
-            self.layer_stack_ui(ui, &mut graph);
-
-            ui.add_space(8.0);
-            ui.strong("Parameters");
-            let mut selected_parameter_changed = false;
-            if let Some(node) = graph.nodes.get_mut(self.selected_node) {
-                ui.label(node.info);
-                selected_parameter_changed = ui
-                    .add(
-                        Slider::new(&mut node.parameter.value, node.parameter.range.clone())
-                            .text(node.parameter.name),
-                    )
-                    .on_hover_text(node.parameter.help)
-                    .changed();
+            match self.active_workspace {
+                HoudiniGraphWorkspace::Graph => self.graph_workspace_ui(ui, &mut graph),
+                HoudiniGraphWorkspace::Inspect => self.inspect_workspace_ui(ui, &mut graph),
+                HoudiniGraphWorkspace::Data => self.data_workspace_ui(ui, &mut graph),
+                HoudiniGraphWorkspace::Outputs => self.outputs_workspace_ui(ui, &mut graph),
+                HoudiniGraphWorkspace::Project => self.project_workspace_ui(ui, &mut graph),
             }
-            if selected_parameter_changed {
-                graph.mark_reference_inputs_stale_for_target_index(self.selected_node);
-            }
-            self.evaluation_controls_ui(ui, &mut graph);
-
-            ui.add_space(8.0);
-            ui.strong("Node Info");
-            self.node_info_ui(ui, &graph);
-
-            ui.add_space(8.0);
-            ui.strong("Pipeline Trace");
-            self.pipeline_trace_ui(ui, &graph);
-
-            ui.add_space(8.0);
-            ui.strong("Attribute Table");
-            self.attribute_table_ui(ui, &mut graph);
-
-            ui.add_space(8.0);
-            ui.strong("Graph Model");
-            self.parquet_import_ui(ui, &mut graph);
-            self.render_benchmark_ui(ui, &mut graph);
-            self.graph_document_ui(ui, &mut graph);
-            self.asset_authoring_ui(ui, &mut graph);
-            self.recording_export_ui(ui, &graph);
-            self.python_environment_ui(ui, &mut graph);
-            ui.add_space(6.0);
-            let export_polyline_points = graph.prepared_export_point_count();
-            ui.label(format!(
-                "Source: {} ({} matching entities, {} visible query results)",
-                graph.source.as_str(),
-                graph.source.matching_entity_count,
-                graph.source.visible_data_result_count
-            ));
-            ui.label(format!(
-                "Provenance: {}",
-                graph.source.metadata.provenance.as_str()
-            ));
-            if let Some(source_path) = &graph.source.source_path {
-                ui.label(format!("Source path: {source_path}"));
-            }
-            if let Some(import_error) = &graph.source.import_error {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    format!("Source error: {import_error}"),
-                );
-            }
-            ui.label(format!(
-                "{} source polygons, {} source cubic Bezier curves",
-                graph.polygon_count(),
-                graph.cubic_bezier_count()
-            ));
-            ui.label(format!(
-                "{} polygon vertices, {} cubic control points",
-                graph.polygon_vertex_count(),
-                graph.cubic_control_point_count()
-            ));
-            ui.label(format!(
-                "{} visible output items after layer and filter controls",
-                graph.visible_output_count()
-            ));
-            ui.label(format!(
-                "{} prepared export points at output boundary",
-                export_polyline_points
-            ));
-            let feasibility = graph.render_feasibility_summary();
-            ui.label(format!(
-                "{} native viewer primitives, {} graph-owned control/vertex points",
-                feasibility.native_viewer_primitive_count, feasibility.graph_owned_point_count
-            ));
-            ui.label(format!(
-                "{} prepared boundary/debug points (not stored graph geometry)",
-                feasibility.prepared_boundary_debug_point_count
-            ));
-            ui.label(format!(
-                "{} adaptive segments per emitted cubic at boundary",
-                graph.export_segments()
-            ));
-            self.source_metadata_ui(ui, &graph.source.metadata, "graph_model");
         });
+    }
+
+    fn workspace_tabs_ui(&mut self, ui: &mut Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Houdini Graph");
+            ui.separator();
+            for workspace in HoudiniGraphWorkspace::ALL {
+                if ui
+                    .selectable_label(self.active_workspace == workspace, workspace.label())
+                    .clicked()
+                {
+                    self.active_workspace = workspace;
+                }
+            }
+        });
+    }
+
+    fn graph_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.strong("Graph Canvas");
+        self.node_graph_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Layers");
+        self.layer_stack_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Parameters");
+        self.selected_node_controls_ui(ui, graph);
+    }
+
+    fn inspect_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.strong("Parameters");
+        self.selected_node_controls_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Node Info");
+        self.node_info_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Pipeline Trace");
+        self.pipeline_trace_ui(ui, graph);
+    }
+
+    fn data_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.strong("Attribute Table");
+        self.attribute_table_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Import");
+        self.parquet_import_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Benchmark");
+        self.render_benchmark_ui(ui, graph);
+    }
+
+    fn outputs_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.strong("Recording");
+        self.recording_export_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Output Summary");
+        self.output_summary_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Node Info");
+        self.node_info_ui(ui, graph);
+    }
+
+    fn project_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.strong("Graph Model");
+        self.graph_document_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Asset");
+        self.asset_authoring_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Python");
+        self.python_environment_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Source");
+        self.source_summary_ui(ui, graph);
+    }
+
+    fn selected_node_controls_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        let mut selected_parameter_changed = false;
+        if let Some(node) = graph.nodes.get_mut(self.selected_node) {
+            ui.label(node.info);
+            selected_parameter_changed = ui
+                .add(
+                    Slider::new(&mut node.parameter.value, node.parameter.range.clone())
+                        .text(node.parameter.name),
+                )
+                .on_hover_text(node.parameter.help)
+                .changed();
+        }
+        if selected_parameter_changed {
+            graph.mark_reference_inputs_stale_for_target_index(self.selected_node);
+        }
+        self.evaluation_controls_ui(ui, graph);
+    }
+
+    fn output_summary_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
+        let export_polyline_points = graph.prepared_export_point_count();
+        let feasibility = graph.render_feasibility_summary();
+
+        egui::Grid::new("houdini_graph_output_summary")
+            .num_columns(2)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                ui.weak("Visible items");
+                ui.label(graph.visible_output_count().to_string());
+                ui.end_row();
+
+                ui.weak("Prepared points");
+                ui.label(export_polyline_points.to_string());
+                ui.end_row();
+
+                ui.weak("Native primitives");
+                ui.label(feasibility.native_viewer_primitive_count.to_string());
+                ui.end_row();
+
+                ui.weak("Graph points");
+                ui.label(feasibility.graph_owned_point_count.to_string());
+                ui.end_row();
+
+                ui.weak("Boundary debug points");
+                ui.label(feasibility.prepared_boundary_debug_point_count.to_string());
+                ui.end_row();
+
+                ui.weak("Cubic segments");
+                ui.label(graph.export_segments().to_string());
+                ui.end_row();
+            });
+    }
+
+    fn source_summary_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
+        egui::Grid::new("houdini_graph_source_summary")
+            .num_columns(2)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                ui.weak("Source");
+                ui.label(format!(
+                    "{} ({} matching, {} visible)",
+                    graph.source.as_str(),
+                    graph.source.matching_entity_count,
+                    graph.source.visible_data_result_count
+                ));
+                ui.end_row();
+
+                ui.weak("Provenance");
+                ui.label(graph.source.metadata.provenance.as_str());
+                ui.end_row();
+
+                if let Some(source_path) = &graph.source.source_path {
+                    ui.weak("Path");
+                    ui.label(source_path);
+                    ui.end_row();
+                }
+
+                if let Some(import_error) = &graph.source.import_error {
+                    ui.weak("Source error");
+                    ui.colored_label(ui.visuals().error_fg_color, import_error);
+                    ui.end_row();
+                }
+
+                ui.weak("Geometry");
+                ui.label(format!(
+                    "{} polygons, {} cubic Beziers",
+                    graph.polygon_count(),
+                    graph.cubic_bezier_count()
+                ));
+                ui.end_row();
+
+                ui.weak("Points");
+                ui.label(format!(
+                    "{} polygon vertices, {} cubic controls",
+                    graph.polygon_vertex_count(),
+                    graph.cubic_control_point_count()
+                ));
+                ui.end_row();
+            });
+
+        self.source_metadata_ui(ui, &graph.source.metadata, "project_source");
     }
 
     fn sync_python_environment_inputs(&mut self, graph: &GraphDocument) {
