@@ -688,6 +688,48 @@ impl GraphDocument {
         }
     }
 
+    pub fn set_node_name(&mut self, node_index: usize, candidate: impl Into<String>) -> bool {
+        let candidate = candidate.into().trim().to_owned();
+        if candidate.is_empty() {
+            return false;
+        }
+        let Some(current_name) = self.nodes.get(node_index).map(|node| node.name.clone()) else {
+            return false;
+        };
+        if current_name == candidate {
+            return true;
+        }
+
+        let mut name = candidate.clone();
+        if self
+            .nodes
+            .iter()
+            .enumerate()
+            .any(|(index, node)| index != node_index && node.name == name)
+        {
+            let mut suffix = 2;
+            loop {
+                name = format!("{candidate}_{suffix}");
+                if !self
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .any(|(index, node)| index != node_index && node.name == name)
+                {
+                    break;
+                }
+                suffix += 1;
+            }
+        }
+
+        if let Some(node) = self.nodes.get_mut(node_index) {
+            node.name = name;
+            true
+        } else {
+            false
+        }
+    }
+
     fn unique_node_id(&self, prefix: &str) -> String {
         let mut suffix = 1;
         loop {
@@ -4088,6 +4130,9 @@ impl HoudiniGraphSidecar {
                     && node_matches_snapshot_identity(node, &node_snapshot)
             });
             if let Some(node) = matching_node {
+                if !node_snapshot.name.is_empty() {
+                    node.name = node_snapshot.name;
+                }
                 node.layout_position = node_snapshot.layout_position;
                 node.parameter.value = node_snapshot
                     .parameter_value
@@ -8087,6 +8132,33 @@ mod tests {
     }
 
     #[test]
+    fn node_rename_stays_unique_and_keeps_reference_identity() {
+        let mut graph = GraphDocument::sample();
+        let null_index = graph.add_null_operator_node("OUT_ORIGINAL");
+        let reference_index = graph
+            .add_reference_input_node(null_index)
+            .expect("null output should be a compatible reference target");
+        let target = graph.nodes[reference_index]
+            .reference_input
+            .as_ref()
+            .expect("reference input should exist")
+            .targets
+            .first()
+            .expect("reference input should have a target")
+            .target
+            .clone();
+
+        assert!(!graph.set_node_name(null_index, ""));
+        assert!(graph.set_node_name(null_index, "Source"));
+
+        assert_eq!(graph.nodes[null_index].name, "Source_2");
+        let resolution = graph.resolve_reference_target(&target);
+        assert_eq!(resolution.status, ReferenceDiagnosticStatus::Resolved);
+        assert_eq!(resolution.target.node_id, target.node_id);
+        assert_eq!(resolution.readable_path, "main/Source_2:geometry");
+    }
+
+    #[test]
     fn reference_input_reports_missing_target_without_rebinding_by_name() {
         let mut graph = GraphDocument::sample();
         let null_index = graph.add_null_operator_node("OUT_GEO");
@@ -10270,6 +10342,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             .import_cubic_bezier_parquet_path(&sample_path)
             .unwrap();
         graph.set_node_layout_position(1, GraphPoint::new(0.25, 0.75));
+        assert!(graph.set_node_name(1, "FILTER_LOW"));
         graph
             .nodes
             .iter_mut()
@@ -10337,6 +10410,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .position,
             GraphPoint::new(0.25, 0.75)
         );
+        assert_eq!(restored.nodes[1].name, "FILTER_LOW");
         assert_eq!(restored.filter_minimum_score(), 0.25);
         assert_eq!(
             restored

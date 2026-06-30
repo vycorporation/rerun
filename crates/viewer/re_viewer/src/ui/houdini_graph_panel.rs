@@ -883,11 +883,21 @@ impl HoudiniGraphPanel {
 
     fn selected_node_controls_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         let mut selected_parameter_changed = false;
-        if let Some(node) = graph.nodes.get_mut(self.selected_node) {
+        if self.selected_node < graph.nodes.len() {
+            let mut node_name = graph.nodes[self.selected_node].name.clone();
+            let node_kind = graph.nodes[self.selected_node].kind;
             ui.horizontal_wrapped(|ui| {
-                ui.strong(&node.name);
-                ui.weak(node.kind.as_str());
+                ui.weak("Name");
+                if ui
+                    .add(egui::TextEdit::singleline(&mut node_name).desired_width(128.0))
+                    .changed()
+                {
+                    graph.set_node_name(self.selected_node, node_name.clone());
+                }
+                ui.weak(node_kind.as_str());
             });
+        }
+        if let Some(node) = graph.nodes.get_mut(self.selected_node) {
             ui.label(node.info);
             selected_parameter_changed = ui
                 .add(
