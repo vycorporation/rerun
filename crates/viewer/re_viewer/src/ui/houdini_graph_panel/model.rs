@@ -403,6 +403,73 @@ impl GraphDocument {
         Some(self.annotations.len() - 1)
     }
 
+    pub fn settle_node_drag_for_network_boxes(
+        &mut self,
+        node_index: usize,
+        fast_drag: bool,
+    ) -> bool {
+        let Some(node) = self.nodes.get(node_index) else {
+            return false;
+        };
+        let node_id = node.node_id.clone();
+        let node_position = node.layout_position;
+        let mut changed = false;
+
+        for annotation in &mut self.annotations {
+            if annotation.kind != GraphAnnotationKind::NetworkBox {
+                continue;
+            }
+
+            let is_member = annotation.member_node_ids.iter().any(|id| id == &node_id);
+            let contains_node = network_box_contains_position(annotation, node_position);
+            if is_member && !contains_node {
+                if fast_drag {
+                    annotation.member_node_ids.retain(|id| id != &node_id);
+                } else {
+                    expand_network_box_to_include_position(annotation, node_position);
+                }
+                changed = true;
+            } else if !is_member && contains_node {
+                annotation.member_node_ids.push(node_id.clone());
+                changed = true;
+            }
+        }
+
+        changed
+    }
+
+    pub fn resize_network_box_to_contents(&mut self, annotation_index: usize) -> bool {
+        let Some(annotation) = self.annotations.get(annotation_index) else {
+            return false;
+        };
+        if annotation.kind != GraphAnnotationKind::NetworkBox
+            || annotation.member_node_ids.is_empty()
+        {
+            return false;
+        }
+
+        let member_positions = self
+            .nodes
+            .iter()
+            .filter(|node| {
+                annotation
+                    .member_node_ids
+                    .iter()
+                    .any(|member_id| member_id == &node.node_id)
+            })
+            .map(|node| node.layout_position)
+            .collect::<Vec<_>>();
+        let Some((position, size)) = network_box_bounds_for_positions(&member_positions) else {
+            return false;
+        };
+        let Some(annotation) = self.annotations.get_mut(annotation_index) else {
+            return false;
+        };
+        annotation.position = position;
+        annotation.size = size;
+        true
+    }
+
     fn unique_annotation_id(&self, prefix: &str) -> String {
         let mut suffix = 1;
         loop {
@@ -4342,6 +4409,56 @@ impl GraphAnnotationKind {
             Self::StickyNote => "Sticky Note",
         }
     }
+}
+
+fn network_box_contains_position(annotation: &GraphAnnotation, point: GraphPoint) -> bool {
+    point.x >= annotation.position.x
+        && point.x <= annotation.position.x + annotation.size.x
+        && point.y >= annotation.position.y
+        && point.y <= annotation.position.y + annotation.size.y
+}
+
+fn expand_network_box_to_include_position(annotation: &mut GraphAnnotation, point: GraphPoint) {
+    let (position, size) = network_box_bounds_for_positions(&[point])
+        .unwrap_or((annotation.position, annotation.size));
+    let min_x = annotation.position.x.min(position.x).clamp(0.0, 0.92);
+    let min_y = annotation.position.y.min(position.y).clamp(0.0, 0.92);
+    let max_x = (annotation.position.x + annotation.size.x)
+        .max(position.x + size.x)
+        .clamp(min_x + 0.08, 1.0);
+    let max_y = (annotation.position.y + annotation.size.y)
+        .max(position.y + size.y)
+        .clamp(min_y + 0.08, 1.0);
+
+    annotation.position = GraphPoint::new(min_x, min_y);
+    annotation.size = GraphPoint::new(max_x - min_x, max_y - min_y);
+}
+
+fn network_box_bounds_for_positions(positions: &[GraphPoint]) -> Option<(GraphPoint, GraphPoint)> {
+    let first = positions.first()?;
+    let minimum_size = 0.08;
+    let padding = GraphPoint::new(0.08, 0.14);
+    let mut min_x = first.x - padding.x;
+    let mut min_y = first.y - padding.y;
+    let mut max_x = first.x + padding.x;
+    let mut max_y = first.y + padding.y;
+
+    for position in &positions[1..] {
+        min_x = min_x.min(position.x - padding.x);
+        min_y = min_y.min(position.y - padding.y);
+        max_x = max_x.max(position.x + padding.x);
+        max_y = max_y.max(position.y + padding.y);
+    }
+
+    let min_x = min_x.clamp(0.0, 1.0 - minimum_size);
+    let min_y = min_y.clamp(0.0, 1.0 - minimum_size);
+    let max_x = max_x.clamp(min_x + minimum_size, 1.0);
+    let max_y = max_y.clamp(min_y + minimum_size, 1.0);
+
+    Some((
+        GraphPoint::new(min_x, min_y),
+        GraphPoint::new(max_x - min_x, max_y - min_y),
+    ))
 }
 
 impl GraphNode {
@@ -9498,6 +9615,65 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             restored.annotations[1].text,
             "Raise threshold before output."
         );
+    }
+
+    #[test]
+    fn network_box_membership_settles_after_node_drag() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "filter.main")
+            .expect("sample filter node should exist");
+        let box_index = graph
+            .annotations
+            .iter()
+            .position(|annotation| annotation.kind == GraphAnnotationKind::NetworkBox)
+            .expect("sample network box should exist");
+
+        graph.set_node_layout_position(filter_index, GraphPoint::new(0.93, 0.90));
+        assert!(graph.settle_node_drag_for_network_boxes(filter_index, false));
+        assert!(
+            graph.annotations[box_index]
+                .member_node_ids
+                .contains(&"filter.main".to_owned())
+        );
+        assert!(graph.annotations[box_index].position.x <= 0.85);
+        assert!(
+            graph.annotations[box_index].position.x + graph.annotations[box_index].size.x >= 1.0
+        );
+
+        graph.set_node_layout_position(filter_index, GraphPoint::new(0.0, 0.0));
+        assert!(graph.settle_node_drag_for_network_boxes(filter_index, true));
+        assert!(
+            !graph.annotations[box_index]
+                .member_node_ids
+                .contains(&"filter.main".to_owned())
+        );
+    }
+
+    #[test]
+    fn network_box_resize_to_contents_uses_member_node_bounds() {
+        let mut graph = GraphDocument::sample();
+        graph.annotations.clear();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "filter.main")
+            .expect("sample filter node should exist");
+        graph.set_node_layout_position(filter_index, GraphPoint::new(0.50, 0.50));
+        let box_index = graph
+            .add_network_box_for_node(filter_index)
+            .expect("network box should be created for selected node");
+        graph.annotations[box_index].position = GraphPoint::new(0.0, 0.0);
+        graph.annotations[box_index].size = GraphPoint::new(0.90, 0.90);
+
+        assert!(graph.resize_network_box_to_contents(box_index));
+
+        assert!((graph.annotations[box_index].position.x - 0.42).abs() < 0.0001);
+        assert!((graph.annotations[box_index].position.y - 0.36).abs() < 0.0001);
+        assert!((graph.annotations[box_index].size.x - 0.16).abs() < 0.0001);
+        assert!((graph.annotations[box_index].size.y - 0.28).abs() < 0.0001);
     }
 
     #[test]

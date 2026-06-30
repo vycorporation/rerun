@@ -17,6 +17,7 @@ use self::model::{
 
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
 const ATTRIBUTE_TABLE_PREVIEW_ROWS: usize = 200;
+const NETWORK_BOX_FAST_DRAG_PEAK_DELTA_PIXELS: f32 = 18.0;
 
 pub(crate) type SharedHoudiniGraph = Arc<Mutex<GraphDocument>>;
 
@@ -48,6 +49,7 @@ pub(crate) struct HoudiniGraphPanel {
     selected_node: usize,
     active_workspace: HoudiniGraphWorkspace,
     dragging_node: Option<usize>,
+    node_drag_peak_delta_pixels: f32,
     dragging_annotation: Option<usize>,
     resizing_annotation: Option<usize>,
     last_parquet_path: Option<String>,
@@ -88,6 +90,7 @@ impl Default for HoudiniGraphPanel {
             selected_node: 1,
             active_workspace: HoudiniGraphWorkspace::Graph,
             dragging_node: None,
+            node_drag_peak_delta_pixels: 0.0,
             dragging_annotation: None,
             resizing_annotation: None,
             last_parquet_path: None,
@@ -389,7 +392,14 @@ impl HoudiniGraphPanel {
                     }
                 });
 
-                for annotation in &mut graph.annotations {
+                let node_names = graph
+                    .nodes
+                    .iter()
+                    .map(|node| (node.node_id.clone(), node.name.clone()))
+                    .collect::<Vec<_>>();
+                for annotation_index in 0..graph.annotations.len() {
+                    let mut resize_to_contents = false;
+                    let annotation = &mut graph.annotations[annotation_index];
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.weak(annotation.kind.as_str());
@@ -407,6 +417,17 @@ impl HoudiniGraphPanel {
                                 .hint_text("note"),
                         );
                     } else {
+                        let member_names = annotation
+                            .member_node_ids
+                            .iter()
+                            .filter_map(|member_id| {
+                                node_names
+                                    .iter()
+                                    .find(|(node_id, _)| node_id == member_id)
+                                    .map(|(_, name)| name.as_str())
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         ui.weak(format!(
                             "{} member node{}",
                             annotation.member_node_ids.len(),
@@ -416,6 +437,12 @@ impl HoudiniGraphPanel {
                                 "s"
                             }
                         ));
+                        if !member_names.is_empty() {
+                            ui.weak(member_names);
+                        }
+                        if ui.button("Resize to Contents").clicked() {
+                            resize_to_contents = true;
+                        }
                     }
 
                     ui.horizontal(|ui| {
@@ -444,6 +471,9 @@ impl HoudiniGraphPanel {
                                 .range(0.0..=0.95),
                         );
                     });
+                    if resize_to_contents {
+                        graph.resize_network_box_to_contents(annotation_index);
+                    }
                 }
 
                 if graph.annotations.is_empty() {
@@ -1290,6 +1320,7 @@ impl HoudiniGraphPanel {
                         self.selected_node = index;
                         self.node_info_open = true;
                         self.dragging_node = Some(index);
+                        self.node_drag_peak_delta_pixels = 0.0;
                         hit_node = true;
                         break;
                     }
@@ -1318,6 +1349,9 @@ impl HoudiniGraphPanel {
 
             if response.dragged() {
                 if let Some(dragging_node) = self.dragging_node {
+                    let pointer_delta = ui.input(|input| input.pointer.delta());
+                    self.node_drag_peak_delta_pixels =
+                        self.node_drag_peak_delta_pixels.max(pointer_delta.length());
                     graph.set_node_layout_position(
                         dragging_node,
                         unmap_node_layout_point(layout_rect, pointer_pos, node_size),
@@ -1348,7 +1382,14 @@ impl HoudiniGraphPanel {
         }
 
         if ui.input(|input| input.pointer.any_released()) {
+            if let Some(dragging_node) = self.dragging_node {
+                graph.settle_node_drag_for_network_boxes(
+                    dragging_node,
+                    self.node_drag_peak_delta_pixels >= NETWORK_BOX_FAST_DRAG_PEAK_DELTA_PIXELS,
+                );
+            }
             self.dragging_node = None;
+            self.node_drag_peak_delta_pixels = 0.0;
             self.dragging_annotation = None;
             self.resizing_annotation = None;
         }
