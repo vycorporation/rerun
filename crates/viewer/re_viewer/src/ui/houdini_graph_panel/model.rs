@@ -19,13 +19,6 @@ impl GraphPoint {
     const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
-
-    fn clamped_to_unit(self) -> Self {
-        Self {
-            x: self.x.clamp(0.0, 1.0),
-            y: self.y.clamp(0.0, 1.0),
-        }
-    }
 }
 
 pub(crate) struct GraphDocument {
@@ -373,10 +366,8 @@ impl GraphDocument {
 
     pub fn add_network_box_for_node(&mut self, node_index: usize) -> Option<usize> {
         let node = self.nodes.get(node_index)?;
-        let position = GraphPoint::new(
-            (node.layout_position.x - 0.08).clamp(0.0, 0.78),
-            (node.layout_position.y - 0.16).clamp(0.0, 0.68),
-        );
+        let position =
+            GraphPoint::new(node.layout_position.x - 0.08, node.layout_position.y - 0.16);
         let annotation = GraphAnnotation::network_box(
             self.unique_annotation_id("box"),
             self.unique_annotation_title("Network Box"),
@@ -390,10 +381,8 @@ impl GraphDocument {
 
     pub fn add_sticky_note_near_node(&mut self, node_index: usize) -> Option<usize> {
         let node = self.nodes.get(node_index)?;
-        let position = GraphPoint::new(
-            (node.layout_position.x + 0.08).clamp(0.0, 0.78),
-            (node.layout_position.y - 0.18).clamp(0.0, 0.70),
-        );
+        let position =
+            GraphPoint::new(node.layout_position.x + 0.08, node.layout_position.y - 0.18);
         let annotation = GraphAnnotation::sticky_note(
             self.unique_annotation_id("note"),
             self.unique_annotation_title("Sticky Note"),
@@ -438,6 +427,30 @@ impl GraphDocument {
         }
 
         changed
+    }
+
+    pub fn translate_annotation(&mut self, annotation_index: usize, delta: GraphPoint) -> bool {
+        let Some(annotation) = self.annotations.get_mut(annotation_index) else {
+            return false;
+        };
+
+        annotation.position.x += delta.x;
+        annotation.position.y += delta.y;
+
+        if annotation.kind == GraphAnnotationKind::NetworkBox {
+            let member_node_ids = annotation.member_node_ids.clone();
+            for node in &mut self.nodes {
+                if member_node_ids
+                    .iter()
+                    .any(|member_node_id| member_node_id == &node.node_id)
+                {
+                    node.layout_position.x += delta.x;
+                    node.layout_position.y += delta.y;
+                }
+            }
+        }
+
+        true
     }
 
     pub fn resize_network_box_to_contents(&mut self, annotation_index: usize) -> bool {
@@ -2268,7 +2281,7 @@ impl GraphDocument {
 
     pub fn set_node_layout_position(&mut self, index: usize, position: GraphPoint) {
         if let Some(node) = self.nodes.get_mut(index) {
-            node.layout_position = position.clamped_to_unit();
+            node.layout_position = position;
         }
     }
 
@@ -4077,7 +4090,7 @@ impl HoudiniGraphSidecar {
                     && node_matches_snapshot_identity(node, &node_snapshot)
             });
             if let Some(node) = matching_node {
-                node.layout_position = node_snapshot.layout_position.clamped_to_unit();
+                node.layout_position = node_snapshot.layout_position;
                 node.parameter.value = node_snapshot
                     .parameter_value
                     .clamp(*node.parameter.range.start(), *node.parameter.range.end());
@@ -4228,7 +4241,7 @@ impl NodeSidecar {
                 self.name
             },
             kind: self.kind,
-            layout_position: self.layout_position.clamped_to_unit(),
+            layout_position: self.layout_position,
             generated: self.generated,
             coordinate_contract: self
                 .coordinate_contract
@@ -4522,14 +4535,14 @@ fn network_box_contains_position(annotation: &GraphAnnotation, point: GraphPoint
 fn expand_network_box_to_include_position(annotation: &mut GraphAnnotation, point: GraphPoint) {
     let (position, size) = network_box_bounds_for_positions(&[point])
         .unwrap_or((annotation.position, annotation.size));
-    let min_x = annotation.position.x.min(position.x).clamp(0.0, 0.92);
-    let min_y = annotation.position.y.min(position.y).clamp(0.0, 0.92);
+    let min_x = annotation.position.x.min(position.x);
+    let min_y = annotation.position.y.min(position.y);
     let max_x = (annotation.position.x + annotation.size.x)
         .max(position.x + size.x)
-        .clamp(min_x + 0.08, 1.0);
+        .max(min_x + 0.08);
     let max_y = (annotation.position.y + annotation.size.y)
         .max(position.y + size.y)
-        .clamp(min_y + 0.08, 1.0);
+        .max(min_y + 0.08);
 
     annotation.position = GraphPoint::new(min_x, min_y);
     annotation.size = GraphPoint::new(max_x - min_x, max_y - min_y);
@@ -4551,10 +4564,8 @@ fn network_box_bounds_for_positions(positions: &[GraphPoint]) -> Option<(GraphPo
         max_y = max_y.max(position.y + padding.y);
     }
 
-    let min_x = min_x.clamp(0.0, 1.0 - minimum_size);
-    let min_y = min_y.clamp(0.0, 1.0 - minimum_size);
-    let max_x = max_x.clamp(min_x + minimum_size, 1.0);
-    let max_y = max_y.clamp(min_y + minimum_size, 1.0);
+    let max_x = max_x.max(min_x + minimum_size);
+    let max_y = max_y.max(min_y + minimum_size);
 
     Some((
         GraphPoint::new(min_x, min_y),
@@ -9545,7 +9556,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
     }
 
     #[test]
-    fn graph_layout_node_positions_are_editable_and_clamped() {
+    fn graph_layout_node_positions_can_leave_initial_viewport() {
         let mut graph = GraphDocument::sample();
 
         graph.set_node_layout_position(1, GraphPoint::new(0.25, 0.75));
@@ -9554,7 +9565,15 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
 
         graph.set_node_layout_position(1, GraphPoint::new(-1.0, 2.0));
         let layout = graph.graph_layout();
-        assert_eq!(layout.nodes[1].position, GraphPoint::new(0.0, 1.0));
+        assert_eq!(layout.nodes[1].position, GraphPoint::new(-1.0, 2.0));
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        assert_eq!(
+            restored.graph_layout().nodes[1].position,
+            GraphPoint::new(-1.0, 2.0)
+        );
     }
 
     #[test]
@@ -9799,6 +9818,65 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             !graph.annotations[box_index]
                 .member_node_ids
                 .contains(&"filter.main".to_owned())
+        );
+    }
+
+    #[test]
+    fn dragging_network_box_translates_member_nodes() {
+        let mut graph = GraphDocument::sample();
+        let box_index = graph
+            .annotations
+            .iter()
+            .position(|annotation| annotation.kind == GraphAnnotationKind::NetworkBox)
+            .expect("sample network box should exist");
+        let source_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "source.main")
+            .expect("source node should exist");
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "filter.main")
+            .expect("filter node should exist");
+        let style_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "style.main")
+            .expect("style node should exist");
+
+        let original_box_position = graph.annotations[box_index].position;
+        let original_source_position = graph.nodes[source_index].layout_position;
+        let original_filter_position = graph.nodes[filter_index].layout_position;
+        let original_style_position = graph.nodes[style_index].layout_position;
+        let delta = GraphPoint::new(-0.45, 1.2);
+
+        assert!(graph.translate_annotation(box_index, delta));
+
+        assert_eq!(
+            graph.annotations[box_index].position,
+            GraphPoint::new(
+                original_box_position.x + delta.x,
+                original_box_position.y + delta.y
+            )
+        );
+        assert_eq!(
+            graph.nodes[source_index].layout_position,
+            GraphPoint::new(
+                original_source_position.x + delta.x,
+                original_source_position.y + delta.y
+            )
+        );
+        assert_eq!(
+            graph.nodes[filter_index].layout_position,
+            GraphPoint::new(
+                original_filter_position.x + delta.x,
+                original_filter_position.y + delta.y
+            )
+        );
+        assert_eq!(
+            graph.nodes[style_index].layout_position,
+            original_style_position
         );
     }
 

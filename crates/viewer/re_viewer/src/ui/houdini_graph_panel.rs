@@ -916,78 +916,94 @@ impl HoudiniGraphPanel {
                     .collect::<Vec<_>>();
                 for annotation_index in 0..graph.annotations.len() {
                     let mut resize_to_contents = false;
-                    let annotation = &mut graph.annotations[annotation_index];
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.weak(annotation.kind.as_str());
-                        ui.re_checkbox(&mut annotation.collapsed, "Collapsed");
-                    });
-                    ui.add(
-                        egui::TextEdit::singleline(&mut annotation.title)
-                            .desired_width(ui.available_width().max(80.0))
-                            .hint_text("title"),
-                    );
-                    if annotation.kind == GraphAnnotationKind::StickyNote {
+                    let mut position_update = None;
+                    {
+                        let annotation = &mut graph.annotations[annotation_index];
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.weak(annotation.kind.as_str());
+                            ui.re_checkbox(&mut annotation.collapsed, "Collapsed");
+                        });
                         ui.add(
-                            egui::TextEdit::multiline(&mut annotation.text)
-                                .desired_rows(2)
-                                .hint_text("note"),
+                            egui::TextEdit::singleline(&mut annotation.title)
+                                .desired_width(ui.available_width().max(80.0))
+                                .hint_text("title"),
                         );
-                    } else {
-                        let member_names = annotation
-                            .member_node_ids
-                            .iter()
-                            .filter_map(|member_id| {
-                                node_names
-                                    .iter()
-                                    .find(|(node_id, _)| node_id == member_id)
-                                    .map(|(_, name)| name.as_str())
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        ui.weak(format!(
-                            "{} member node{}",
-                            annotation.member_node_ids.len(),
-                            if annotation.member_node_ids.len() == 1 {
-                                ""
-                            } else {
-                                "s"
+                        if annotation.kind == GraphAnnotationKind::StickyNote {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut annotation.text)
+                                    .desired_rows(2)
+                                    .hint_text("note"),
+                            );
+                        } else {
+                            let member_names = annotation
+                                .member_node_ids
+                                .iter()
+                                .filter_map(|member_id| {
+                                    node_names
+                                        .iter()
+                                        .find(|(node_id, _)| node_id == member_id)
+                                        .map(|(_, name)| name.as_str())
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            ui.weak(format!(
+                                "{} member node{}",
+                                annotation.member_node_ids.len(),
+                                if annotation.member_node_ids.len() == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                }
+                            ));
+                            if !member_names.is_empty() {
+                                ui.weak(member_names);
                             }
-                        ));
-                        if !member_names.is_empty() {
-                            ui.weak(member_names);
+                            if ui.button("Resize to Contents").clicked() {
+                                resize_to_contents = true;
+                            }
                         }
-                        if ui.button("Resize to Contents").clicked() {
-                            resize_to_contents = true;
+
+                        ui.horizontal(|ui| {
+                            ui.weak("Size");
+                            ui.add(
+                                DragValue::new(&mut annotation.size.x)
+                                    .speed(0.01)
+                                    .range(0.08..=0.95),
+                            );
+                            ui.add(
+                                DragValue::new(&mut annotation.size.y)
+                                    .speed(0.01)
+                                    .range(0.08..=0.95),
+                            );
+                        });
+                        let original_position = annotation.position;
+                        let mut next_position = annotation.position;
+                        ui.horizontal(|ui| {
+                            ui.weak("Pos");
+                            ui.add(DragValue::new(&mut next_position.x).speed(0.01));
+                            ui.add(DragValue::new(&mut next_position.y).speed(0.01));
+                        });
+                        if next_position != original_position {
+                            position_update =
+                                Some((annotation.kind, original_position, next_position));
                         }
                     }
 
-                    ui.horizontal(|ui| {
-                        ui.weak("Size");
-                        ui.add(
-                            DragValue::new(&mut annotation.size.x)
-                                .speed(0.01)
-                                .range(0.08..=0.95),
-                        );
-                        ui.add(
-                            DragValue::new(&mut annotation.size.y)
-                                .speed(0.01)
-                                .range(0.08..=0.95),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.weak("Pos");
-                        ui.add(
-                            DragValue::new(&mut annotation.position.x)
-                                .speed(0.01)
-                                .range(0.0..=0.95),
-                        );
-                        ui.add(
-                            DragValue::new(&mut annotation.position.y)
-                                .speed(0.01)
-                                .range(0.0..=0.95),
-                        );
-                    });
+                    if let Some((kind, original_position, next_position)) = position_update {
+                        if kind == GraphAnnotationKind::NetworkBox {
+                            graph.translate_annotation(
+                                annotation_index,
+                                GraphPoint {
+                                    x: next_position.x - original_position.x,
+                                    y: next_position.y - original_position.y,
+                                },
+                            );
+                        } else if let Some(annotation) = graph.annotations.get_mut(annotation_index)
+                        {
+                            annotation.position = next_position;
+                        }
+                    }
                     if resize_to_contents {
                         graph.resize_network_box_to_contents(annotation_index);
                     }
@@ -1906,16 +1922,15 @@ impl HoudiniGraphPanel {
                             + pointer_delta.y / (layout_rect.height() * self.graph_view_zoom))
                             .clamp(0.08, 0.95);
                     }
-                } else if let Some(dragging_annotation) = self.dragging_annotation
-                    && let Some(annotation) = graph.annotations.get_mut(dragging_annotation)
-                {
+                } else if let Some(dragging_annotation) = self.dragging_annotation {
                     let pointer_delta = ui.input(|input| input.pointer.delta());
-                    annotation.position.x = (annotation.position.x
-                        + pointer_delta.x / (layout_rect.width() * self.graph_view_zoom))
-                        .clamp(0.0, 0.95);
-                    annotation.position.y = (annotation.position.y
-                        + pointer_delta.y / (layout_rect.height() * self.graph_view_zoom))
-                        .clamp(0.0, 0.95);
+                    graph.translate_annotation(
+                        dragging_annotation,
+                        GraphPoint {
+                            x: pointer_delta.x / (layout_rect.width() * self.graph_view_zoom),
+                            y: pointer_delta.y / (layout_rect.height() * self.graph_view_zoom),
+                        },
+                    );
                 }
             }
         }
@@ -3413,8 +3428,8 @@ fn unmap_node_layout_point(
     let usable_width = (rect.width() - node_size.x).max(1.0);
     let usable_height = (rect.height() - node_size.y).max(1.0);
     GraphPoint {
-        x: ((position.x - rect.left() - node_size.x * 0.5) / usable_width).clamp(0.0, 1.0),
-        y: ((position.y - rect.top() - node_size.y * 0.5) / usable_height).clamp(0.0, 1.0),
+        x: (position.x - rect.left() - node_size.x * 0.5) / usable_width,
+        y: (position.y - rect.top() - node_size.y * 0.5) / usable_height,
     }
 }
 
@@ -3451,8 +3466,8 @@ fn map_annotation_rect(
     zoom: f32,
     pan: Vec2,
 ) -> Rect {
-    let left = rect.left() + rect.width() * position.x.clamp(0.0, 1.0);
-    let top = rect.top() + rect.height() * position.y.clamp(0.0, 1.0);
+    let left = rect.left() + rect.width() * position.x;
+    let top = rect.top() + rect.height() * position.y;
     let width = (rect.width() * size.x.clamp(0.04, 1.0)).max(44.0);
     let height = (rect.height() * size.y.clamp(0.04, 1.0)).max(28.0);
     Rect::from_min_size(
