@@ -51,6 +51,7 @@ fn shared_houdini_graph_id() -> egui::Id {
 pub(crate) struct HoudiniGraphPanel {
     selected_node: usize,
     selected_annotation: Option<usize>,
+    context_menu_canvas: bool,
     active_workspace: HoudiniGraphWorkspace,
     active_graph_pane: GraphWorkbenchPane,
     dragging_node: Option<usize>,
@@ -98,6 +99,7 @@ impl Default for HoudiniGraphPanel {
         Self {
             selected_node: 1,
             selected_annotation: None,
+            context_menu_canvas: false,
             active_workspace: HoudiniGraphWorkspace::Graph,
             active_graph_pane: GraphWorkbenchPane::Parameters,
             dragging_node: None,
@@ -2481,6 +2483,7 @@ impl HoudiniGraphPanel {
             if response.clicked_by(egui::PointerButton::Primary)
                 || response.drag_started_by(egui::PointerButton::Primary)
             {
+                self.context_menu_canvas = false;
                 self.dragging_node = None;
                 self.dragging_annotation = None;
                 self.resizing_annotation = None;
@@ -2557,9 +2560,11 @@ impl HoudiniGraphPanel {
 
             if response.clicked_by(egui::PointerButton::Secondary) {
                 self.selected_annotation = None;
+                self.context_menu_canvas = true;
                 for (index, annotation_rect) in annotation_rects.iter().enumerate().rev() {
                     if annotation_rect.contains(pointer_pos) {
                         self.selected_annotation = Some(index);
+                        self.context_menu_canvas = false;
                         break;
                     }
                 }
@@ -2567,6 +2572,7 @@ impl HoudiniGraphPanel {
                     if node_rect.contains(pointer_pos) {
                         self.selected_node = index;
                         self.selected_annotation = None;
+                        self.context_menu_canvas = false;
                         self.node_info_open = true;
                         break;
                     }
@@ -2928,6 +2934,10 @@ impl HoudiniGraphPanel {
             self.annotation_context_menu_ui(ui, graph);
             return;
         }
+        if self.context_menu_canvas {
+            self.canvas_context_menu_ui(ui, graph);
+            return;
+        }
 
         if let Some(node) = graph.nodes.get(self.selected_node) {
             ui.strong(&node.name);
@@ -3011,6 +3021,50 @@ impl HoudiniGraphPanel {
             self.resize_selected_network_box_to_contents(graph);
             ui.close();
         }
+        if ui.button("Display Options").clicked() {
+            self.active_graph_pane = GraphWorkbenchPane::Display;
+            toggle_network_display_options(ui);
+            ui.close();
+        }
+        if ui.button("Reset View    H").clicked() {
+            self.reset_graph_view();
+            ui.close();
+        }
+        if ui.button("Frame Selected    F").clicked() {
+            self.pending_frame_selected = true;
+            ui.close();
+        }
+    }
+
+    fn canvas_context_menu_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.strong("Network");
+        ui.weak("/obj/main");
+        ui.separator();
+
+        if ui.button("TAB Menu...").clicked() {
+            let anchor = ui
+                .input(|input| input.pointer.hover_pos())
+                .unwrap_or_else(|| ui.cursor().min);
+            self.open_operator_chooser_at(anchor);
+            ui.close();
+        }
+        self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddOutNull);
+        self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddReference);
+        self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddRepairProjection);
+        self.operator_menu_action_ui_with_label(
+            ui,
+            graph,
+            OperatorPaletteAction::AddNetworkBox,
+            "Network Box from Selected    Shift+O",
+        );
+        self.operator_menu_action_ui_with_label(
+            ui,
+            graph,
+            OperatorPaletteAction::AddStickyNote,
+            "Sticky Note    Shift+P",
+        );
+
+        ui.separator();
         if ui.button("Display Options").clicked() {
             self.active_graph_pane = GraphWorkbenchPane::Display;
             toggle_network_display_options(ui);
