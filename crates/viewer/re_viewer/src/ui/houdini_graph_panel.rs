@@ -275,12 +275,114 @@ impl HoudiniGraphPanel {
         self.operator_strip_ui(ui, graph);
 
         ui.add_space(8.0);
-        ui.strong("Layers");
-        self.compact_layer_stack_ui(ui, graph);
-
-        ui.add_space(8.0);
         ui.strong("Parameters");
         self.selected_node_controls_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Node Info");
+        self.graph_workbench_node_info_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Layers");
+        self.compact_layer_stack_ui(ui, graph);
+    }
+
+    fn graph_workbench_node_info_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) {
+        let Some(info) = graph.selected_node_info(self.selected_node) else {
+            ui.weak("Select a node to inspect graph-owned metadata.");
+            return;
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(status_color(ui, info.status), info.status.as_str());
+            ui.separator();
+            ui.label(info.kind.as_str());
+            ui.weak(info.role);
+        });
+        ui.weak(format!(
+            "{} record(s), {} input(s), {} output(s)",
+            info.record_count, info.input_count, info.output_count
+        ));
+        ui.weak(info.summary);
+
+        for warning in &info.warnings {
+            ui.colored_label(ui.visuals().warn_fg_color, warning);
+        }
+
+        if let Some(reference_input) = &info.reference_input {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("Reference");
+                ui.colored_label(
+                    status_color(ui, info.status),
+                    reference_input.status.as_str(),
+                );
+                ui.label(&reference_input.readable_path);
+            });
+            for target in &reference_input.targets {
+                if let Some(diagnostic) = &target.diagnostic {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("{}: {diagnostic}", target.readable_path),
+                    );
+                }
+            }
+        }
+
+        if !info.reference_consumers.is_empty() {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "{} reference consumer(s) depend on this output",
+                    info.reference_consumers.len()
+                ),
+            );
+        }
+
+        if let Some(warning) = &info.reference_output_warning {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "Changing or deleting {}:{} affects {} reference(s)",
+                    warning.target_node_name,
+                    warning.output_name,
+                    warning.affected_references.len()
+                ),
+            );
+        }
+
+        if let Some(output_operator) = &info.output_operator {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("Output");
+                ui.label(output_operator.kind.as_str());
+                ui.weak("->");
+                ui.label(
+                    output_operator
+                        .preferred_target
+                        .map(|target| target.as_str())
+                        .unwrap_or("choose target"),
+                );
+            });
+            for negotiation in &output_operator.negotiations {
+                if negotiation.reason != "native mapping available" {
+                    ui.weak(format!(
+                        "{}: {}",
+                        negotiation.target.as_str(),
+                        negotiation.reason
+                    ));
+                }
+            }
+        }
+
+        egui::CollapsingHeader::new("Details")
+            .id_salt("houdini_graph_workbench_node_info_details")
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("houdini_graph_workbench_node_info_scroll")
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        self.node_info_ui(ui, graph);
+                    });
+            });
     }
 
     fn output_summary_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
