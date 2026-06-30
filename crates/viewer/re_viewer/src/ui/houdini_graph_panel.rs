@@ -60,6 +60,7 @@ pub(crate) struct HoudiniGraphPanel {
     pending_frame_selected: bool,
     tab_menu_open: bool,
     tab_menu_anchor: Pos2,
+    tab_menu_filter_needs_focus: bool,
     last_parquet_path: Option<String>,
     parquet_status: Option<String>,
     graph_document_status: Option<String>,
@@ -104,6 +105,7 @@ impl Default for HoudiniGraphPanel {
             pending_frame_selected: false,
             tab_menu_open: false,
             tab_menu_anchor: Pos2::ZERO,
+            tab_menu_filter_needs_focus: false,
             last_parquet_path: None,
             parquet_status: None,
             graph_document_status: None,
@@ -574,6 +576,7 @@ impl HoudiniGraphPanel {
         self.operator_filter.clear();
         self.tab_menu_open = true;
         self.tab_menu_anchor = anchor + egui::vec2(6.0, 6.0);
+        self.tab_menu_filter_needs_focus = true;
         self.active_graph_pane = GraphWorkbenchPane::Operators;
     }
 
@@ -2264,12 +2267,18 @@ impl HoudiniGraphPanel {
                 ui.set_min_width(320.0);
                 ui.horizontal(|ui| {
                     ui.weak("TAB");
-                    egui::TextEdit::singleline(&mut self.operator_filter)
+                    let filter_response = egui::TextEdit::singleline(&mut self.operator_filter)
                         .desired_width(248.0)
                         .hint_text("operator")
-                        .show(ui);
+                        .show(ui)
+                        .response;
+                    if self.tab_menu_filter_needs_focus {
+                        filter_response.request_focus();
+                        self.tab_menu_filter_needs_focus = false;
+                    }
                     if ui.small_button("Clear").clicked() {
                         self.operator_filter.clear();
+                        filter_response.request_focus();
                     }
                 });
                 ui.separator();
