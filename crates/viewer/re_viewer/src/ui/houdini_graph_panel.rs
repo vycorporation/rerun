@@ -56,6 +56,8 @@ pub(crate) struct HoudiniGraphPanel {
     resizing_annotation: Option<usize>,
     graph_view_zoom: f32,
     graph_view_pan: Vec2,
+    tab_menu_open: bool,
+    tab_menu_anchor: Pos2,
     last_parquet_path: Option<String>,
     parquet_status: Option<String>,
     graph_document_status: Option<String>,
@@ -95,6 +97,8 @@ impl Default for HoudiniGraphPanel {
             resizing_annotation: None,
             graph_view_zoom: 1.0,
             graph_view_pan: Vec2::ZERO,
+            tab_menu_open: false,
+            tab_menu_anchor: Pos2::ZERO,
             last_parquet_path: None,
             parquet_status: None,
             graph_document_status: None,
@@ -1332,6 +1336,13 @@ impl HoudiniGraphPanel {
         {
             toggle_network_display_options(ui);
         }
+        if response.hovered() && ui.input(|input| input.key_pressed(egui::Key::Tab)) {
+            self.tab_menu_open = true;
+            self.tab_menu_anchor = ui
+                .input(|input| input.pointer.hover_pos())
+                .unwrap_or_else(|| canvas_rect.center());
+            self.operator_filter.clear();
+        }
         if response.hovered() {
             self.update_graph_viewport(ui, layout_rect);
         }
@@ -1549,8 +1560,119 @@ impl HoudiniGraphPanel {
         );
 
         response.context_menu(|ui| self.node_graph_context_menu_ui(ui, graph));
+        self.node_graph_tab_menu_ui(ui, graph);
 
         response
+    }
+
+    fn node_graph_tab_menu_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        if !self.tab_menu_open {
+            return;
+        }
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.tab_menu_open = false;
+            return;
+        }
+
+        let mut open = true;
+        egui::Window::new("TAB Menu")
+            .id(egui::Id::new("houdini_graph_canvas_tab_menu"))
+            .fixed_pos(self.tab_menu_anchor)
+            .collapsible(false)
+            .resizable(false)
+            .title_bar(true)
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(260.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.operator_filter)
+                        .desired_width(240.0)
+                        .hint_text("operator"),
+                );
+                ui.separator();
+                let filter = self.operator_filter.trim().to_lowercase();
+                let mut shown_operator = false;
+
+                if operator_matches(&filter, "OUT Null", &["null", "anchor", "out"]) {
+                    shown_operator = true;
+                    if operator_palette_button_ui(
+                        ui,
+                        "OUT Null",
+                        "Typed pass-through anchor using the OUT_* naming convention.",
+                    ) {
+                        self.selected_node = graph.add_null_operator_node("OUT_MAIN");
+                        self.node_info_open = true;
+                        self.tab_menu_open = false;
+                    }
+                }
+
+                if operator_matches(&filter, "Reference", &["object merge", "import", "target"]) {
+                    shown_operator = true;
+                    if operator_palette_button_ui(
+                        ui,
+                        "Reference",
+                        "Visible live reference to the selected node output.",
+                    ) && let Some(index) = graph.add_reference_input_node(self.selected_node)
+                    {
+                        self.selected_node = index;
+                        self.node_info_open = true;
+                        self.tab_menu_open = false;
+                    }
+                }
+
+                if operator_matches(&filter, "Network Box", &["box", "organize"]) {
+                    shown_operator = true;
+                    if operator_palette_button_ui(
+                        ui,
+                        "Network Box",
+                        "Group selected graph items as durable network organization.",
+                    ) {
+                        graph.add_network_box_for_node(self.selected_node);
+                        self.tab_menu_open = false;
+                    }
+                }
+
+                if operator_matches(&filter, "Sticky Note", &["note", "comment"]) {
+                    shown_operator = true;
+                    if operator_palette_button_ui(
+                        ui,
+                        "Sticky Note",
+                        "Create a durable canvas note near the selected node.",
+                    ) {
+                        graph.add_sticky_note_near_node(self.selected_node);
+                        self.tab_menu_open = false;
+                    }
+                }
+
+                if graph
+                    .reference_coordinate_repair_summary(self.selected_node)
+                    .is_some()
+                    && operator_matches(&filter, "Repair Projection", &["projection", "repair"])
+                {
+                    shown_operator = true;
+                    if operator_palette_button_ui(
+                        ui,
+                        "Repair Projection",
+                        "Insert a visible substrate projection node for the selected reference.",
+                    ) && let Some(index) = graph
+                        .create_assisted_projection_for_first_repairable_reference_target(
+                            self.selected_node,
+                        )
+                    {
+                        self.selected_node = index;
+                        self.node_info_open = true;
+                        self.tab_menu_open = false;
+                    }
+                }
+
+                if !shown_operator {
+                    ui.weak("No matching graph-backed operators.");
+                }
+            });
+
+        if !open {
+            self.tab_menu_open = false;
+        }
     }
 
     fn node_graph_context_menu_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
