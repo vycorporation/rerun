@@ -644,6 +644,25 @@ impl GraphDocument {
         true
     }
 
+    pub fn set_generated_node_binding_state(
+        &mut self,
+        node_index: usize,
+        binding_state: GeneratedNodeBindingState,
+    ) -> bool {
+        let Some(generated) = self
+            .nodes
+            .get_mut(node_index)
+            .and_then(|node| node.generated.as_mut())
+        else {
+            return false;
+        };
+        if generated.binding_state == binding_state {
+            return false;
+        }
+        generated.binding_state = binding_state;
+        true
+    }
+
     #[allow(dead_code)]
     pub fn add_null_operator_node(&mut self, name: impl Into<String>) -> usize {
         let mut name = name.into();
@@ -8913,6 +8932,60 @@ mod tests {
             Some(0.6)
         );
         assert_eq!(graph.visible_output_count(), 2);
+    }
+
+    #[test]
+    fn generated_node_binding_state_is_graph_owned_and_durable() {
+        let mut graph = GraphDocument::sample();
+        assert!(
+            graph.commit_attribute_table_query_as_filter(&AttributeTableQuery {
+                search: String::new(),
+                minimum_score: Some(0.8),
+                sort: AttributeTableSort::RecordIndex,
+                sort_descending: false,
+            })
+        );
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+
+        assert!(graph.set_generated_node_binding_state(
+            filter_index,
+            GeneratedNodeBindingState::Adopted,
+        ));
+        assert_eq!(
+            graph
+                .selected_node_info(filter_index)
+                .expect("filter node info should exist")
+                .generated
+                .expect("filter node info should expose generated metadata")
+                .binding_state,
+            GeneratedNodeBindingState::Adopted
+        );
+        assert!(!graph.set_generated_node_binding_state(
+            filter_index,
+            GeneratedNodeBindingState::Adopted,
+        ));
+        assert!(!graph.set_generated_node_binding_state(
+            graph.nodes.len(),
+            GeneratedNodeBindingState::Unbound,
+        ));
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(
+            restored
+                .selected_node_info(filter_index)
+                .expect("restored filter node info should exist")
+                .generated
+                .expect("restored filter node should expose generated metadata")
+                .binding_state,
+            GeneratedNodeBindingState::Adopted
+        );
     }
 
     #[test]

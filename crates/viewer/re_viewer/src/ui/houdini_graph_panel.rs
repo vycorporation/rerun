@@ -9,12 +9,12 @@ use re_ui::UiExt as _;
 pub(crate) mod model;
 
 use self::model::{
-    AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState, GeometryBounds,
-    GraphAnnotationKind, GraphDocument, GraphPoint, GraphStyle, HoudiniNodeBinding, LayerKind,
-    NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkNodeRingVisibility,
-    NetworkViewDisplayOptions, NodeStatus, PythonEnvironmentResolveTrigger,
-    PythonEnvironmentStatus, PythonOperatorDependencyStatus, ReferenceDiagnosticStatus,
-    SourceMetadata, SubstrateCoordinateContract,
+    AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState,
+    GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphDocument, GraphPoint,
+    GraphStyle, HoudiniNodeBinding, LayerKind, NativeOperatorLoadStatus, NetworkBadgeVisibility,
+    NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeStatus,
+    PythonEnvironmentResolveTrigger, PythonEnvironmentStatus, PythonOperatorDependencyStatus,
+    ReferenceDiagnosticStatus, SourceMetadata, SubstrateCoordinateContract,
 };
 
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
@@ -1679,6 +1679,7 @@ impl HoudiniGraphPanel {
         }
 
         self.selected_node_comment_ui(ui, graph);
+        self.generated_node_binding_controls_ui(ui, graph);
 
         ui.re_checkbox(&mut self.node_info_show_additional, "Show additional info");
         if self.node_info_show_additional {
@@ -1694,6 +1695,47 @@ impl HoudiniGraphPanel {
                     self.node_info_ui(ui, graph);
                 });
         }
+    }
+
+    fn generated_node_binding_controls_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        let Some(generated) = graph
+            .nodes
+            .get(self.selected_node)
+            .and_then(|node| node.generated)
+        else {
+            return;
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            ui.weak("Layer binding");
+            ui.label(generated.binding_state.as_str())
+                .on_hover_text(generated.binding_state.description());
+
+            if generated.binding_state != GeneratedNodeBindingState::Adopted
+                && ui.button("Adopt").clicked()
+            {
+                graph.set_generated_node_binding_state(
+                    self.selected_node,
+                    GeneratedNodeBindingState::Adopted,
+                );
+            }
+            if generated.binding_state != GeneratedNodeBindingState::Managed
+                && ui.button("Manage").clicked()
+            {
+                graph.set_generated_node_binding_state(
+                    self.selected_node,
+                    GeneratedNodeBindingState::Managed,
+                );
+            }
+            if generated.binding_state != GeneratedNodeBindingState::Unbound
+                && ui.button("Unbind").clicked()
+            {
+                graph.set_generated_node_binding_state(
+                    self.selected_node,
+                    GeneratedNodeBindingState::Unbound,
+                );
+            }
+        });
     }
 
     fn selected_node_comment_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
