@@ -883,6 +883,10 @@ impl HoudiniGraphPanel {
     fn selected_node_controls_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         let mut selected_parameter_changed = false;
         if let Some(node) = graph.nodes.get_mut(self.selected_node) {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(&node.name);
+                ui.weak(node.kind.as_str());
+            });
             ui.label(node.info);
             selected_parameter_changed = ui
                 .add(
@@ -895,7 +899,32 @@ impl HoudiniGraphPanel {
         if selected_parameter_changed {
             graph.mark_reference_inputs_stale_for_target_index(self.selected_node);
         }
+        self.selected_node_flags_ui(ui, graph);
         self.evaluation_controls_ui(ui, graph);
+    }
+
+    fn selected_node_flags_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        if self.selected_node >= graph.nodes.len() {
+            return;
+        }
+
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.weak("Flags");
+            if let Some(node) = graph.nodes.get_mut(self.selected_node) {
+                ui.re_checkbox(&mut node.participates_in_output, "Display output");
+            }
+
+            let mut manual = graph.nodes[self.selected_node].evaluation.manual;
+            if ui.re_checkbox(&mut manual, "Manual").changed() {
+                graph.set_node_manual(self.selected_node, manual);
+            }
+
+            if ui.button("Info").clicked() {
+                self.node_info_open = true;
+                self.active_graph_pane = GraphWorkbenchPane::Info;
+            }
+        });
     }
 
     fn graph_workbench_side_strip_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -1804,11 +1833,6 @@ impl HoudiniGraphPanel {
         }
 
         ui.horizontal(|ui| {
-            let mut manual = graph.nodes[self.selected_node].evaluation.manual;
-            if ui.re_checkbox(&mut manual, "Manual").changed() {
-                graph.set_node_manual(self.selected_node, manual);
-            }
-
             if ui.button("Run").clicked() {
                 graph.request_node_run(self.selected_node);
                 graph.complete_node_run(self.selected_node);
@@ -1880,7 +1904,7 @@ impl HoudiniGraphPanel {
             layout_changed |= self.frame_selected_node_in_rect(graph, layout_rect, node_size);
             self.pending_frame_selected = false;
         }
-        if response.hovered() {
+        if response.hovered() && !self.tab_menu_open {
             let shortcut = ui.input(|input| {
                 let shift_only = modifiers_are_shift_only(input.modifiers);
                 (
@@ -1895,6 +1919,10 @@ impl HoudiniGraphPanel {
                     input.key_pressed(egui::Key::O) && shift_only,
                     input.key_pressed(egui::Key::P) && shift_only,
                     input.key_pressed(egui::Key::M) && shift_only,
+                    input.key_pressed(egui::Key::I) && input.modifiers.is_none(),
+                    input.key_pressed(egui::Key::Q) && input.modifiers.is_none(),
+                    input.key_pressed(egui::Key::M) && input.modifiers.is_none(),
+                    input.key_pressed(egui::Key::R) && input.modifiers.is_none(),
                 )
             });
             let (
@@ -1906,6 +1934,10 @@ impl HoudiniGraphPanel {
                 add_network_box_pressed,
                 add_sticky_note_pressed,
                 resize_box_pressed,
+                node_info_pressed,
+                display_flag_pressed,
+                manual_flag_pressed,
+                run_node_pressed,
             ) = shortcut;
 
             if display_options_pressed {
@@ -1932,6 +1964,18 @@ impl HoudiniGraphPanel {
             }
             if resize_box_pressed {
                 layout_changed |= self.resize_selected_network_box_to_contents(graph);
+            }
+            if node_info_pressed {
+                self.apply_node_ring_action(graph, self.selected_node, NodeRingAction::Info);
+            }
+            if display_flag_pressed {
+                self.apply_node_ring_action(graph, self.selected_node, NodeRingAction::Display);
+            }
+            if manual_flag_pressed {
+                self.apply_node_ring_action(graph, self.selected_node, NodeRingAction::Manual);
+            }
+            if run_node_pressed {
+                self.apply_node_ring_action(graph, self.selected_node, NodeRingAction::Run);
             }
         }
         if layout_changed {
@@ -2386,6 +2430,13 @@ impl HoudiniGraphPanel {
         }
 
         ui.separator();
+        ui.weak("Node Flags");
+        self.node_flag_menu_action_ui(ui, graph, NodeRingAction::Info, "Node Info    I");
+        self.node_flag_menu_action_ui(ui, graph, NodeRingAction::Display, "Display Output    Q");
+        self.node_flag_menu_action_ui(ui, graph, NodeRingAction::Manual, "Manual Cook    M");
+        self.node_flag_menu_action_ui(ui, graph, NodeRingAction::Run, "Run Node    R");
+
+        ui.separator();
         if ui.button("TAB Menu...").clicked() {
             let anchor = ui
                 .input(|input| input.pointer.hover_pos())
@@ -2426,6 +2477,34 @@ impl HoudiniGraphPanel {
         }
         if ui.button("Frame Selected    F").clicked() {
             self.pending_frame_selected = true;
+            ui.close();
+        }
+    }
+
+    fn node_flag_menu_action_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        action: NodeRingAction,
+        label: &str,
+    ) {
+        let selected = match action {
+            NodeRingAction::Display => graph
+                .nodes
+                .get(self.selected_node)
+                .is_some_and(|node| node.participates_in_output),
+            NodeRingAction::Manual => graph
+                .nodes
+                .get(self.selected_node)
+                .is_some_and(|node| node.evaluation.manual),
+            NodeRingAction::Info | NodeRingAction::Run => false,
+        };
+        if ui
+            .selectable_label(selected, label)
+            .on_hover_text(action.detail())
+            .clicked()
+        {
+            self.apply_node_ring_action(graph, self.selected_node, action);
             ui.close();
         }
     }
