@@ -4495,6 +4495,12 @@ pub(crate) struct NetworkViewDisplayOptions {
     pub time_dependent_badge: NetworkBadgeVisibility,
     #[serde(default)]
     pub lock_badge: NetworkBadgeVisibility,
+    #[serde(default)]
+    pub has_data_badge: NetworkBadgeVisibility,
+    #[serde(default)]
+    pub cached_code_badge: NetworkBadgeVisibility,
+    #[serde(default)]
+    pub constraint_badge: NetworkBadgeVisibility,
 }
 
 impl Default for NetworkViewDisplayOptions {
@@ -4510,6 +4516,9 @@ impl Default for NetworkViewDisplayOptions {
             comment_badge: NetworkBadgeVisibility::Large,
             time_dependent_badge: NetworkBadgeVisibility::Normal,
             lock_badge: NetworkBadgeVisibility::Normal,
+            has_data_badge: NetworkBadgeVisibility::Normal,
+            cached_code_badge: NetworkBadgeVisibility::Normal,
+            constraint_badge: NetworkBadgeVisibility::Normal,
         }
     }
 }
@@ -9843,6 +9852,9 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         graph.network_view.comment_badge = NetworkBadgeVisibility::Normal;
         graph.network_view.time_dependent_badge = NetworkBadgeVisibility::Hide;
         graph.network_view.lock_badge = NetworkBadgeVisibility::Large;
+        graph.network_view.has_data_badge = NetworkBadgeVisibility::Hide;
+        graph.network_view.cached_code_badge = NetworkBadgeVisibility::Large;
+        graph.network_view.constraint_badge = NetworkBadgeVisibility::Normal;
 
         let json = graph.to_sidecar_json().unwrap();
         let mut restored = GraphDocument::sample();
@@ -9881,6 +9893,18 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         );
         assert_eq!(
             restored.network_view.lock_badge,
+            NetworkBadgeVisibility::Normal
+        );
+        assert_eq!(
+            restored.network_view.has_data_badge,
+            NetworkBadgeVisibility::Normal
+        );
+        assert_eq!(
+            restored.network_view.cached_code_badge,
+            NetworkBadgeVisibility::Normal
+        );
+        assert_eq!(
+            restored.network_view.constraint_badge,
             NetworkBadgeVisibility::Normal
         );
     }

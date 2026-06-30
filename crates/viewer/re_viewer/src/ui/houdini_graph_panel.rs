@@ -550,6 +550,15 @@ impl HoudiniGraphPanel {
     }
 
     fn resize_selected_network_box_to_contents(&mut self, graph: &mut GraphDocument) -> bool {
+        if let Some(annotation_index) = self.selected_annotation
+            && graph
+                .annotations
+                .get(annotation_index)
+                .is_some_and(|annotation| annotation.kind == GraphAnnotationKind::NetworkBox)
+        {
+            return graph.resize_network_box_to_contents(annotation_index);
+        }
+
         let Some(annotation_index) = graph.annotations.iter().position(|annotation| {
             annotation.kind == GraphAnnotationKind::NetworkBox
                 && graph.nodes.get(self.selected_node).is_some_and(|node| {
@@ -1408,6 +1417,9 @@ impl HoudiniGraphPanel {
                     &mut options.time_dependent_badge,
                 );
                 badge_visibility_combo_ui(ui, "Asset Lock Badge", &mut options.lock_badge);
+                badge_visibility_combo_ui(ui, "Has Data Badge", &mut options.has_data_badge);
+                badge_visibility_combo_ui(ui, "Cached Code Badge", &mut options.cached_code_badge);
+                badge_visibility_combo_ui(ui, "Constraint Badge", &mut options.constraint_badge);
             });
     }
 
@@ -2746,7 +2758,15 @@ impl HoudiniGraphPanel {
                     (node_index == layout_node.node_index).then_some(action)
                 });
             draw_node_flag_strip(&painter, node_rect, node, hovered_flag_action, ui.visuals());
-            draw_node_badges(&painter, node_rect, node, network_view, ui.visuals());
+            draw_node_badges(
+                &painter,
+                node_rect,
+                graph,
+                layout_node.node_index,
+                node,
+                network_view,
+                ui.visuals(),
+            );
         }
 
         if let Some((node_index, action, pointer_pos)) =
@@ -4414,11 +4434,14 @@ fn draw_node_ring_action_tooltip(
 fn draw_node_badges(
     painter: &egui::Painter,
     node_rect: Rect,
+    graph: &GraphDocument,
+    node_index: usize,
     node: &self::model::GraphNode,
     network_view: NetworkViewDisplayOptions,
     visuals: &egui::Visuals,
 ) {
     let mut badges = Vec::new();
+    let node_info = graph.selected_node_info(node_index);
     if node.evaluation.state == EvaluationState::Failed {
         badges.push(("!", visuals.error_fg_color, network_view.error_badge));
     } else if node.evaluation.message.is_some() {
@@ -4440,6 +4463,41 @@ fn draw_node_badges(
                 Color32::from_rgb(122, 154, 212)
             },
             network_view.lock_badge,
+        ));
+    }
+    if node_info.as_ref().is_some_and(|info| info.record_count > 0) {
+        badges.push((
+            "H",
+            Color32::from_rgb(96, 180, 116),
+            network_view.has_data_badge,
+        ));
+    }
+    if node.evaluation.state == EvaluationState::Cached
+        || node
+            .python_operator
+            .as_ref()
+            .is_some_and(|operator| operator.cache_key.is_some())
+        || node
+            .native_operator
+            .as_ref()
+            .is_some_and(|operator| operator.cache_key.is_some())
+    {
+        badges.push((
+            "K",
+            Color32::from_rgb(116, 151, 230),
+            network_view.cached_code_badge,
+        ));
+    }
+    if node.coordinate_contract.is_some()
+        || node_info
+            .as_ref()
+            .and_then(|info| info.reference_input.as_ref())
+            .is_some_and(|reference_input| reference_input.coordinate_contract.is_some())
+    {
+        badges.push((
+            "X",
+            Color32::from_rgb(205, 154, 90),
+            network_view.constraint_badge,
         ));
     }
 
