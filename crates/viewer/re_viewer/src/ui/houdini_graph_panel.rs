@@ -1963,11 +1963,13 @@ impl HoudiniGraphPanel {
                 self.resizing_annotation = None;
                 let mut hit_node = false;
                 for (index, node_rect) in node_rects.iter().enumerate() {
-                    let ring_visible = match network_view.node_ring_visibility {
-                        NetworkNodeRingVisibility::Hidden => false,
-                        NetworkNodeRingVisibility::Selected => self.selected_node == index,
-                        NetworkNodeRingVisibility::Always => true,
-                    };
+                    let ring_visible = node_ring_visible(
+                        network_view.node_ring_visibility,
+                        self.selected_node == index,
+                        node_rect.contains(pointer_pos)
+                            || node_ring_action_at(*node_rect, pointer_pos, self.graph_view_zoom)
+                                .is_some(),
+                    );
                     if ring_visible
                         && let Some(ring_action) =
                             node_ring_action_at(*node_rect, pointer_pos, self.graph_view_zoom)
@@ -2087,11 +2089,17 @@ impl HoudiniGraphPanel {
                         .iter()
                         .enumerate()
                         .find_map(|(index, node_rect)| {
-                            let ring_visible = match network_view.node_ring_visibility {
-                                NetworkNodeRingVisibility::Hidden => false,
-                                NetworkNodeRingVisibility::Selected => self.selected_node == index,
-                                NetworkNodeRingVisibility::Always => true,
-                            };
+                            let ring_visible = node_ring_visible(
+                                network_view.node_ring_visibility,
+                                self.selected_node == index,
+                                node_rect.contains(pointer_pos)
+                                    || node_ring_action_at(
+                                        *node_rect,
+                                        pointer_pos,
+                                        self.graph_view_zoom,
+                                    )
+                                    .is_some(),
+                            );
                             ring_visible
                                 .then(|| {
                                     node_ring_action_at(
@@ -2131,11 +2139,14 @@ impl HoudiniGraphPanel {
             };
             let node_rect = node_rects[layout_node.node_index];
             let selected = self.selected_node == layout_node.node_index;
-            let show_ring = match network_view.node_ring_visibility {
-                NetworkNodeRingVisibility::Hidden => false,
-                NetworkNodeRingVisibility::Selected => selected,
-                NetworkNodeRingVisibility::Always => true,
-            };
+            let hovered = response.hovered()
+                && ui.input(|input| {
+                    input
+                        .pointer
+                        .hover_pos()
+                        .is_some_and(|pointer_pos| node_rect.contains(pointer_pos))
+                });
+            let show_ring = node_ring_visible(network_view.node_ring_visibility, selected, hovered);
             if show_ring {
                 let hovered_action = hovered_ring_action.and_then(|(node_index, action, _)| {
                     (node_index == layout_node.node_index).then_some(action)
@@ -3570,6 +3581,14 @@ impl NodeRingAction {
             Self::Manual => 0.38 * std::f32::consts::PI,
             Self::Run => 0.78 * std::f32::consts::PI,
         }
+    }
+}
+
+fn node_ring_visible(visibility: NetworkNodeRingVisibility, selected: bool, hovered: bool) -> bool {
+    match visibility {
+        NetworkNodeRingVisibility::Hidden => false,
+        NetworkNodeRingVisibility::Selected => selected || hovered,
+        NetworkNodeRingVisibility::Always => true,
     }
 }
 
