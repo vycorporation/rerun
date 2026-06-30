@@ -50,6 +50,7 @@ fn shared_houdini_graph_id() -> egui::Id {
 
 pub(crate) struct HoudiniGraphPanel {
     selected_node: usize,
+    selected_annotation: Option<usize>,
     active_workspace: HoudiniGraphWorkspace,
     active_graph_pane: GraphWorkbenchPane,
     dragging_node: Option<usize>,
@@ -96,6 +97,7 @@ impl Default for HoudiniGraphPanel {
     fn default() -> Self {
         Self {
             selected_node: 1,
+            selected_annotation: None,
             active_workspace: HoudiniGraphWorkspace::Graph,
             active_graph_pane: GraphWorkbenchPane::Parameters,
             dragging_node: None,
@@ -793,12 +795,12 @@ impl HoudiniGraphPanel {
                 }
             }
             OperatorPaletteAction::AddNetworkBox => {
-                graph.add_network_box_for_node(self.selected_node);
+                self.selected_annotation = graph.add_network_box_for_node(self.selected_node);
                 self.active_graph_pane = GraphWorkbenchPane::Operators;
                 true
             }
             OperatorPaletteAction::AddStickyNote => {
-                graph.add_sticky_note_near_node(self.selected_node);
+                self.selected_annotation = graph.add_sticky_note_near_node(self.selected_node);
                 self.active_graph_pane = GraphWorkbenchPane::Operators;
                 true
             }
@@ -2405,13 +2407,28 @@ impl HoudiniGraphPanel {
             ui.visuals().weak_text_color(),
         );
 
-        for annotation in &graph.annotations {
+        let hovered_annotation_index = if response.hovered() {
+            ui.input(|input| input.pointer.hover_pos())
+                .and_then(|pointer_pos| {
+                    annotation_rects.iter().enumerate().rev().find_map(
+                        |(index, annotation_rect)| {
+                            annotation_rect.contains(pointer_pos).then_some(index)
+                        },
+                    )
+                })
+        } else {
+            None
+        };
+
+        for (annotation_index, annotation) in graph.annotations.iter().enumerate() {
             draw_graph_annotation(
                 &painter,
                 layout_rect,
                 annotation,
                 self.graph_view_zoom,
                 self.graph_view_pan,
+                self.selected_annotation == Some(annotation_index),
+                hovered_annotation_index == Some(annotation_index),
                 ui.visuals(),
             );
         }
@@ -2457,6 +2474,7 @@ impl HoudiniGraphPanel {
                     }
                     if node_rect.contains(pointer_pos) {
                         self.selected_node = index;
+                        self.selected_annotation = None;
                         self.node_info_open = true;
                         self.dragging_node = Some(index);
                         self.node_drag_peak_delta_pixels = 0.0;
@@ -2472,15 +2490,18 @@ impl HoudiniGraphPanel {
                             if let Some(annotation) = graph.annotations.get_mut(index) {
                                 annotation.collapsed = !annotation.collapsed;
                             }
+                            self.selected_annotation = Some(index);
                             hit_annotation = true;
                             break;
                         }
                         if annotation_resize_handle_rect(*annotation_rect).contains(pointer_pos) {
+                            self.selected_annotation = Some(index);
                             self.resizing_annotation = Some(index);
                             hit_annotation = true;
                             break;
                         }
                         if annotation_rect.contains(pointer_pos) {
+                            self.selected_annotation = Some(index);
                             self.dragging_annotation = Some(index);
                             hit_annotation = true;
                             break;
@@ -2494,13 +2515,22 @@ impl HoudiniGraphPanel {
                     && !self.node_info_pinned
                 {
                     self.node_info_open = false;
+                    self.selected_annotation = None;
                 }
             }
 
             if response.clicked_by(egui::PointerButton::Secondary) {
+                self.selected_annotation = None;
+                for (index, annotation_rect) in annotation_rects.iter().enumerate().rev() {
+                    if annotation_rect.contains(pointer_pos) {
+                        self.selected_annotation = Some(index);
+                        break;
+                    }
+                }
                 for (index, node_rect) in node_rects.iter().enumerate() {
                     if node_rect.contains(pointer_pos) {
                         self.selected_node = index;
+                        self.selected_annotation = None;
                         self.node_info_open = true;
                         break;
                     }
@@ -2838,6 +2868,11 @@ impl HoudiniGraphPanel {
     }
 
     fn node_graph_context_menu_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        if self.selected_annotation.is_some() {
+            self.annotation_context_menu_ui(ui, graph);
+            return;
+        }
+
         if let Some(node) = graph.nodes.get(self.selected_node) {
             ui.strong(&node.name);
             ui.weak(node.kind.as_str());
@@ -2931,6 +2966,79 @@ impl HoudiniGraphPanel {
         }
         if ui.button("Frame Selected    F").clicked() {
             self.pending_frame_selected = true;
+            ui.close();
+        }
+    }
+
+    fn annotation_context_menu_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        let Some(annotation_index) = self.selected_annotation else {
+            return;
+        };
+        if annotation_index >= graph.annotations.len() {
+            self.selected_annotation = None;
+            ui.weak("No annotation selected.");
+            return;
+        }
+
+        let mut resize_to_contents = false;
+        {
+            let annotation = &mut graph.annotations[annotation_index];
+            ui.strong(&annotation.title);
+            ui.weak(annotation.kind.as_str());
+            ui.separator();
+
+            ui.weak("Title");
+            ui.add(
+                egui::TextEdit::singleline(&mut annotation.title)
+                    .desired_width(190.0)
+                    .hint_text("title"),
+            );
+
+            if annotation.kind == GraphAnnotationKind::StickyNote {
+                ui.weak("Note");
+                ui.add(
+                    egui::TextEdit::multiline(&mut annotation.text)
+                        .desired_width(190.0)
+                        .desired_rows(3)
+                        .hint_text("note"),
+                );
+            }
+
+            ui.separator();
+            let collapse_label = if annotation.collapsed {
+                "Expand"
+            } else {
+                "Collapse"
+            };
+            if ui.button(collapse_label).clicked() {
+                annotation.collapsed = !annotation.collapsed;
+                ui.close();
+            }
+
+            if annotation.kind == GraphAnnotationKind::NetworkBox {
+                ui.weak(format!(
+                    "{} member node{}",
+                    annotation.member_node_ids.len(),
+                    if annotation.member_node_ids.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+                if ui.button("Resize to Contents    Shift+M").clicked() {
+                    resize_to_contents = true;
+                    ui.close();
+                }
+            }
+        }
+
+        if resize_to_contents {
+            graph.resize_network_box_to_contents(annotation_index);
+        }
+
+        ui.separator();
+        if ui.button("Organization Pane").clicked() {
+            self.active_graph_pane = GraphWorkbenchPane::Operators;
             ui.close();
         }
     }
@@ -4571,6 +4679,8 @@ fn draw_graph_annotation(
     annotation: &self::model::GraphAnnotation,
     zoom: f32,
     pan: Vec2,
+    selected: bool,
+    hovered: bool,
     visuals: &egui::Visuals,
 ) {
     let annotation_rect = display_annotation_rect(layout_rect, annotation, zoom, pan);
@@ -4578,7 +4688,12 @@ fn draw_graph_annotation(
         GraphAnnotationKind::NetworkBox => {
             let body_fill = Color32::from_rgba_unmultiplied(150, 150, 150, 72);
             let header_fill = Color32::from_rgba_unmultiplied(185, 185, 185, 132);
-            let stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 210, 210, 150));
+            let stroke = annotation_stroke(
+                visuals,
+                selected,
+                hovered,
+                Color32::from_rgba_unmultiplied(210, 210, 210, 150),
+            );
             painter.rect_filled(annotation_rect, 6.0, body_fill);
             painter.rect_stroke(annotation_rect, 6.0, stroke, StrokeKind::Inside);
 
@@ -4609,7 +4724,12 @@ fn draw_graph_annotation(
         GraphAnnotationKind::StickyNote => {
             let body_fill = Color32::from_rgba_unmultiplied(214, 90, 176, 150);
             let header_fill = Color32::from_rgba_unmultiplied(244, 106, 205, 185);
-            let stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(230, 210, 72, 210));
+            let stroke = annotation_stroke(
+                visuals,
+                selected,
+                hovered,
+                Color32::from_rgba_unmultiplied(230, 210, 72, 210),
+            );
             painter.rect_filled(annotation_rect, 5.0, body_fill);
             painter.rect_stroke(annotation_rect, 5.0, stroke, StrokeKind::Inside);
 
@@ -4663,6 +4783,21 @@ fn draw_annotation_resize_handle(painter: &egui::Painter, annotation_rect: Rect,
         ],
         Stroke::new(1.0, color),
     );
+}
+
+fn annotation_stroke(
+    visuals: &egui::Visuals,
+    selected: bool,
+    hovered: bool,
+    fallback_color: Color32,
+) -> Stroke {
+    if selected {
+        Stroke::new(2.0, visuals.selection.stroke.color)
+    } else if hovered {
+        Stroke::new(1.5, visuals.widgets.hovered.fg_stroke.color)
+    } else {
+        Stroke::new(1.0, fallback_color)
+    }
 }
 
 fn format_sticky_note_text(text: &str) -> String {
