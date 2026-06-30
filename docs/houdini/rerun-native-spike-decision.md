@@ -96,6 +96,10 @@ The next renderer issue must separate graph evaluation cost, viewer-boundary pre
 Python operators, uv-managed environments, procedural assets, and trusted native plugin operators remain design follow-ups.
 They should build on the graph model and demand-driven evaluation machinery rather than bypass it.
 
+The current blueprint-tab layout proves the native viewer can host movable Houdini surfaces.
+It does not yet provide Houdini-style workbench layout presets: named layout recipes that users can load for graph editing, inspection, data/table work, output review, debugging, or asset authoring.
+Those presets should use normal Rerun blueprint containers and views rather than a custom nested dock system.
+
 ## Next issues
 
 1. #38 - Prototype specialized Houdini curve and polygon renderer path.
@@ -103,6 +107,7 @@ They should build on the graph model and demand-driven evaluation machinery rath
 3. #32 - Track app-managed uv project environment status for Houdini Python.
 4. #33 - Prototype graph-backed Houdini procedural asset interfaces.
 5. #34 - Define trusted native plugin operator lane for Houdini graph.
+6. #72 - Add Houdini-style workbench layout presets.
 
 The renderer issue should run before declaring high-scale curve and polygon rendering solved.
 The Python and plugin issues can proceed as product design work, but they should not distract from the renderer gap.
