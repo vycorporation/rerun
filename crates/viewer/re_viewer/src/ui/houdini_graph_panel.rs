@@ -1360,6 +1360,20 @@ impl HoudiniGraphPanel {
                 self.resizing_annotation = None;
                 let mut hit_node = false;
                 for (index, node_rect) in node_rects.iter().enumerate() {
+                    let ring_visible = match network_view.node_ring_visibility {
+                        NetworkNodeRingVisibility::Hidden => false,
+                        NetworkNodeRingVisibility::Selected => self.selected_node == index,
+                        NetworkNodeRingVisibility::Always => true,
+                    };
+                    if ring_visible
+                        && let Some(ring_action) =
+                            node_ring_action_at(*node_rect, pointer_pos, self.graph_view_zoom)
+                    {
+                        self.selected_node = index;
+                        self.apply_node_ring_action(graph, index, ring_action);
+                        hit_node = true;
+                        break;
+                    }
                     if node_rect.contains(pointer_pos) {
                         self.selected_node = index;
                         self.node_info_open = true;
@@ -1737,6 +1751,34 @@ impl HoudiniGraphPanel {
             self.graph_view_zoom = 1.0;
             self.graph_view_pan = Vec2::ZERO;
             ui.close();
+        }
+    }
+
+    fn apply_node_ring_action(
+        &mut self,
+        graph: &mut GraphDocument,
+        node_index: usize,
+        action: NodeRingAction,
+    ) {
+        match action {
+            NodeRingAction::Info => {
+                self.node_info_open = true;
+            }
+            NodeRingAction::Display => {
+                if let Some(node) = graph.nodes.get_mut(node_index) {
+                    node.participates_in_output = !node.participates_in_output;
+                }
+            }
+            NodeRingAction::Manual => {
+                let Some(node) = graph.nodes.get(node_index) else {
+                    return;
+                };
+                graph.set_node_manual(node_index, !node.evaluation.manual);
+            }
+            NodeRingAction::Run => {
+                graph.request_node_run(node_index);
+                graph.complete_node_run(node_index);
+            }
         }
     }
 
@@ -2731,6 +2773,34 @@ fn draw_node_ring(
             visuals.text_color(),
         );
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeRingAction {
+    Info,
+    Display,
+    Manual,
+    Run,
+}
+
+fn node_ring_action_at(node_rect: Rect, pointer_pos: Pos2, zoom: f32) -> Option<NodeRingAction> {
+    let center = node_rect.center();
+    let ring_radius = node_rect.width() * 0.76;
+    let hit_radius = (13.0 * zoom).clamp(9.0, 18.0);
+    let entries = [
+        (NodeRingAction::Info, -std::f32::consts::PI),
+        (NodeRingAction::Display, -0.38 * std::f32::consts::PI),
+        (NodeRingAction::Manual, 0.38 * std::f32::consts::PI),
+        (NodeRingAction::Run, 0.78 * std::f32::consts::PI),
+    ];
+
+    entries
+        .into_iter()
+        .find(|(_, angle)| {
+            let pos = center + egui::vec2(angle.cos(), angle.sin()) * ring_radius;
+            pos.distance(pointer_pos) <= hit_radius
+        })
+        .map(|(action, _)| action)
 }
 
 fn draw_node_badges(
