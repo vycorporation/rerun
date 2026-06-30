@@ -50,6 +50,7 @@ fn shared_houdini_graph_id() -> egui::Id {
 pub(crate) struct HoudiniGraphPanel {
     selected_node: usize,
     active_workspace: HoudiniGraphWorkspace,
+    active_graph_pane: GraphWorkbenchPane,
     dragging_node: Option<usize>,
     node_drag_peak_delta_pixels: f32,
     dragging_annotation: Option<usize>,
@@ -91,6 +92,7 @@ impl Default for HoudiniGraphPanel {
         Self {
             selected_node: 1,
             active_workspace: HoudiniGraphWorkspace::Graph,
+            active_graph_pane: GraphWorkbenchPane::Parameters,
             dragging_node: None,
             node_drag_peak_delta_pixels: 0.0,
             dragging_annotation: None,
@@ -154,6 +156,35 @@ impl HoudiniGraphWorkspace {
             Self::Data => "Data",
             Self::Outputs => "Outputs",
             Self::Project => "Project",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphWorkbenchPane {
+    Operators,
+    Parameters,
+    Info,
+    Display,
+    Layers,
+}
+
+impl GraphWorkbenchPane {
+    const ALL: [Self; 5] = [
+        Self::Operators,
+        Self::Parameters,
+        Self::Info,
+        Self::Display,
+        Self::Layers,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Operators => "Ops",
+            Self::Parameters => "Parms",
+            Self::Info => "Info",
+            Self::Display => "Display",
+            Self::Layers => "Layers",
         }
     }
 }
@@ -328,28 +359,48 @@ impl HoudiniGraphPanel {
     }
 
     fn graph_workbench_side_strip_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
-        ui.strong("Operators");
-        self.operator_strip_ui(ui, graph);
+        self.graph_workbench_pane_tabs_ui(ui);
+        ui.separator();
 
-        ui.add_space(8.0);
-        ui.strong("Network View");
-        self.network_view_options_ui(ui, graph);
+        match self.active_graph_pane {
+            GraphWorkbenchPane::Operators => {
+                self.operator_strip_ui(ui, graph);
+                ui.add_space(8.0);
+                self.network_organization_ui(ui, graph);
+            }
+            GraphWorkbenchPane::Parameters => {
+                self.selected_node_controls_ui(ui, graph);
+            }
+            GraphWorkbenchPane::Info => {
+                self.graph_workbench_node_info_ui(ui, graph);
+                ui.add_space(8.0);
+                egui::CollapsingHeader::new("Pipeline Trace")
+                    .id_salt("houdini_graph_workbench_pipeline_trace")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        self.pipeline_trace_ui(ui, graph);
+                    });
+            }
+            GraphWorkbenchPane::Display => {
+                self.network_view_options_ui(ui, graph);
+            }
+            GraphWorkbenchPane::Layers => {
+                self.compact_layer_stack_ui(ui, graph);
+            }
+        }
+    }
 
-        ui.add_space(8.0);
-        ui.strong("Organization");
-        self.network_organization_ui(ui, graph);
-
-        ui.add_space(8.0);
-        ui.strong("Parameters");
-        self.selected_node_controls_ui(ui, graph);
-
-        ui.add_space(8.0);
-        ui.strong("Node Info");
-        self.graph_workbench_node_info_ui(ui, graph);
-
-        ui.add_space(8.0);
-        ui.strong("Layers");
-        self.compact_layer_stack_ui(ui, graph);
+    fn graph_workbench_pane_tabs_ui(&mut self, ui: &mut Ui) {
+        ui.horizontal_wrapped(|ui| {
+            for pane in GraphWorkbenchPane::ALL {
+                if ui
+                    .selectable_label(self.active_graph_pane == pane, pane.label())
+                    .clicked()
+                {
+                    self.active_graph_pane = pane;
+                }
+            }
+        });
     }
 
     fn network_view_options_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -1143,6 +1194,7 @@ impl HoudiniGraphPanel {
                     ) {
                         let index = graph.add_null_operator_node("OUT_MAIN");
                         self.selected_node = index;
+                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
                     }
                 }
 
@@ -1155,6 +1207,7 @@ impl HoudiniGraphPanel {
                     ) && let Some(index) = graph.add_reference_input_node(self.selected_node)
                     {
                         self.selected_node = index;
+                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
                     }
                 }
 
@@ -1174,6 +1227,7 @@ impl HoudiniGraphPanel {
                         )
                     {
                         self.selected_node = index;
+                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
                     }
                 }
             });
@@ -1644,6 +1698,7 @@ impl HoudiniGraphPanel {
                     ) {
                         self.selected_node = graph.add_null_operator_node("OUT_MAIN");
                         self.node_info_open = true;
+                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
                         self.tab_menu_open = false;
                     }
                 }
@@ -1658,6 +1713,7 @@ impl HoudiniGraphPanel {
                     {
                         self.selected_node = index;
                         self.node_info_open = true;
+                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
                         self.tab_menu_open = false;
                     }
                 }
@@ -1703,6 +1759,7 @@ impl HoudiniGraphPanel {
                     {
                         self.selected_node = index;
                         self.node_info_open = true;
+                        self.active_graph_pane = GraphWorkbenchPane::Parameters;
                         self.tab_menu_open = false;
                     }
                 }
@@ -1726,11 +1783,13 @@ impl HoudiniGraphPanel {
 
         if ui.button("Show Node Information").clicked() {
             self.node_info_open = true;
+            self.active_graph_pane = GraphWorkbenchPane::Info;
             ui.close();
         }
         if ui.button("Pin Node Information").clicked() {
             self.node_info_open = true;
             self.node_info_pinned = true;
+            self.active_graph_pane = GraphWorkbenchPane::Info;
             ui.close();
         }
 
@@ -1738,12 +1797,14 @@ impl HoudiniGraphPanel {
         if ui.button("Add OUT Null").clicked() {
             self.selected_node = graph.add_null_operator_node("OUT_MAIN");
             self.node_info_open = true;
+            self.active_graph_pane = GraphWorkbenchPane::Parameters;
             ui.close();
         }
         if ui.button("Add Reference").clicked() {
             if let Some(index) = graph.add_reference_input_node(self.selected_node) {
                 self.selected_node = index;
                 self.node_info_open = true;
+                self.active_graph_pane = GraphWorkbenchPane::Parameters;
             }
             ui.close();
         }
@@ -1772,6 +1833,7 @@ impl HoudiniGraphPanel {
             ui.close();
         }
         if ui.button("Display Options").clicked() {
+            self.active_graph_pane = GraphWorkbenchPane::Display;
             toggle_network_display_options(ui);
             ui.close();
         }
@@ -1791,6 +1853,7 @@ impl HoudiniGraphPanel {
         match action {
             NodeRingAction::Info => {
                 self.node_info_open = true;
+                self.active_graph_pane = GraphWorkbenchPane::Info;
             }
             NodeRingAction::Display => {
                 if let Some(node) = graph.nodes.get_mut(node_index) {
