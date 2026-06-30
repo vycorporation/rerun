@@ -167,16 +167,33 @@ impl HoudiniGraphPanel {
     }
 
     fn graph_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
-        ui.strong("Graph Canvas");
-        self.node_graph_ui(ui, graph);
+        let wide_workbench = ui.available_width() >= 680.0;
 
-        ui.add_space(8.0);
-        ui.strong("Layers");
-        self.layer_stack_ui(ui, graph);
+        if wide_workbench {
+            let side_width = (ui.available_width() * 0.28).clamp(240.0, 320.0);
+            let canvas_width = (ui.available_width() - side_width - 12.0).max(320.0);
 
-        ui.add_space(8.0);
-        ui.strong("Parameters");
-        self.selected_node_controls_ui(ui, graph);
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(canvas_width);
+                    ui.strong("Graph Canvas");
+                    self.node_graph_ui(ui, graph, 248.0);
+                });
+
+                ui.separator();
+
+                ui.vertical(|ui| {
+                    ui.set_width(side_width);
+                    self.graph_workbench_side_strip_ui(ui, graph);
+                });
+            });
+        } else {
+            ui.strong("Graph Canvas");
+            self.node_graph_ui(ui, graph, 220.0);
+
+            ui.add_space(8.0);
+            self.graph_workbench_side_strip_ui(ui, graph);
+        }
     }
 
     fn inspect_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -251,6 +268,19 @@ impl HoudiniGraphPanel {
             graph.mark_reference_inputs_stale_for_target_index(self.selected_node);
         }
         self.evaluation_controls_ui(ui, graph);
+    }
+
+    fn graph_workbench_side_strip_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.strong("Operators");
+        self.operator_strip_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Layers");
+        self.compact_layer_stack_ui(ui, graph);
+
+        ui.add_space(8.0);
+        ui.strong("Parameters");
+        self.selected_node_controls_ui(ui, graph);
     }
 
     fn output_summary_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
@@ -708,13 +738,13 @@ impl HoudiniGraphPanel {
         }
     }
 
-    fn layer_stack_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
-        ui.horizontal(|ui| {
-            if ui.button("Add OUT Null").clicked() {
+    fn operator_strip_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("OUT Null").clicked() {
                 let index = graph.add_null_operator_node("OUT_MAIN");
                 self.selected_node = index;
             }
-            if ui.button("Reference Selected").clicked()
+            if ui.button("Reference").clicked()
                 && let Some(index) = graph.add_reference_input_node(self.selected_node)
             {
                 self.selected_node = index;
@@ -722,7 +752,7 @@ impl HoudiniGraphPanel {
             if graph
                 .reference_coordinate_repair_summary(self.selected_node)
                 .is_some()
-                && ui.button("Repair Projection").clicked()
+                && ui.button("Repair").clicked()
                 && let Some(index) = graph
                     .create_assisted_projection_for_first_repairable_reference_target(
                         self.selected_node,
@@ -730,20 +760,29 @@ impl HoudiniGraphPanel {
             {
                 self.selected_node = index;
             }
-            if ui.button("Duplicate Polygons").clicked() {
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Duplicate polygons").clicked() {
                 graph.duplicate_layer_view(LayerKind::Polygons, "Polygons Copy");
             }
-            if ui.button("Duplicate Curves").clicked() {
+            if ui.button("Duplicate curves").clicked() {
                 graph.duplicate_layer_view(LayerKind::Curves, "Curves Copy");
             }
         });
 
-        egui::Grid::new("houdini_graph_layer_stack")
+        if let Some(node) = graph.nodes.get(self.selected_node) {
+            ui.weak(format!("Selected: {} ({})", node.name, node.kind.as_str()));
+        }
+    }
+
+    fn compact_layer_stack_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        egui::Grid::new("houdini_graph_compact_layer_stack")
             .num_columns(4)
-            .spacing([10.0, 4.0])
+            .spacing([8.0, 4.0])
             .striped(true)
             .show(ui, |ui| {
-                ui.weak("Visible");
+                ui.weak("On");
                 ui.weak("Order");
                 ui.weak("Name");
                 ui.weak("Kind");
@@ -751,8 +790,8 @@ impl HoudiniGraphPanel {
 
                 for layer in &mut graph.layers {
                     ui.re_checkbox(&mut layer.visible, "");
-                    ui.add(egui::DragValue::new(&mut layer.order).speed(1));
-                    ui.text_edit_singleline(&mut layer.name);
+                    ui.add(DragValue::new(&mut layer.order).speed(1).range(-99..=99));
+                    ui.add(egui::TextEdit::singleline(&mut layer.name).desired_width(96.0));
                     ui.label(layer.kind.as_str());
                     ui.end_row();
                 }
@@ -809,8 +848,13 @@ impl HoudiniGraphPanel {
         }
     }
 
-    fn node_graph_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) -> Response {
-        let desired_size = egui::vec2(ui.available_width().max(280.0), 176.0);
+    fn node_graph_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        desired_height: f32,
+    ) -> Response {
+        let desired_size = egui::vec2(ui.available_width().max(280.0), desired_height);
         let (response, painter) = ui.allocate_painter(desired_size, Sense::click_and_drag());
         let canvas_rect = response.rect;
         painter.rect_filled(canvas_rect, 4.0, ui.visuals().extreme_bg_color);
