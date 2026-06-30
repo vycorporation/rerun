@@ -1,0 +1,3 @@
+# Node outputs are richly inspectable
+
+Houdini Clone treats detailed node information as a core interaction, not a developer-only debug aid. Node outputs should expose enough metadata for users to understand node name, operator type, scale, attributes, bounds, source provenance, warnings, and processing status, because layers are graph-backed and users need Houdini-like confidence when exploring complex spatial data. Reference input operators should expose source provenance for referenced targets, including multi-source target sets, so users can inspect where records came from without forcing copied source columns.

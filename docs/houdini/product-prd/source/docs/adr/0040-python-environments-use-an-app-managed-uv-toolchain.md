@@ -1,0 +1,3 @@
+# Python environments use an app-managed uv toolchain
+
+Houdini Clone should manage project Python environments through an app-managed uv toolchain by default, because Python operators and expressions need reproducible dependency resolution without relying on a user's global Python installation. The desktop app can bundle uv or bootstrap a pinned uv binary on demand, then use a project environment manifest and lockfile to create environments, install dependencies, run Python commands, and show dependency status; advanced users can later point projects at an existing environment when reproducibility trade-offs are explicit.

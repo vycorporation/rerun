@@ -1,0 +1,3 @@
+# Viewer targets may specialize for native curve rendering
+
+Houdini Clone can use Rerun as the first viewer target while still allowing a specialized external or custom viewer target for native cubic Bezier rendering if Rerun's existing line-strip-oriented path forces excessive curve tessellation. The graph should own curve semantics and use capability negotiation to choose a viewer target, native mapping, declared prepared representation, warning-level lower-fidelity mapping, or unsupported-output status that preserves user trust and interactivity, rather than requiring every viewer to consume exploded polylines.

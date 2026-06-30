@@ -1,0 +1,3 @@
+# Cubic Bezier curves remain native geometry
+
+Houdini Clone treats cubic Bezier curves as native geometry rather than reducing them to dense polylines or linestrings in the durable graph model. Curve tessellation can be used as an adaptive prepared representation for compatibility, export, debug inspection, or rendering, but it must be declared through capability negotiation and must not become hidden graph data. The Rerun path and any external viewer path must be evaluated against native curve rendering because routinely converting 100,000 curves per layer into millions of line points would undermine the core workflow.

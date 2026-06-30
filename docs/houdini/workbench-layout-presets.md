@@ -9,6 +9,9 @@ Add Houdini-style workbench layout presets for the native Rerun product fork.
 A workbench preset is a named blueprint layout recipe for a common Houdini graph workflow.
 Loading a preset arranges existing Houdini graph views, containers, and viewport surfaces; it does not create graph data, change evaluation state, rewrite layer bindings, or hide semantics in viewer-only state.
 
+Rerun already has `.rbl` blueprint save/load machinery.
+The product feature is the Houdini-facing layout manager on top of that substrate: users can load a workbench, duplicate it, edit the layout through native Rerun blueprint tabs, save the result under a new name, and return to it later.
+
 ## Product intent
 
 The current blueprint-tab integration makes the Network, Parameters, Info, Display, Operators, Find, Layers, Data, Outputs, Project, and Houdini Graph surfaces movable inside the native Rerun viewport system.
@@ -44,6 +47,22 @@ Users may override that with personal workbench preferences without rewriting th
 
 The durable graph model remains the source of truth for nodes, parameters, geometry, layers, display/template flags, output operators, and asset boundaries.
 Workbench layout state is presentation state layered above the graph model.
+
+## Load, duplicate, edit, and save
+
+The workbench UI should expose four user-facing flows:
+
+- Load: choose a bundled, project, or personal workbench layout and apply it to the current blueprint.
+- Duplicate: copy an existing workbench layout into a personal editable layout.
+- Edit: rearrange panels through normal Rerun blueprint tabs, splits, and containers.
+- Save: persist the edited layout as a named personal or project workbench.
+
+Personal saved workbenches should not rewrite project defaults.
+Project workbenches should be explicit shared project data or checked-in product presets.
+Saving a workbench should preserve named container/view identity so reloaded layouts do not fall back to placeholder `/` titles.
+
+If possible, saved workbenches should reuse Rerun `.rbl` blueprint serialization.
+Any Houdini-specific wrapper should store only metadata needed for naming, categorization, default selection, and compatibility.
 
 ## Implementation follow-up
 
