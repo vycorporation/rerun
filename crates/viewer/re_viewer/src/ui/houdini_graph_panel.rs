@@ -53,8 +53,9 @@ pub(crate) struct HoudiniGraphPanel {
     selected_annotation: Option<usize>,
     context_menu_canvas: bool,
     active_workspace: HoudiniGraphWorkspace,
-    active_editor_pane: GraphEditorPane,
     active_graph_pane: GraphWorkbenchPane,
+    dock_tree: Option<egui_tiles::Tree<HoudiniGraphDockPane>>,
+    pending_dock_focus: Vec<HoudiniGraphDockPane>,
     dragging_node: Option<usize>,
     node_drag_peak_delta_pixels: f32,
     dragging_annotation: Option<usize>,
@@ -103,8 +104,9 @@ impl Default for HoudiniGraphPanel {
             selected_annotation: None,
             context_menu_canvas: false,
             active_workspace: HoudiniGraphWorkspace::Graph,
-            active_editor_pane: GraphEditorPane::Network,
             active_graph_pane: GraphWorkbenchPane::Parameters,
+            dock_tree: Some(default_houdini_graph_dock_tree()),
+            pending_dock_focus: Vec::new(),
             dragging_node: None,
             node_drag_peak_delta_pixels: 0.0,
             dragging_annotation: None,
@@ -178,22 +180,36 @@ impl HoudiniGraphWorkspace {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GraphEditorPane {
+enum HoudiniGraphDockPane {
     Network,
+    Inspector,
     Table,
     Output,
 }
 
-impl GraphEditorPane {
-    const ALL: [Self; 3] = [Self::Network, Self::Table, Self::Output];
+impl HoudiniGraphDockPane {
+    const ALL: [Self; 4] = [Self::Network, Self::Inspector, Self::Table, Self::Output];
 
     fn label(self) -> &'static str {
         match self {
             Self::Network => "Network",
+            Self::Inspector => "Inspector",
             Self::Table => "Table",
             Self::Output => "Output",
         }
     }
+}
+
+fn default_houdini_graph_dock_tree() -> egui_tiles::Tree<HoudiniGraphDockPane> {
+    let mut tiles = egui_tiles::Tiles::default();
+    let network = tiles.insert_pane(HoudiniGraphDockPane::Network);
+    let table = tiles.insert_pane(HoudiniGraphDockPane::Table);
+    let output = tiles.insert_pane(HoudiniGraphDockPane::Output);
+    let editor_tabs = tiles.insert_tab_tile(vec![network, table, output]);
+    let inspector = tiles.insert_pane(HoudiniGraphDockPane::Inspector);
+    let root = tiles.insert_horizontal_tile(vec![editor_tabs, inspector]);
+
+    egui_tiles::Tree::new("houdini_graph_dock_tree", root, tiles)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,6 +319,84 @@ enum GraphSearchTarget {
     Annotation(usize),
 }
 
+fn focus_houdini_graph_dock_pane(
+    dock_tree: &mut egui_tiles::Tree<HoudiniGraphDockPane>,
+    pane: HoudiniGraphDockPane,
+) {
+    if let Some(tile_id) = dock_tree.tiles.find_pane(&pane) {
+        dock_tree.make_active(|candidate, _| candidate == tile_id);
+    }
+}
+
+struct HoudiniGraphDockBehavior<'a> {
+    panel: &'a mut HoudiniGraphPanel,
+    graph: &'a mut GraphDocument,
+}
+
+impl egui_tiles::Behavior<HoudiniGraphDockPane> for HoudiniGraphDockBehavior<'_> {
+    fn pane_ui(
+        &mut self,
+        ui: &mut Ui,
+        _tile_id: egui_tiles::TileId,
+        pane: &mut HoudiniGraphDockPane,
+    ) -> egui_tiles::UiResponse {
+        match *pane {
+            HoudiniGraphDockPane::Network => {
+                self.panel.network_editor_toolbar_ui(ui, self.graph);
+                ui.add_space(4.0);
+                self.panel
+                    .node_graph_ui(ui, self.graph, (ui.available_height() - 4.0).max(300.0));
+            }
+            HoudiniGraphDockPane::Inspector => {
+                self.panel.graph_workbench_pane_tabs_ui(ui);
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt("houdini_graph_dock_inspector_scroll")
+                    .auto_shrink([false, false])
+                    .max_height(ui.available_height().max(240.0))
+                    .show(ui, |ui| {
+                        self.panel.graph_workbench_side_strip_ui(ui, self.graph);
+                    });
+            }
+            HoudiniGraphDockPane::Table => {
+                egui::ScrollArea::vertical()
+                    .id_salt("houdini_graph_dock_table_scroll")
+                    .auto_shrink([false, false])
+                    .max_height(ui.available_height().max(240.0))
+                    .show(ui, |ui| {
+                        self.panel.attribute_table_ui(ui, self.graph);
+                        ui.add_space(8.0);
+                        self.panel.source_summary_ui(ui, self.graph);
+                    });
+            }
+            HoudiniGraphDockPane::Output => {
+                egui::ScrollArea::vertical()
+                    .id_salt("houdini_graph_dock_output_scroll")
+                    .auto_shrink([false, false])
+                    .max_height(ui.available_height().max(240.0))
+                    .show(ui, |ui| {
+                        self.panel.output_summary_ui(ui, self.graph);
+                        ui.add_space(8.0);
+                        self.panel.recording_export_ui(ui, self.graph);
+                    });
+            }
+        }
+
+        egui_tiles::UiResponse::None
+    }
+
+    fn tab_title_for_pane(&mut self, pane: &HoudiniGraphDockPane) -> egui::WidgetText {
+        pane.label().into()
+    }
+
+    fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
+        egui_tiles::SimplificationOptions {
+            all_panes_must_have_tabs: true,
+            ..Default::default()
+        }
+    }
+}
+
 impl HoudiniGraphPanel {
     pub(crate) fn show(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
         install_shared_houdini_graph(ui.ctx(), shared_graph);
@@ -343,130 +437,59 @@ impl HoudiniGraphPanel {
     fn graph_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         let available_width = ui.available_width();
         let available_height = ui.available_height();
-        let pane_height = if available_height.is_finite() && available_height > 0.0 {
-            available_height.clamp(380.0, 720.0)
+        let dock_height = if available_height.is_finite() && available_height > 0.0 {
+            available_height.max(420.0)
         } else {
-            520.0
+            620.0
         };
-        let wide_workbench = available_width >= 680.0;
 
-        if wide_workbench {
-            let side_width = (available_width * 0.30).clamp(260.0, 360.0);
-            let canvas_width = (available_width - side_width - 14.0).max(360.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(available_width, dock_height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                let mut dock_tree = self
+                    .dock_tree
+                    .take()
+                    .unwrap_or_else(default_houdini_graph_dock_tree);
+                self.apply_pending_dock_focus(&mut dock_tree);
 
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(canvas_width, pane_height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_min_size(egui::vec2(canvas_width, pane_height));
-                        self.graph_editor_panel_ui(ui, graph, pane_height);
-                    },
-                );
+                {
+                    let mut behavior = HoudiniGraphDockBehavior { panel: self, graph };
+                    dock_tree.ui(&mut behavior, ui);
+                }
 
-                ui.separator();
-
-                ui.allocate_ui_with_layout(
-                    egui::vec2(side_width, pane_height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_min_size(egui::vec2(side_width, pane_height));
-                        self.graph_inspector_panel_ui(ui, graph, pane_height);
-                    },
-                );
-            });
-        } else {
-            self.graph_editor_panel_ui(ui, graph, 420.0);
-
-            ui.add_space(8.0);
-            self.graph_inspector_panel_ui(ui, graph, 380.0);
-        }
-    }
-
-    fn graph_editor_panel_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument, panel_height: f32) {
-        Self::panel_tabs_ui(
-            ui,
-            "Editor",
-            GraphEditorPane::ALL,
-            self.active_editor_pane,
-            |pane| pane.label(),
-            |pane| self.active_editor_pane = pane,
+                self.apply_pending_dock_focus(&mut dock_tree);
+                self.dock_tree = Some(dock_tree);
+            },
         );
-        ui.separator();
-
-        match self.active_editor_pane {
-            GraphEditorPane::Network => {
-                self.network_editor_toolbar_ui(ui, graph);
-                ui.add_space(4.0);
-                self.node_graph_ui(ui, graph, (panel_height - 62.0).max(300.0));
-            }
-            GraphEditorPane::Table => {
-                egui::ScrollArea::vertical()
-                    .id_salt("houdini_graph_editor_table_scroll")
-                    .auto_shrink([false, false])
-                    .max_height((panel_height - 34.0).max(240.0))
-                    .show(ui, |ui| {
-                        self.attribute_table_ui(ui, graph);
-                        ui.add_space(8.0);
-                        self.source_summary_ui(ui, graph);
-                    });
-            }
-            GraphEditorPane::Output => {
-                egui::ScrollArea::vertical()
-                    .id_salt("houdini_graph_editor_output_scroll")
-                    .auto_shrink([false, false])
-                    .max_height((panel_height - 34.0).max(240.0))
-                    .show(ui, |ui| {
-                        self.output_summary_ui(ui, graph);
-                        ui.add_space(8.0);
-                        self.recording_export_ui(ui, graph);
-                    });
-            }
-        }
     }
 
-    fn graph_inspector_panel_ui(
-        &mut self,
-        ui: &mut Ui,
-        graph: &mut GraphDocument,
-        panel_height: f32,
-    ) {
-        Self::panel_tabs_ui(
-            ui,
-            "Inspector",
-            GraphWorkbenchPane::ALL,
-            self.active_graph_pane,
-            |pane| pane.label(),
-            |pane| self.active_graph_pane = pane,
-        );
-        ui.separator();
-
-        egui::ScrollArea::vertical()
-            .id_salt("houdini_graph_inspector_panel_scroll")
-            .auto_shrink([false, false])
-            .max_height((panel_height - 34.0).max(240.0))
-            .show(ui, |ui| {
-                self.graph_workbench_side_strip_ui(ui, graph);
-            });
-    }
-
-    fn panel_tabs_ui<T: Copy + PartialEq>(
-        ui: &mut Ui,
-        title: &'static str,
-        panes: impl IntoIterator<Item = T>,
-        active: T,
-        label: impl Fn(T) -> &'static str,
-        mut select: impl FnMut(T),
-    ) {
+    fn graph_workbench_pane_tabs_ui(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.strong(title);
-            ui.separator();
-            for pane in panes {
-                if ui.selectable_label(active == pane, label(pane)).clicked() {
-                    select(pane);
+            for pane in GraphWorkbenchPane::ALL {
+                if ui
+                    .selectable_label(self.active_graph_pane == pane, pane.label())
+                    .clicked()
+                {
+                    self.active_graph_pane = pane;
                 }
             }
         });
+    }
+
+    fn request_dock_pane_focus(&mut self, pane: HoudiniGraphDockPane) {
+        self.pending_dock_focus.push(pane);
+    }
+
+    fn show_graph_workbench_pane(&mut self, pane: GraphWorkbenchPane) {
+        self.active_graph_pane = pane;
+        self.request_dock_pane_focus(HoudiniGraphDockPane::Inspector);
+    }
+
+    fn apply_pending_dock_focus(&mut self, dock_tree: &mut egui_tiles::Tree<HoudiniGraphDockPane>) {
+        for pane in self.pending_dock_focus.drain(..) {
+            focus_houdini_graph_dock_pane(dock_tree, pane);
+        }
     }
 
     fn network_editor_toolbar_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -502,54 +525,51 @@ impl HoudiniGraphPanel {
 
             ui.menu_button("Edit", |ui| {
                 if ui.button("Parameters").clicked() {
-                    self.active_graph_pane = GraphWorkbenchPane::Parameters;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
                     ui.close();
                 }
                 if ui.button("Node Information").clicked() {
                     self.node_info_open = true;
-                    self.active_graph_pane = GraphWorkbenchPane::Info;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
                     ui.close();
                 }
                 if ui.button("Pin Node Information").clicked() {
                     self.node_info_open = true;
                     self.node_info_pinned = true;
-                    self.active_graph_pane = GraphWorkbenchPane::Info;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
                     ui.close();
                 }
                 if ui.button("Edit Comment").clicked() {
                     self.node_info_open = true;
-                    self.active_graph_pane = GraphWorkbenchPane::Info;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
                     ui.close();
                 }
             });
 
             ui.menu_button("Go", |ui| {
                 if ui.button("Home Network    H").clicked() {
-                    self.active_editor_pane = GraphEditorPane::Network;
+                    self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
                     self.reset_graph_view();
                     ui.close();
                 }
                 if ui.button("Frame Selected    F").clicked() {
-                    self.active_editor_pane = GraphEditorPane::Network;
+                    self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
                     self.pending_frame_selected = true;
                     ui.close();
                 }
             });
 
             ui.menu_button("View", |ui| {
-                ui.weak("Editor");
-                for pane in GraphEditorPane::ALL {
-                    if ui
-                        .selectable_label(self.active_editor_pane == pane, pane.label())
-                        .clicked()
-                    {
-                        self.active_editor_pane = pane;
+                ui.weak("Dock panes");
+                for pane in HoudiniGraphDockPane::ALL {
+                    if ui.button(pane.label()).clicked() {
+                        self.request_dock_pane_focus(pane);
                         ui.close();
                     }
                 }
                 ui.separator();
                 if ui.button("Display Options").clicked() {
-                    self.active_graph_pane = GraphWorkbenchPane::Display;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Display);
                     toggle_network_display_options(ui);
                     ui.close();
                 }
@@ -571,28 +591,28 @@ impl HoudiniGraphPanel {
 
             ui.menu_button("Tools", |ui| {
                 if ui.button("Operators").clicked() {
-                    self.active_graph_pane = GraphWorkbenchPane::Operators;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Operators);
                     ui.close();
                 }
                 if ui.button("Find").clicked() {
-                    self.active_graph_pane = GraphWorkbenchPane::Find;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Find);
                     ui.close();
                 }
                 if ui.button("Parameters").clicked() {
-                    self.active_graph_pane = GraphWorkbenchPane::Parameters;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
                     ui.close();
                 }
                 if ui.button("Node Info").clicked() {
                     self.node_info_open = true;
-                    self.active_graph_pane = GraphWorkbenchPane::Info;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
                     ui.close();
                 }
                 if ui.button("Display").clicked() {
-                    self.active_graph_pane = GraphWorkbenchPane::Display;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Display);
                     ui.close();
                 }
                 if ui.button("Layers").clicked() {
-                    self.active_graph_pane = GraphWorkbenchPane::Layers;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Layers);
                     ui.close();
                 }
                 ui.separator();
@@ -775,8 +795,8 @@ impl HoudiniGraphPanel {
         self.tab_menu_anchor = anchor + egui::vec2(6.0, 6.0);
         self.tab_menu_filter_needs_focus = true;
         self.tab_menu_selection_index = 0;
-        self.active_editor_pane = GraphEditorPane::Network;
-        self.active_graph_pane = GraphWorkbenchPane::Operators;
+        self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
+        self.show_graph_workbench_pane(GraphWorkbenchPane::Operators);
     }
 
     fn operator_menu_action_ui(
@@ -958,17 +978,17 @@ impl HoudiniGraphPanel {
         let applied = match action {
             OperatorPaletteAction::AddOutNull => {
                 self.selected_node = graph.add_null_operator_node("OUT_MAIN");
-                self.active_editor_pane = GraphEditorPane::Network;
+                self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
                 self.node_info_open = true;
-                self.active_graph_pane = GraphWorkbenchPane::Parameters;
+                self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
                 true
             }
             OperatorPaletteAction::AddReference => {
                 if let Some(index) = graph.add_reference_input_node(self.selected_node) {
                     self.selected_node = index;
-                    self.active_editor_pane = GraphEditorPane::Network;
+                    self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
                     self.node_info_open = true;
-                    self.active_graph_pane = GraphWorkbenchPane::Parameters;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
                     true
                 } else {
                     false
@@ -981,9 +1001,9 @@ impl HoudiniGraphPanel {
                     )
                 {
                     self.selected_node = index;
-                    self.active_editor_pane = GraphEditorPane::Network;
+                    self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
                     self.node_info_open = true;
-                    self.active_graph_pane = GraphWorkbenchPane::Parameters;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
                     true
                 } else {
                     false
@@ -991,14 +1011,14 @@ impl HoudiniGraphPanel {
             }
             OperatorPaletteAction::AddNetworkBox => {
                 self.selected_annotation = graph.add_network_box_for_node(self.selected_node);
-                self.active_editor_pane = GraphEditorPane::Network;
-                self.active_graph_pane = GraphWorkbenchPane::Operators;
+                self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
+                self.show_graph_workbench_pane(GraphWorkbenchPane::Operators);
                 true
             }
             OperatorPaletteAction::AddStickyNote => {
                 self.selected_annotation = graph.add_sticky_note_near_node(self.selected_node);
-                self.active_editor_pane = GraphEditorPane::Network;
-                self.active_graph_pane = GraphWorkbenchPane::Operators;
+                self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
+                self.show_graph_workbench_pane(GraphWorkbenchPane::Operators);
                 true
             }
             OperatorPaletteAction::DuplicatePolygons => {
@@ -2520,14 +2540,14 @@ impl HoudiniGraphPanel {
                 self.node_info_open = true;
                 self.pending_frame_selected = true;
                 self.active_workspace = HoudiniGraphWorkspace::Graph;
-                self.active_editor_pane = GraphEditorPane::Network;
+                self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
             }
             GraphSearchTarget::Annotation(index) => {
                 self.selected_annotation = Some(index);
                 self.context_menu_canvas = false;
                 self.pending_frame_selected = true;
                 self.active_workspace = HoudiniGraphWorkspace::Graph;
-                self.active_editor_pane = GraphEditorPane::Network;
+                self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
                 self.active_graph_pane = GraphWorkbenchPane::Find;
             }
         }
@@ -2735,17 +2755,17 @@ impl HoudiniGraphPanel {
                 self.open_operator_chooser_at(pointer_anchor);
             }
             if home_pressed {
-                self.active_editor_pane = GraphEditorPane::Network;
+                self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
                 self.reset_graph_view();
                 layout_changed = true;
             }
             if frame_selected_pressed {
-                self.active_editor_pane = GraphEditorPane::Network;
+                self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
                 layout_changed |= self.frame_selected_item_in_rect(graph, layout_rect, node_size);
             }
             if find_pressed {
                 self.active_workspace = HoudiniGraphWorkspace::Graph;
-                self.active_editor_pane = GraphEditorPane::Network;
+                self.request_dock_pane_focus(HoudiniGraphDockPane::Network);
                 self.active_graph_pane = GraphWorkbenchPane::Find;
             }
             if add_network_box_pressed {
