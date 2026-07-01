@@ -3873,6 +3873,7 @@ impl GraphDocument {
                 help: "Output graph geometry preserving native cubic Beziers.".to_owned(),
             }],
             promoted_parameters: self.promotable_asset_parameters(),
+            external_artifacts: Vec::new(),
             graph_snapshot: ProceduralAssetGraphSnapshot {
                 node_count: self.nodes.len(),
                 edge_count: self.graph_layout().edges.len(),
@@ -5580,6 +5581,17 @@ impl GraphDocument {
                     OperatorVersionStatus::Current => Vec::new(),
                     _ => vec![format!("Asset version status: {}", version_status.as_str())],
                 };
+                let external_artifact_warnings = declaration
+                    .map(|declaration| {
+                        declaration
+                            .external_artifacts
+                            .iter()
+                            .filter_map(ProceduralAssetArtifactReference::warning)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let mut warnings = warnings;
+                warnings.extend(external_artifact_warnings.clone());
                 NodeInfo {
                     kind: node.kind,
                     role: node.kind.role(),
@@ -5645,6 +5657,7 @@ impl GraphDocument {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        external_artifact_warnings,
                         input_bindings: asset_node.input_bindings.clone(),
                         output_summary: asset_node.output_summary.clone(),
                         version_status,
@@ -8589,6 +8602,8 @@ pub(crate) struct ProceduralAssetDeclaration {
     pub inputs: Vec<HoudiniOperatorPort>,
     pub outputs: Vec<HoudiniOperatorPort>,
     pub promoted_parameters: Vec<HoudiniParameterDeclaration>,
+    #[serde(default)]
+    pub external_artifacts: Vec<ProceduralAssetArtifactReference>,
     pub wrapped_subgraph: ProceduralAssetSubgraphReference,
 }
 
@@ -8598,6 +8613,65 @@ pub(crate) struct ProceduralAssetSource {
     pub author: Option<String>,
     pub created_at: Option<String>,
     pub source_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ProceduralAssetArtifactReference {
+    pub role: ProceduralAssetArtifactRole,
+    pub locator: String,
+    pub source_node_id: Option<String>,
+    pub source_node_name: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub content_hash: Option<String>,
+    pub status: ProceduralAssetArtifactStatus,
+}
+
+impl ProceduralAssetArtifactReference {
+    fn warning(&self) -> Option<String> {
+        match self.status {
+            ProceduralAssetArtifactStatus::Referenced => Some(format!(
+                "{} artifact `{}` remains an external reference.",
+                self.role.as_str(),
+                self.locator
+            )),
+            ProceduralAssetArtifactStatus::Missing => Some(format!(
+                "{} artifact `{}` is missing and must be restored or rebound.",
+                self.role.as_str(),
+                self.locator
+            )),
+            ProceduralAssetArtifactStatus::Bundled => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum ProceduralAssetArtifactRole {
+    Dataset,
+    ModelWeights,
+    PythonEnvironment,
+    Recording,
+    AnalysisFile,
+    Other,
+}
+
+impl ProceduralAssetArtifactRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dataset => "Dataset",
+            Self::ModelWeights => "Model weights",
+            Self::PythonEnvironment => "Python environment",
+            Self::Recording => "Recording",
+            Self::AnalysisFile => "Analysis file",
+            Self::Other => "External",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum ProceduralAssetArtifactStatus {
+    Referenced,
+    Missing,
+    Bundled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -8625,6 +8699,7 @@ pub(crate) struct CreateAssetDraft {
     pub inputs: Vec<HoudiniOperatorPort>,
     pub outputs: Vec<HoudiniOperatorPort>,
     pub promoted_parameters: Vec<HoudiniParameterDeclaration>,
+    pub external_artifacts: Vec<ProceduralAssetArtifactReference>,
     pub graph_snapshot: ProceduralAssetGraphSnapshot,
 }
 
@@ -8649,6 +8724,7 @@ impl CreateAssetDraft {
             inputs: self.inputs,
             outputs: self.outputs,
             promoted_parameters: self.promoted_parameters,
+            external_artifacts: self.external_artifacts,
             wrapped_subgraph: ProceduralAssetSubgraphReference {
                 graph_id: format!("{}.graph", self.asset_id),
                 output_node_id: "output.main".to_owned(),
@@ -10460,6 +10536,8 @@ pub(crate) struct ProceduralAssetNodeInfo {
     pub description: String,
     pub labels: Vec<String>,
     pub promoted_parameters: Vec<String>,
+    #[allow(dead_code)]
+    pub external_artifact_warnings: Vec<String>,
     pub input_bindings: Vec<HoudiniNodeBinding>,
     pub output_summary: Option<String>,
     pub version_status: OperatorVersionStatus,
@@ -11248,7 +11326,8 @@ mod tests {
         NetworkBadgeVisibility, NetworkCommentDisplayMode, NetworkNodeRingVisibility,
         NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind, NodeStatus,
         OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode,
-        OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
+        OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetArtifactReference,
+        ProceduralAssetArtifactRole, ProceduralAssetArtifactStatus, ProceduralAssetDeclaration,
         ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
         ProjectCommand, ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole,
         PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
@@ -17831,7 +17910,94 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.node_count == 4)
         );
+        assert!(declaration.external_artifacts.is_empty());
         assert!(!graph.to_sidecar_json().unwrap().contains("cached_output"));
+    }
+
+    #[test]
+    fn procedural_asset_external_artifacts_round_trip_and_warn() {
+        let mut graph = GraphDocument::sample();
+        let mut declaration = sample_procedural_asset_declaration();
+        declaration
+            .external_artifacts
+            .push(ProceduralAssetArtifactReference {
+                role: ProceduralAssetArtifactRole::Dataset,
+                locator: "data/training/curves.parquet".to_owned(),
+                source_node_id: Some("source.main".to_owned()),
+                source_node_name: Some("Source".to_owned()),
+                size_bytes: Some(42_000_000),
+                content_hash: Some("sha256:curves".to_owned()),
+                status: ProceduralAssetArtifactStatus::Referenced,
+            });
+        declaration
+            .external_artifacts
+            .push(ProceduralAssetArtifactReference {
+                role: ProceduralAssetArtifactRole::ModelWeights,
+                locator: "models/cleanup.safetensors".to_owned(),
+                source_node_id: None,
+                source_node_name: None,
+                size_bytes: None,
+                content_hash: None,
+                status: ProceduralAssetArtifactStatus::Missing,
+            });
+        declaration
+            .external_artifacts
+            .push(ProceduralAssetArtifactReference {
+                role: ProceduralAssetArtifactRole::Recording,
+                locator: "bundles/previews/cleanup.rrd".to_owned(),
+                source_node_id: None,
+                source_node_name: None,
+                size_bytes: Some(4096),
+                content_hash: Some("sha256:preview".to_owned()),
+                status: ProceduralAssetArtifactStatus::Bundled,
+            });
+        graph.procedural_asset_declarations.push(declaration);
+        let node_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("asset info should exist");
+        let asset = info.procedural_asset.expect("asset node info should exist");
+
+        assert_eq!(asset.external_artifact_warnings.len(), 2);
+        assert!(asset.external_artifact_warnings[0].contains("external reference"));
+        assert!(asset.external_artifact_warnings[1].contains("missing"));
+        assert_eq!(info.warnings.len(), 2);
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert!(json.contains("external_artifacts"));
+        assert_eq!(
+            restored.procedural_asset_declarations[0].external_artifacts,
+            graph.procedural_asset_declarations[0].external_artifacts
+        );
+    }
+
+    #[test]
+    fn legacy_asset_declaration_without_external_artifacts_loads_empty() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        let mut value =
+            serde_json::from_str::<serde_json::Value>(&graph.to_sidecar_json().unwrap())
+                .expect("sidecar should be valid json");
+        value["procedural_asset_declarations"][0]
+            .as_object_mut()
+            .expect("asset declaration should be an object")
+            .remove("external_artifacts");
+        let json = serde_json::to_string_pretty(&value).unwrap();
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert!(
+            restored.procedural_asset_declarations[0]
+                .external_artifacts
+                .is_empty()
+        );
     }
 
     #[test]
@@ -18570,6 +18736,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                     help: "Output layer label.".to_owned(),
                 },
             ],
+            external_artifacts: Vec::new(),
             wrapped_subgraph: ProceduralAssetSubgraphReference {
                 graph_id: "graph.curve_cleanup".to_owned(),
                 output_node_id: "output.main".to_owned(),
