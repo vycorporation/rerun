@@ -1355,6 +1355,34 @@ impl GraphDocument {
                     true
                 }
             },
+            ProjectCommand::NodeDelete {
+                deleted_node,
+                remove_index,
+            } => match direction {
+                ProjectCommandDirection::Undo => {
+                    if self
+                        .nodes
+                        .iter()
+                        .any(|node| node.node_id == deleted_node.node_id)
+                    {
+                        return false;
+                    }
+                    let insert_index = (*remove_index).min(self.nodes.len());
+                    self.nodes.insert(insert_index, (**deleted_node).clone());
+                    true
+                }
+                ProjectCommandDirection::Redo => {
+                    let Some(node_index) = self
+                        .nodes
+                        .iter()
+                        .position(|node| node.node_id == deleted_node.node_id)
+                    else {
+                        return false;
+                    };
+                    self.nodes.remove(node_index);
+                    true
+                }
+            },
             ProjectCommand::NodeParameterEdit {
                 node_id,
                 old_value,
@@ -2408,7 +2436,12 @@ impl GraphDocument {
         if self.nodes.get(index)?.kind == NodeKind::Output {
             return None;
         }
-        Some(self.nodes.remove(index))
+        let deleted_node = self.nodes.remove(index);
+        self.record_project_command(ProjectCommand::NodeDelete {
+            deleted_node: Box::new(deleted_node.clone()),
+            remove_index: index,
+        });
+        Some(deleted_node)
     }
 
     pub fn mark_reference_inputs_stale_for_target_index(&mut self, target_index: usize) {
@@ -7361,6 +7394,10 @@ pub(crate) enum ProjectCommand {
         duplicated_node: Box<GraphNode>,
         insert_index: usize,
     },
+    NodeDelete {
+        deleted_node: Box<GraphNode>,
+        remove_index: usize,
+    },
     NodeParameterEdit {
         node_id: String,
         node_name: String,
@@ -7466,6 +7503,9 @@ impl ProjectCommand {
             } => {
                 let _ = source_node_id;
                 format!("Duplicate {source_node_name}")
+            }
+            Self::NodeDelete { deleted_node, .. } => {
+                format!("Delete {}", deleted_node.name)
             }
             Self::NodeParameterEdit {
                 node_name,
@@ -10483,6 +10523,74 @@ mod tests {
                 .iter()
                 .any(|node| node.kind == NodeKind::Null && node.name == "OUT_GEO")
         );
+    }
+
+    #[test]
+    fn node_delete_records_undoable_project_command_and_preserves_reference_identity() {
+        let mut graph = GraphDocument::sample();
+        let null_index = graph.add_null_operator_node("OUT_DELETE");
+        let reference_index = graph
+            .add_reference_input_node(null_index)
+            .expect("null output should be a compatible reference target");
+        let target = graph.nodes[reference_index]
+            .reference_input
+            .as_ref()
+            .expect("reference input should exist")
+            .targets
+            .first()
+            .expect("reference input should have a target")
+            .target
+            .clone();
+        let deleted_node_id = graph.nodes[null_index].node_id.clone();
+        let original_node_count = graph.nodes.len();
+
+        let deleted_node = graph
+            .remove_node(null_index)
+            .expect("ordinary null node should be removable");
+
+        assert_eq!(deleted_node.node_id, deleted_node_id);
+        assert_eq!(graph.nodes.len(), original_node_count - 1);
+        assert_eq!(
+            graph.resolve_reference_target(&target).status,
+            ReferenceDiagnosticStatus::MissingNode
+        );
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodeDelete {
+                deleted_node,
+                remove_index,
+            }) if deleted_node.node_id == deleted_node_id && *remove_index == null_index
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Delete OUT_DELETE")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes.len(), original_node_count);
+        assert_eq!(graph.nodes[null_index].node_id, deleted_node_id);
+        assert_eq!(
+            graph.resolve_reference_target(&target).status,
+            ReferenceDiagnosticStatus::Resolved
+        );
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Delete OUT_DELETE")
+        );
+
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.nodes.len(), original_node_count - 1);
+        assert_eq!(
+            graph.resolve_reference_target(&target).status,
+            ReferenceDiagnosticStatus::MissingNode
+        );
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .expect("sample graph should include output node");
+        assert!(graph.remove_node(output_index).is_none());
+        assert!(graph.remove_node(graph.nodes.len()).is_none());
     }
 
     #[test]
