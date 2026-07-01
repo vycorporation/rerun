@@ -562,7 +562,11 @@ impl AppState {
                     .frame(viewport_frame)
                     .show_inside(ui, |ui| {
                         houdini_workbench_toolbar_ui(ui, &ctx, &viewport_ui.blueprint);
-                        viewport_ui.viewport_ui(ui, &ctx, view_states);
+
+                        let viewport_rect = ui.available_rect_before_wrap();
+                        let mut viewport_child =
+                            ui.new_child(egui::UiBuilder::new().max_rect(viewport_rect));
+                        viewport_ui.viewport_ui(&mut viewport_child, &ctx, view_states);
                     });
 
                 add_view_or_container_modal_ui(&ctx, &viewport_ui.blueprint, ui);
