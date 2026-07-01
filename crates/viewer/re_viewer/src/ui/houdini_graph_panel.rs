@@ -85,6 +85,7 @@ pub(crate) struct HoudiniGraphPanel {
     context_menu_canvas: bool,
     active_graph_pane: GraphWorkbenchPane,
     dragging_node: Option<usize>,
+    node_drag_start_position: Option<GraphPoint>,
     node_drag_peak_delta_pixels: f32,
     dragging_annotation: Option<usize>,
     resizing_annotation: Option<usize>,
@@ -134,6 +135,7 @@ impl Default for HoudiniGraphPanel {
             context_menu_canvas: false,
             active_graph_pane: GraphWorkbenchPane::Parameters,
             dragging_node: None,
+            node_drag_start_position: None,
             node_drag_peak_delta_pixels: 0.0,
             dragging_annotation: None,
             resizing_annotation: None,
@@ -3114,6 +3116,8 @@ impl HoudiniGraphPanel {
                         self.selected_annotation = None;
                         self.node_info_open = true;
                         self.dragging_node = Some(index);
+                        self.node_drag_start_position =
+                            graph.nodes.get(index).map(|node| node.layout_position);
                         self.node_drag_peak_delta_pixels = 0.0;
                         hit_node = true;
                         break;
@@ -3228,8 +3232,12 @@ impl HoudiniGraphPanel {
                     dragging_node,
                     self.node_drag_peak_delta_pixels >= NETWORK_BOX_FAST_DRAG_PEAK_DELTA_PIXELS,
                 );
+                if let Some(start_position) = self.node_drag_start_position {
+                    graph.finish_node_layout_drag(dragging_node, start_position);
+                }
             }
             self.dragging_node = None;
+            self.node_drag_start_position = None;
             self.node_drag_peak_delta_pixels = 0.0;
             self.dragging_annotation = None;
             self.resizing_annotation = None;
