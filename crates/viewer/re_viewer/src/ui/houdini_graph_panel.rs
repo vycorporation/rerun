@@ -1942,6 +1942,8 @@ impl HoudiniGraphPanel {
             return;
         }
 
+        self.graph_workbench_graph_diagnostics_ui(ui, graph);
+
         let Some(info) = graph.selected_node_info(self.selected_node) else {
             ui.weak("Select a node to inspect graph-owned metadata.");
             return;
@@ -2009,6 +2011,37 @@ impl HoudiniGraphPanel {
                 .show(ui, |ui| {
                     self.node_info_ui(ui, graph);
                 });
+        }
+    }
+
+    fn graph_workbench_graph_diagnostics_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
+        let diagnostics = graph.current_graph_data_flow_edge_diagnostics();
+        if diagnostics.is_empty() {
+            ui.weak(format!(
+                "Graph diagnostics none in {}",
+                graph.current_graph_path()
+            ));
+            return;
+        }
+
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "Graph diagnostics {} in {}",
+                diagnostics.len(),
+                graph.current_graph_path()
+            ),
+        );
+        for diagnostic in diagnostics {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "Connection {}: {}",
+                    diagnostic.status.as_str(),
+                    diagnostic.readable_path
+                ),
+            )
+            .on_hover_text(&diagnostic.message);
         }
     }
 

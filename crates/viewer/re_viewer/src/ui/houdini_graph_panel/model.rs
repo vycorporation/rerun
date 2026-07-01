@@ -607,6 +607,35 @@ impl GraphDocument {
     }
 
     #[allow(dead_code)]
+    pub fn current_graph_data_flow_edge_diagnostics(&self) -> Vec<GraphDataFlowEdgeDiagnostic> {
+        self.graph_data_flow_edge_diagnostics(self.current_graph_id())
+    }
+
+    #[allow(dead_code)]
+    pub fn graph_data_flow_edge_diagnostics(
+        &self,
+        graph_id: &str,
+    ) -> Vec<GraphDataFlowEdgeDiagnostic> {
+        let graph_id = if graph_id.is_empty() {
+            MAIN_GRAPH_ID
+        } else {
+            graph_id
+        };
+        self.data_flow_edges
+            .iter()
+            .filter(|edge| self.data_flow_edge_touches_graph(edge, graph_id))
+            .filter_map(|edge| self.data_flow_edge_diagnostic(edge))
+            .collect()
+    }
+
+    fn data_flow_edge_touches_graph(&self, edge: &GraphDataFlowEdge, graph_id: &str) -> bool {
+        [edge.from_node_id.as_str(), edge.to_node_id.as_str()]
+            .into_iter()
+            .filter_map(|node_id| self.nodes.iter().find(|node| node.node_id == node_id))
+            .any(|node| self.node_parent_graph_id(node) == graph_id)
+    }
+
+    #[allow(dead_code)]
     fn data_flow_edge_addition_diagnostic(
         &self,
         edge: &GraphDataFlowEdge,
@@ -15574,6 +15603,66 @@ mod tests {
                 .data_flow_edges
                 .iter()
                 .any(|edge| edge.edge_id == "loaded_cycle")
+        );
+    }
+
+    #[test]
+    fn graph_data_flow_edge_diagnostics_scope_to_selected_graph() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry.graphs.push(ProjectGraphMetadata {
+            graph_id: "analysis".to_owned(),
+            name: "Analysis".to_owned(),
+            path: "/obj/analysis".to_owned(),
+            role: ProjectGraphRole::Subgraph,
+        });
+        graph
+            .select_graph_by_id("analysis")
+            .expect("analysis graph should be selectable");
+        let analysis_source_index = graph.add_null_operator_node("OUT_A");
+        let analysis_target_index = graph.add_null_operator_node("OUT_B");
+        graph.data_flow_edges.push(GraphDataFlowEdge {
+            edge_id: "analysis_missing_source".to_owned(),
+            from_node_id: "missing.analysis_source".to_owned(),
+            from_output: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            to_node_id: graph.nodes[analysis_target_index].node_id.clone(),
+            to_input: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+        });
+        graph.data_flow_edges.push(GraphDataFlowEdge {
+            edge_id: "analysis_missing_target".to_owned(),
+            from_node_id: graph.nodes[analysis_source_index].node_id.clone(),
+            from_output: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            to_node_id: "missing.analysis_target".to_owned(),
+            to_input: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+        });
+        graph.data_flow_edges.push(GraphDataFlowEdge {
+            edge_id: "main_loaded_cycle".to_owned(),
+            from_node_id: graph.nodes[2].node_id.clone(),
+            from_output: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            to_node_id: graph.nodes[0].node_id.clone(),
+            to_input: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+        });
+
+        let selected_graph_diagnostics = graph.current_graph_data_flow_edge_diagnostics();
+
+        assert!(selected_graph_diagnostics.iter().any(|diagnostic| {
+            diagnostic.edge_id == "analysis_missing_source"
+                && diagnostic.status == GraphDataFlowEdgeDiagnosticStatus::MissingSourceNode
+        }));
+        assert!(selected_graph_diagnostics.iter().any(|diagnostic| {
+            diagnostic.edge_id == "analysis_missing_target"
+                && diagnostic.status == GraphDataFlowEdgeDiagnosticStatus::MissingTargetNode
+        }));
+        assert!(
+            selected_graph_diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.edge_id != "main_loaded_cycle")
+        );
+        assert!(
+            graph
+                .data_flow_edge_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.edge_id == "main_loaded_cycle"
+                    && diagnostic.status == GraphDataFlowEdgeDiagnosticStatus::Cycle)
         );
     }
 
