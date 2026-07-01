@@ -197,6 +197,7 @@ live_camera_edge_detection = { workspace = true }
 live_scrolling_plot = { workspace = true }
 llm_embedding_ner = { workspace = true }
 log_file = { workspace = true }
+malware_byteplot = { workspace = true }
 minimal = { workspace = true }
 minimal_options = { workspace = true }
 multiprocess_logging = { workspace = true }
@@ -255,6 +256,7 @@ members = [
   "examples/python/live_scrolling_plot",
   "examples/python/llm_embedding_ner",
   "examples/python/log_file",
+  "examples/python/malware_byteplot",
   "examples/python/minimal",
   "examples/python/minimal_options",
   "examples/python/multiprocess_logging",
