@@ -1140,6 +1140,36 @@ impl GraphDocument {
                 self.mark_node_stale(node_index);
                 true
             }
+            ProjectCommand::NodeOutputParticipationEdit {
+                node_id,
+                old_participates,
+                new_participates,
+                ..
+            } => {
+                let Some(node) = self.nodes.iter_mut().find(|node| node.node_id == *node_id) else {
+                    return false;
+                };
+                node.participates_in_output = match direction {
+                    ProjectCommandDirection::Undo => *old_participates,
+                    ProjectCommandDirection::Redo => *new_participates,
+                };
+                true
+            }
+            ProjectCommand::NodeCommentVisibilityEdit {
+                node_id,
+                old_show_comment,
+                new_show_comment,
+                ..
+            } => {
+                let Some(node) = self.nodes.iter_mut().find(|node| node.node_id == *node_id) else {
+                    return false;
+                };
+                node.show_comment_in_network = match direction {
+                    ProjectCommandDirection::Undo => *old_show_comment,
+                    ProjectCommandDirection::Redo => *new_show_comment,
+                };
+                true
+            }
             ProjectCommand::LayerVisibilityEdit {
                 layer_index,
                 old_visible,
@@ -1339,6 +1369,64 @@ impl GraphDocument {
         } else {
             None
         }
+    }
+
+    pub fn set_node_output_participation(&mut self, node_index: usize, participates: bool) -> bool {
+        let Some(command) =
+            self.set_node_output_participation_without_history(node_index, participates)
+        else {
+            return false;
+        };
+        self.record_project_command(command);
+        true
+    }
+
+    fn set_node_output_participation_without_history(
+        &mut self,
+        node_index: usize,
+        participates: bool,
+    ) -> Option<ProjectCommand> {
+        let node = self.nodes.get_mut(node_index)?;
+        if node.participates_in_output == participates {
+            return None;
+        }
+        let old_participates = node.participates_in_output;
+        node.participates_in_output = participates;
+        Some(ProjectCommand::NodeOutputParticipationEdit {
+            node_id: node.node_id.clone(),
+            node_name: node.name.clone(),
+            old_participates,
+            new_participates: participates,
+        })
+    }
+
+    pub fn set_node_comment_visibility(&mut self, node_index: usize, show_comment: bool) -> bool {
+        let Some(command) =
+            self.set_node_comment_visibility_without_history(node_index, show_comment)
+        else {
+            return false;
+        };
+        self.record_project_command(command);
+        true
+    }
+
+    fn set_node_comment_visibility_without_history(
+        &mut self,
+        node_index: usize,
+        show_comment: bool,
+    ) -> Option<ProjectCommand> {
+        let node = self.nodes.get_mut(node_index)?;
+        if node.show_comment_in_network == show_comment {
+            return None;
+        }
+        let old_show_comment = node.show_comment_in_network;
+        node.show_comment_in_network = show_comment;
+        Some(ProjectCommand::NodeCommentVisibilityEdit {
+            node_id: node.node_id.clone(),
+            node_name: node.name.clone(),
+            old_show_comment,
+            new_show_comment: show_comment,
+        })
     }
 
     pub fn duplicate_node(&mut self, node_index: usize) -> Option<usize> {
@@ -6785,6 +6873,18 @@ pub(crate) enum ProjectCommand {
         old_value: f32,
         new_value: f32,
     },
+    NodeOutputParticipationEdit {
+        node_id: String,
+        node_name: String,
+        old_participates: bool,
+        new_participates: bool,
+    },
+    NodeCommentVisibilityEdit {
+        node_id: String,
+        node_name: String,
+        old_show_comment: bool,
+        new_show_comment: bool,
+    },
     LayerVisibilityEdit {
         layer_index: usize,
         layer_name: String,
@@ -6810,6 +6910,12 @@ impl ProjectCommand {
                 parameter_name,
                 ..
             } => format!("Edit {node_name} {parameter_name}"),
+            Self::NodeOutputParticipationEdit { node_name, .. } => {
+                format!("Set {node_name} output participation")
+            }
+            Self::NodeCommentVisibilityEdit { node_name, .. } => {
+                format!("Set {node_name} comment visibility")
+            }
             Self::LayerVisibilityEdit { layer_name, .. } => {
                 format!("Set {layer_name} visibility")
             }
@@ -10555,12 +10661,96 @@ mod tests {
     }
 
     #[test]
+    fn node_output_participation_records_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+        assert!(graph.nodes[filter_index].participates_in_output);
+
+        assert!(graph.set_node_output_participation(filter_index, false));
+
+        assert!(!graph.nodes[filter_index].participates_in_output);
+        assert!(graph.command_history.redo_stack.is_empty());
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodeOutputParticipationEdit {
+                node_name,
+                old_participates: true,
+                new_participates: false,
+                ..
+            }) if node_name == "Filter"
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Set Filter output participation")
+        );
+
+        assert!(graph.undo_project_command());
+        assert!(graph.nodes[filter_index].participates_in_output);
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Set Filter output participation")
+        );
+
+        assert!(graph.redo_project_command());
+        assert!(!graph.nodes[filter_index].participates_in_output);
+        assert!(!graph.set_node_output_participation(filter_index, false));
+        assert!(!graph.set_node_output_participation(graph.nodes.len(), true));
+    }
+
+    #[test]
+    fn node_comment_visibility_records_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+        assert!(!graph.nodes[filter_index].show_comment_in_network);
+
+        assert!(graph.set_node_comment_visibility(filter_index, true));
+
+        assert!(graph.nodes[filter_index].show_comment_in_network);
+        assert!(graph.command_history.redo_stack.is_empty());
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodeCommentVisibilityEdit {
+                node_name,
+                old_show_comment: false,
+                new_show_comment: true,
+                ..
+            }) if node_name == "Filter"
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Set Filter comment visibility")
+        );
+
+        assert!(graph.undo_project_command());
+        assert!(!graph.nodes[filter_index].show_comment_in_network);
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Set Filter comment visibility")
+        );
+
+        assert!(graph.redo_project_command());
+        assert!(graph.nodes[filter_index].show_comment_in_network);
+        assert!(!graph.set_node_comment_visibility(filter_index, true));
+        assert!(!graph.set_node_comment_visibility(graph.nodes.len(), false));
+    }
+
+    #[test]
     fn command_history_is_runtime_state_not_sidecar_state() {
         let mut graph = GraphDocument::sample();
         assert!(graph.set_node_name(1, "FILTER_LOW"));
         assert!(graph.set_node_parameter_value(1, 0.72));
         assert!(graph.set_layer_visibility(0, false));
         assert!(graph.set_layer_order(1, 42));
+        assert!(graph.set_node_output_participation(1, false));
+        assert!(graph.set_node_comment_visibility(1, true));
         assert!(!graph.command_history.undo_stack.is_empty());
 
         let json = graph.to_sidecar_json().unwrap();
