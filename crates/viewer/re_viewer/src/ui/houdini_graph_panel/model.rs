@@ -47,7 +47,7 @@ pub(crate) struct GraphDocument {
 const GENERATED_NODE_LANE_Y: f32 = 0.82;
 const NATIVE_OPERATOR_HOST_COMPATIBILITY_VERSION: &str = "re_viewer-houdini-graph-0.1";
 const MAIN_GRAPH_ID: &str = "main";
-const PRIMARY_GEOMETRY_OUTPUT: &str = "geometry";
+pub(crate) const PRIMARY_GEOMETRY_OUTPUT: &str = "geometry";
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct ProjectGraphRegistry {
@@ -676,6 +676,25 @@ impl GraphDocument {
             .iter()
             .find(|edge| edge.edge_id == edge_id)
             .map(|edge| self.readable_data_flow_edge_path(edge))
+    }
+
+    #[allow(dead_code)]
+    pub fn node_has_primary_geometry_output(&self, node_index: usize) -> bool {
+        self.nodes.get(node_index).is_some_and(|node| {
+            self.node_output_kind_for_name(node, PRIMARY_GEOMETRY_OUTPUT)
+                .is_some()
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn node_has_primary_geometry_input(&self, node_index: usize) -> bool {
+        self.nodes.get(node_index).is_some_and(|node| {
+            if node.kind == NodeKind::Source {
+                return false;
+            }
+            self.node_input_kind_for_name(node, PRIMARY_GEOMETRY_OUTPUT)
+                .is_some()
+        })
     }
 
     #[allow(dead_code)]

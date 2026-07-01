@@ -14,8 +14,9 @@ use self::model::{
     GraphEvaluationMode, GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding,
     LayerKind, NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot,
     NetworkCommentDisplayMode, NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeStatus,
-    PythonEnvironmentResolveTrigger, PythonEnvironmentStatus, PythonOperatorDependencyStatus,
-    ReferenceDiagnosticStatus, SourceMetadata, SubstrateCoordinateContract,
+    PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
+    PythonOperatorDependencyStatus, ReferenceDiagnosticStatus, SourceMetadata,
+    SubstrateCoordinateContract,
 };
 
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
@@ -95,6 +96,7 @@ pub(crate) struct HoudiniGraphPanel {
     annotation_drag_start_member_positions: Vec<(String, GraphPoint)>,
     resizing_annotation: Option<usize>,
     annotation_resize_start_size: Option<GraphPoint>,
+    connection_drag: Option<ConnectionDragState>,
     graph_view_zoom: f32,
     graph_view_pan: Vec2,
     pending_frame_selected: bool,
@@ -151,6 +153,7 @@ impl Default for HoudiniGraphPanel {
             annotation_drag_start_member_positions: Vec::new(),
             resizing_annotation: None,
             annotation_resize_start_size: None,
+            connection_drag: None,
             graph_view_zoom: 1.0,
             graph_view_pan: Vec2::ZERO,
             pending_frame_selected: false,
@@ -212,6 +215,25 @@ impl GraphWorkbenchPane {
             Self::Layers => "Layers",
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConnectionDragState {
+    from_node_index: usize,
+    from_node_id: String,
+    from_output: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodePortKind {
+    Input,
+    Output,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NodePortHit {
+    node_index: usize,
+    kind: NodePortKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3216,42 +3238,66 @@ impl HoudiniGraphPanel {
                 self.dragging_annotation = None;
                 self.resizing_annotation = None;
                 let mut hit_node = false;
-                for (index, node_rect) in node_rects.iter().enumerate() {
-                    if let Some(flag_action) = node_flag_action_at(*node_rect, pointer_pos) {
-                        self.selected_node = index;
-                        self.apply_node_ring_action(graph, index, flag_action);
-                        hit_node = true;
-                        break;
-                    }
-                    let ring_visible = node_ring_visible(
-                        network_view.node_ring_visibility,
-                        self.selected_node == index,
-                        node_rect.contains(pointer_pos)
-                            || node_ring_action_at(*node_rect, pointer_pos, self.graph_view_zoom)
-                                .is_some(),
-                    );
-                    if ring_visible
-                        && let Some(ring_action) =
-                            node_ring_action_at(*node_rect, pointer_pos, self.graph_view_zoom)
+                if let Some(port_hit) =
+                    node_primary_port_at(graph, &node_rects, pointer_pos, self.graph_view_zoom)
+                {
+                    self.selected_node = port_hit.node_index;
+                    self.selected_edge = None;
+                    self.selected_annotation = None;
+                    self.node_info_open = true;
+                    if port_hit.kind == NodePortKind::Output
+                        && let Some(node) = graph.nodes.get(port_hit.node_index)
                     {
-                        self.selected_node = index;
-                        self.apply_node_ring_action(graph, index, ring_action);
-                        hit_node = true;
-                        break;
+                        self.connection_drag = Some(ConnectionDragState {
+                            from_node_index: port_hit.node_index,
+                            from_node_id: node.node_id.clone(),
+                            from_output: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                        });
                     }
-                    if node_rect.contains(pointer_pos) {
-                        self.selected_node = index;
-                        self.selected_edge = None;
-                        self.selected_annotation = None;
-                        self.node_info_open = true;
-                        self.dragging_node = Some(index);
-                        self.node_drag_start_position =
-                            graph.nodes.get(index).map(|node| node.layout_position);
-                        self.node_drag_start_network_box_states =
-                            graph.network_box_organization_snapshots();
-                        self.node_drag_peak_delta_pixels = 0.0;
-                        hit_node = true;
-                        break;
+                    hit_node = true;
+                }
+                if !hit_node {
+                    for (index, node_rect) in node_rects.iter().enumerate() {
+                        if let Some(flag_action) = node_flag_action_at(*node_rect, pointer_pos) {
+                            self.selected_node = index;
+                            self.apply_node_ring_action(graph, index, flag_action);
+                            hit_node = true;
+                            break;
+                        }
+                        let ring_visible = node_ring_visible(
+                            network_view.node_ring_visibility,
+                            self.selected_node == index,
+                            node_rect.contains(pointer_pos)
+                                || node_ring_action_at(
+                                    *node_rect,
+                                    pointer_pos,
+                                    self.graph_view_zoom,
+                                )
+                                .is_some(),
+                        );
+                        if ring_visible
+                            && let Some(ring_action) =
+                                node_ring_action_at(*node_rect, pointer_pos, self.graph_view_zoom)
+                        {
+                            self.selected_node = index;
+                            self.apply_node_ring_action(graph, index, ring_action);
+                            hit_node = true;
+                            break;
+                        }
+                        if node_rect.contains(pointer_pos) {
+                            self.selected_node = index;
+                            self.selected_edge = None;
+                            self.selected_annotation = None;
+                            self.node_info_open = true;
+                            self.dragging_node = Some(index);
+                            self.node_drag_start_position =
+                                graph.nodes.get(index).map(|node| node.layout_position);
+                            self.node_drag_start_network_box_states =
+                                graph.network_box_organization_snapshots();
+                            self.node_drag_peak_delta_pixels = 0.0;
+                            hit_node = true;
+                            break;
+                        }
                     }
                 }
 
@@ -3367,7 +3413,9 @@ impl HoudiniGraphPanel {
             }
 
             if response.dragged_by(egui::PointerButton::Primary) {
-                if let Some(dragging_node) = self.dragging_node {
+                if self.connection_drag.is_some() {
+                    // Connection preview is drawn later after existing wires.
+                } else if let Some(dragging_node) = self.dragging_node {
                     let pointer_delta = ui.input(|input| input.pointer.delta());
                     self.node_drag_peak_delta_pixels =
                         self.node_drag_peak_delta_pixels.max(pointer_delta.length());
@@ -3418,6 +3466,11 @@ impl HoudiniGraphPanel {
         }
 
         if ui.input(|input| input.pointer.any_released()) {
+            if let Some(connection_drag) = self.connection_drag.take()
+                && let Some(pointer_pos) = ui.input(|input| input.pointer.latest_pos())
+            {
+                self.finish_connection_drag(graph, &node_rects, connection_drag, pointer_pos);
+            }
             if let Some(dragging_node) = self.dragging_node {
                 graph.settle_node_drag_for_network_boxes(
                     dragging_node,
@@ -3550,6 +3603,18 @@ impl HoudiniGraphPanel {
             draw_arrowhead(&painter, end, connector_stroke.color);
         }
 
+        if let Some(connection_drag) = &self.connection_drag
+            && let Some(from_rect) = node_rects.get(connection_drag.from_node_index)
+            && let Some(pointer_pos) = ui.input(|input| input.pointer.hover_pos())
+        {
+            let start =
+                node_primary_port_rect(*from_rect, NodePortKind::Output, self.graph_view_zoom)
+                    .center();
+            let stroke = Stroke::new(2.0, ui.visuals().selection.stroke.color);
+            painter.line_segment([start, pointer_pos], stroke);
+            draw_arrowhead(&painter, pointer_pos, stroke.color);
+        }
+
         for layout_node in graph.graph_layout().nodes {
             let Some(node) = graph.nodes.get(layout_node.node_index) else {
                 continue;
@@ -3656,6 +3721,14 @@ impl HoudiniGraphPanel {
                 network_view,
                 ui.visuals(),
             );
+            draw_node_primary_ports(
+                &painter,
+                node_rect,
+                graph,
+                layout_node.node_index,
+                self.graph_view_zoom,
+                ui.visuals(),
+            );
         }
 
         if let Some((node_index, action, pointer_pos)) =
@@ -3684,6 +3757,54 @@ impl HoudiniGraphPanel {
         self.node_graph_tab_menu_ui(ui, graph);
 
         response
+    }
+
+    fn finish_connection_drag(
+        &mut self,
+        graph: &mut GraphDocument,
+        node_rects: &[Rect],
+        connection_drag: ConnectionDragState,
+        pointer_pos: Pos2,
+    ) {
+        let Some(port_hit) =
+            node_primary_port_at(graph, node_rects, pointer_pos, self.graph_view_zoom)
+        else {
+            self.shelf_status = Some("Connection canceled.".to_owned());
+            return;
+        };
+        if port_hit.kind != NodePortKind::Input {
+            self.shelf_status = Some("Drop on a compatible input port.".to_owned());
+            return;
+        }
+        let Some(target_node) = graph.nodes.get(port_hit.node_index) else {
+            self.shelf_status = Some("Connection target disappeared.".to_owned());
+            return;
+        };
+        let target_node_id = target_node.node_id.clone();
+        let target_node_name = target_node.name.clone();
+        match graph.add_data_flow_edge(
+            &connection_drag.from_node_id,
+            &connection_drag.from_output,
+            &target_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+        ) {
+            Ok(_) => {
+                self.selected_node = port_hit.node_index;
+                self.selected_edge = None;
+                self.shelf_status = Some(format!(
+                    "Connected {} to {}.",
+                    graph
+                        .nodes
+                        .get(connection_drag.from_node_index)
+                        .map(|node| node.name.as_str())
+                        .unwrap_or("source"),
+                    target_node_name
+                ));
+            }
+            Err(diagnostic) => {
+                self.shelf_status = Some(diagnostic.message);
+            }
+        }
     }
 
     fn node_graph_tab_menu_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -5699,6 +5820,80 @@ fn node_flag_rect(node_rect: Rect, action: NodeRingAction) -> Option<Rect> {
     ))
 }
 
+fn node_primary_port_rect(node_rect: Rect, kind: NodePortKind, zoom: f32) -> Rect {
+    let diameter = (12.0 * zoom).clamp(8.0, 16.0);
+    let center = match kind {
+        NodePortKind::Input => node_rect.left_center(),
+        NodePortKind::Output => node_rect.right_center(),
+    };
+    Rect::from_center_size(center, egui::vec2(diameter, diameter))
+}
+
+fn node_primary_port_at(
+    graph: &GraphDocument,
+    node_rects: &[Rect],
+    pointer_pos: Pos2,
+    zoom: f32,
+) -> Option<NodePortHit> {
+    node_rects
+        .iter()
+        .enumerate()
+        .find_map(|(node_index, rect)| {
+            if graph.node_has_primary_geometry_output(node_index)
+                && node_primary_port_rect(*rect, NodePortKind::Output, zoom).contains(pointer_pos)
+            {
+                return Some(NodePortHit {
+                    node_index,
+                    kind: NodePortKind::Output,
+                });
+            }
+            if graph.node_has_primary_geometry_input(node_index)
+                && node_primary_port_rect(*rect, NodePortKind::Input, zoom).contains(pointer_pos)
+            {
+                return Some(NodePortHit {
+                    node_index,
+                    kind: NodePortKind::Input,
+                });
+            }
+            None
+        })
+}
+
+fn draw_node_primary_ports(
+    painter: &egui::Painter,
+    node_rect: Rect,
+    graph: &GraphDocument,
+    node_index: usize,
+    zoom: f32,
+    visuals: &egui::Visuals,
+) {
+    for (kind, available) in [
+        (
+            NodePortKind::Input,
+            graph.node_has_primary_geometry_input(node_index),
+        ),
+        (
+            NodePortKind::Output,
+            graph.node_has_primary_geometry_output(node_index),
+        ),
+    ] {
+        if !available {
+            continue;
+        }
+        let rect = node_primary_port_rect(node_rect, kind, zoom);
+        painter.circle_filled(
+            rect.center(),
+            rect.width() * 0.5,
+            visuals.widgets.inactive.bg_fill,
+        );
+        painter.circle_stroke(
+            rect.center(),
+            rect.width() * 0.5,
+            Stroke::new(1.0, visuals.widgets.inactive.fg_stroke.color),
+        );
+    }
+}
+
 fn edge_hit_radius(zoom: f32) -> f32 {
     (8.0 * zoom).clamp(6.0, 14.0)
 }
@@ -6018,9 +6213,10 @@ fn draw_arrowhead(painter: &egui::Painter, tip: Pos2, color: Color32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        GraphSearchTarget, HoudiniGraphPanel, distance_to_segment, graph_edge_at,
+        GraphSearchTarget, HoudiniGraphPanel, NodePortKind, distance_to_segment, graph_edge_at,
         layout_node_rects,
         model::{ProjectGraphMetadata, ProjectGraphRole},
+        node_primary_port_at, node_primary_port_rect,
     };
     use crate::ui::houdini_graph_panel::model::GraphDocument;
 
@@ -6066,6 +6262,48 @@ mod tests {
         );
         assert_eq!(
             graph_edge_at(&graph, &node_rects, egui::pos2(8.0, 210.0), 4.0),
+            None
+        );
+    }
+
+    #[test]
+    fn node_primary_port_at_distinguishes_input_and_output_ports() {
+        let graph = GraphDocument::sample();
+        let layout_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(480.0, 220.0));
+        let node_rects = layout_node_rects(
+            &graph,
+            layout_rect,
+            egui::vec2(116.0, 48.0),
+            1.0,
+            egui::Vec2::ZERO,
+        );
+
+        let source_output = node_primary_port_rect(node_rects[0], NodePortKind::Output, 1.0);
+        assert_eq!(
+            node_primary_port_at(&graph, &node_rects, source_output.center(), 1.0),
+            Some(super::NodePortHit {
+                node_index: 0,
+                kind: NodePortKind::Output,
+            })
+        );
+        let source_input = node_primary_port_rect(node_rects[0], NodePortKind::Input, 1.0);
+        assert_eq!(
+            node_primary_port_at(&graph, &node_rects, source_input.center(), 1.0),
+            None
+        );
+
+        let output_input = node_primary_port_rect(node_rects[3], NodePortKind::Input, 1.0);
+        assert_eq!(
+            node_primary_port_at(&graph, &node_rects, output_input.center(), 1.0),
+            Some(super::NodePortHit {
+                node_index: 3,
+                kind: NodePortKind::Input,
+            })
+        );
+
+        let output_output = node_primary_port_rect(node_rects[3], NodePortKind::Output, 1.0);
+        assert_eq!(
+            node_primary_port_at(&graph, &node_rects, output_output.center(), 1.0),
             None
         );
     }
