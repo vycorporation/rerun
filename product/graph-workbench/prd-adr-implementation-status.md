@@ -30,7 +30,7 @@ This ledger tracks how PRD/ADR material maps to issue-backed implementation in t
 | Python operator and project environment lane | partial | `python-operator-surface.md`, `python-environment-status.md` | `#31`, `#32`, `#39`, `#40`, `#41`, `#42`, `#43`, `#44`, `#45`, `#46`, `#55` |
 | Native plugin operator lane | partial | `native-plugin-operator-lane.md` | `#34`, `#51`, `#52`, `#53`, `#54` |
 | Procedural asset interface | partial | `procedural-asset-interface.md` | `#33`, `#47`, `#48`, `#49`, `#50`, `#61`, `#152`, `#156`, `#158`, `#160`, `#162` |
-| Graph hierarchy and named graph registry | partial | `graph-hierarchy-tracker.md` | `#130`, `#131`, `#132`, `#142`, `#144`, `#146`, `#148`, `#164` |
+| Graph hierarchy and named graph registry | partial | `graph-hierarchy-tracker.md` | `#130`, `#131`, `#132`, `#142`, `#144`, `#146`, `#148`, `#164`, `#166` |
 | Reference inputs, stable IDs, diagnostics, and target sets | complete for current v1 reference-input spine | PRD ADRs plus command-history tracker | `#57`, `#58`, `#59`, `#60`, `#62`, `#98`, `#113`, `#114`, `#121`, `#122` |
 | Workbench layout presets and browser | complete for current v1 workbench slice | `workbench-layout-presets.md` | `#64`, `#68`, `#72`, `#74` |
 | Shelf tools | complete for built-in shelf tools; custom shelf tools deferred | `shelf-tools.md` | `#90` |
@@ -62,8 +62,8 @@ issue-backed implementation slices next.
 
 1. Multiple named graphs and subgraph navigation.
    - Source ADRs: `0008`, `0035`, `0036`, `0074`, `0075`.
-   - Issue-backed slices: `#130` graph registry metadata, `#131` current graph path and graph-local inspection, `#132` focused graph hierarchy tracker, `#142` graph container metadata, `#144` typed graph container boundaries, `#146` boundary anchor mappings, `#148` collapse manifests, and `#164` graph-local node name policy.
-   - Later likely slices: selected graph navigation, physical selected-node collapse into graph-local storage, and visible invalid/cyclic diagnostics.
+   - Issue-backed slices: `#130` graph registry metadata, `#131` current graph path and graph-local inspection, `#132` focused graph hierarchy tracker, `#142` graph container metadata, `#144` typed graph container boundaries, `#146` boundary anchor mappings, `#148` collapse manifests, `#164` graph-local node name policy, and `#166` selected graph navigation model actions.
+   - Later likely slices: graph-local node storage groundwork, physical selected-node collapse into graph-local storage, and visible invalid/cyclic diagnostics.
 
 2. Procedural asset authoring depth.
    - Source ADRs: `0009`, `0010`, `0011`, `0077`, `0078`.

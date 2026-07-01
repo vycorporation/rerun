@@ -281,6 +281,83 @@ impl GraphDocument {
             .unwrap_or("/obj/main")
     }
 
+    #[allow(dead_code)]
+    pub fn graph_navigation_targets(&self) -> Vec<GraphNavigationTarget> {
+        self.graph_registry
+            .graphs
+            .iter()
+            .map(GraphNavigationTarget::from_metadata)
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn select_graph_by_id(
+        &mut self,
+        graph_id: &str,
+    ) -> Result<GraphNavigationChange, GraphNavigationError> {
+        let target_graph_id = graph_id.trim();
+        let Some(selected_graph) = self.graph_registry.graph(target_graph_id).cloned() else {
+            return Err(GraphNavigationError::MissingGraph {
+                graph_id: graph_id.to_owned(),
+            });
+        };
+        let previous_graph = self
+            .graph_registry
+            .selected_graph()
+            .cloned()
+            .unwrap_or_else(ProjectGraphRegistry::main_graph);
+        let changed = previous_graph.graph_id != selected_graph.graph_id;
+
+        if changed {
+            self.graph_registry.selected_graph_id = selected_graph.graph_id.clone();
+        }
+
+        Ok(GraphNavigationChange {
+            previous_graph: GraphNavigationTarget::from_metadata(&previous_graph),
+            selected_graph: GraphNavigationTarget::from_metadata(&selected_graph),
+            changed,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn enter_graph_container_node(
+        &mut self,
+        node_index: usize,
+    ) -> Result<GraphNavigationChange, GraphNavigationError> {
+        let Some(node) = self.nodes.get(node_index) else {
+            return Err(GraphNavigationError::MissingNodeIndex(node_index));
+        };
+        if node.kind != NodeKind::GraphContainer {
+            return Err(GraphNavigationError::NodeIsNotGraphContainer {
+                node_id: node.node_id.clone(),
+                node_name: node.name.clone(),
+            });
+        }
+        let Some(container) = self.graph_container_metadata_for_node(&node.node_id) else {
+            return Err(GraphNavigationError::MissingContainerMetadata {
+                node_id: node.node_id.clone(),
+            });
+        };
+        if self
+            .graph_registry
+            .graph(&container.internal_graph_id)
+            .is_none()
+        {
+            return Err(GraphNavigationError::MissingInternalGraph {
+                graph_id: container.internal_graph_id.clone(),
+            });
+        }
+        if !container.navigable {
+            return Err(GraphNavigationError::ContainerNotNavigable {
+                node_id: node.node_id.clone(),
+                internal_graph_id: container.internal_graph_id.clone(),
+            });
+        }
+
+        let internal_graph_id = container.internal_graph_id.clone();
+        self.select_graph_by_id(&internal_graph_id)
+    }
+
     fn graph_container_metadata_for_node(&self, node_id: &str) -> Option<&GraphContainerMetadata> {
         self.graph_containers
             .iter()
@@ -10774,6 +10851,54 @@ impl NodeKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GraphNavigationTarget {
+    pub graph_id: String,
+    pub name: String,
+    pub path: String,
+    pub role: ProjectGraphRole,
+}
+
+impl GraphNavigationTarget {
+    fn from_metadata(metadata: &ProjectGraphMetadata) -> Self {
+        Self {
+            graph_id: metadata.graph_id.clone(),
+            name: metadata.name.clone(),
+            path: metadata.path.clone(),
+            role: metadata.role,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GraphNavigationChange {
+    pub previous_graph: GraphNavigationTarget,
+    pub selected_graph: GraphNavigationTarget,
+    pub changed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GraphNavigationError {
+    MissingGraph {
+        graph_id: String,
+    },
+    MissingNodeIndex(usize),
+    NodeIsNotGraphContainer {
+        node_id: String,
+        node_name: String,
+    },
+    MissingContainerMetadata {
+        node_id: String,
+    },
+    MissingInternalGraph {
+        graph_id: String,
+    },
+    ContainerNotNavigable {
+        node_id: String,
+        internal_graph_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GraphLocationInfo {
     pub graph_id: String,
     pub graph_path: String,
@@ -11782,17 +11907,18 @@ mod tests {
         GeometryBounds, GeometryKind, GraphAnnotationKind, GraphBoundaryDeclaration,
         GraphBoundaryMapping, GraphBoundaryMappingDirection, GraphBoundaryMappingStatus,
         GraphColor, GraphContainerCollapseError, GraphContainerStatus, GraphDataFlowEdge,
-        GraphDataFlowEdgeDiagnosticStatus, GraphDocument, GraphEvaluationMode, GraphNode,
-        GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniCubicBezierParquetSchema,
-        HoudiniDataKind, HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange,
-        HoudiniOperatorPort, HoudiniParameterBinding, HoudiniParameterDeclaration,
-        HoudiniParameterKind, HoudiniParameterValue, LayerKind, NativeOperatorCapability,
-        NativeOperatorDeclaration, NativeOperatorFailureMode, NativeOperatorImplementation,
-        NativeOperatorLoadStatus, NativeOperatorOutputCounts, NativeOperatorProvenance,
-        NetworkBadgeVisibility, NetworkCommentDisplayMode, NetworkNodeRingVisibility,
-        NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind, NodeStatus,
-        OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode,
-        OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetArtifactBundleInclusion,
+        GraphDataFlowEdgeDiagnosticStatus, GraphDocument, GraphEvaluationMode,
+        GraphNavigationError, GraphNavigationTarget, GraphNode, GraphPoint, GraphStyle,
+        GraphWorkItemStatus, HoudiniCubicBezierParquetSchema, HoudiniDataKind,
+        HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
+        HoudiniParameterBinding, HoudiniParameterDeclaration, HoudiniParameterKind,
+        HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
+        NativeOperatorFailureMode, NativeOperatorImplementation, NativeOperatorLoadStatus,
+        NativeOperatorOutputCounts, NativeOperatorProvenance, NetworkBadgeVisibility,
+        NetworkCommentDisplayMode, NetworkNodeRingVisibility, NodeEvaluation, NodeKind,
+        NodeParameter, NodeParameterKind, NodeStatus, OperatorVersionStatus,
+        OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode, OutputTargetId,
+        PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetArtifactBundleInclusion,
         ProceduralAssetArtifactInclusionChoice, ProceduralAssetArtifactReference,
         ProceduralAssetArtifactRole, ProceduralAssetArtifactStatus,
         ProceduralAssetBoundaryDirection, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
@@ -16535,6 +16661,154 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             restored.resolve_reference_target(&target).readable_path,
             "analysis/OUT_ANALYSIS:geometry"
         );
+    }
+
+    #[test]
+    fn graph_navigation_targets_expose_registry_metadata() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry = ProjectGraphRegistry {
+            selected_graph_id: "main".to_owned(),
+            graphs: vec![
+                ProjectGraphMetadata {
+                    graph_id: "main".to_owned(),
+                    name: "Main".to_owned(),
+                    path: "/obj/main".to_owned(),
+                    role: ProjectGraphRole::Main,
+                },
+                ProjectGraphMetadata {
+                    graph_id: "analysis".to_owned(),
+                    name: "Analysis".to_owned(),
+                    path: "/obj/analysis".to_owned(),
+                    role: ProjectGraphRole::Subgraph,
+                },
+            ],
+        };
+
+        assert_eq!(
+            graph.graph_navigation_targets(),
+            vec![
+                GraphNavigationTarget {
+                    graph_id: "main".to_owned(),
+                    name: "Main".to_owned(),
+                    path: "/obj/main".to_owned(),
+                    role: ProjectGraphRole::Main,
+                },
+                GraphNavigationTarget {
+                    graph_id: "analysis".to_owned(),
+                    name: "Analysis".to_owned(),
+                    path: "/obj/analysis".to_owned(),
+                    role: ProjectGraphRole::Subgraph,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn select_graph_by_id_updates_current_graph_and_reports_noops() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry.graphs.push(ProjectGraphMetadata {
+            graph_id: "analysis".to_owned(),
+            name: "Analysis".to_owned(),
+            path: "/obj/analysis".to_owned(),
+            role: ProjectGraphRole::Subgraph,
+        });
+
+        let change = graph
+            .select_graph_by_id("analysis")
+            .expect("analysis graph should be selectable");
+        assert!(change.changed);
+        assert_eq!(change.previous_graph.graph_id, "main");
+        assert_eq!(change.selected_graph.graph_id, "analysis");
+        assert_eq!(graph.current_graph_id(), "analysis");
+        assert_eq!(graph.current_graph_path(), "/obj/analysis");
+
+        let same_graph_change = graph
+            .select_graph_by_id("analysis")
+            .expect("selecting current graph should be a no-op");
+        assert!(!same_graph_change.changed);
+        assert_eq!(same_graph_change.previous_graph.graph_id, "analysis");
+        assert_eq!(same_graph_change.selected_graph.graph_id, "analysis");
+
+        assert_eq!(
+            graph.select_graph_by_id("missing"),
+            Err(GraphNavigationError::MissingGraph {
+                graph_id: "missing".to_owned(),
+            })
+        );
+        assert_eq!(graph.current_graph_id(), "analysis");
+    }
+
+    #[test]
+    fn enter_graph_container_node_selects_resolved_internal_graph() {
+        let mut graph = GraphDocument::sample();
+        let container_index = graph.add_graph_container_node(
+            "Cleanup Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.cleanup".to_owned(),
+                name: "Cleanup".to_owned(),
+                path: "/obj/main/cleanup".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+
+        let change = graph
+            .enter_graph_container_node(container_index)
+            .expect("resolved graph container should be navigable");
+
+        assert!(change.changed);
+        assert_eq!(change.previous_graph.graph_id, "main");
+        assert_eq!(change.selected_graph.graph_id, "graph.cleanup");
+        assert_eq!(change.selected_graph.path, "/obj/main/cleanup");
+        assert_eq!(graph.current_graph_id(), "graph.cleanup");
+        assert_eq!(graph.current_graph_path(), "/obj/main/cleanup");
+    }
+
+    #[test]
+    fn enter_graph_container_node_rejects_unresolved_or_non_navigable_targets() {
+        let mut graph = GraphDocument::sample();
+        let source_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Source)
+            .expect("sample graph should include source node");
+        assert_eq!(
+            graph.enter_graph_container_node(source_index),
+            Err(GraphNavigationError::NodeIsNotGraphContainer {
+                node_id: "source.main".to_owned(),
+                node_name: "Source".to_owned(),
+            })
+        );
+
+        let container_index = graph.add_graph_container_node(
+            "Cleanup Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.cleanup".to_owned(),
+                name: "Cleanup".to_owned(),
+                path: "/obj/main/cleanup".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+        graph.graph_containers[0].navigable = false;
+        assert_eq!(
+            graph.enter_graph_container_node(container_index),
+            Err(GraphNavigationError::ContainerNotNavigable {
+                node_id: graph.nodes[container_index].node_id.clone(),
+                internal_graph_id: "graph.cleanup".to_owned(),
+            })
+        );
+
+        graph.graph_containers[0].navigable = true;
+        graph
+            .graph_registry
+            .graphs
+            .retain(|metadata| metadata.graph_id != "graph.cleanup");
+        assert_eq!(
+            graph.enter_graph_container_node(container_index),
+            Err(GraphNavigationError::MissingInternalGraph {
+                graph_id: "graph.cleanup".to_owned(),
+            })
+        );
+        assert_eq!(graph.current_graph_id(), "main");
     }
 
     #[test]

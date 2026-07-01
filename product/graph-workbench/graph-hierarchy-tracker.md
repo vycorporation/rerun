@@ -39,14 +39,16 @@ for the graph hierarchy lane.
 | `#146` | complete | Graph container boundary anchor mappings | Adds serializable mappings from public boundary ports to internal graph anchors, with model diagnostics for unresolved metadata. |
 | `#148` | complete | Graph container collapse manifests | Records selected connected node sets and typed external edge crossings as graph container collapse metadata without moving nodes yet. |
 | `#164` | complete | Graph-local node name policy | Adds durable parent graph metadata to nodes and scopes create, rename, duplicate, readable paths, and name collision inspection to the parent graph while preserving stable node IDs. |
+| `#166` | complete | Selected graph navigation model seam | Adds graph navigation targets plus safe selected-graph and graph-container enter model actions without moving nodes between graphs. |
 
 ## Next implementation candidates
 
 1. Graph path inspection and navigation.
    - Current graph path and readable node path inspection are covered by
      `#131`.
-   - Later navigation work should add selected graph switching without turning
-     path display into a second durable identity.
+   - Selected graph switching and resolved graph-container enter actions are
+     covered by `#166` without turning path display into a second durable
+     identity.
 
 2. Graph container storage.
    - `#142` adds graph container metadata that can point to an internal named
