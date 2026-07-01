@@ -1395,6 +1395,34 @@ impl GraphDocument {
                     true
                 }
             },
+            ProjectCommand::ReferenceInputCreate {
+                reference_node,
+                insert_index,
+            } => match direction {
+                ProjectCommandDirection::Undo => {
+                    let Some(node_index) = self
+                        .nodes
+                        .iter()
+                        .position(|node| node.node_id == reference_node.node_id)
+                    else {
+                        return false;
+                    };
+                    self.nodes.remove(node_index);
+                    true
+                }
+                ProjectCommandDirection::Redo => {
+                    if self
+                        .nodes
+                        .iter()
+                        .any(|node| node.node_id == reference_node.node_id)
+                    {
+                        return false;
+                    }
+                    let insert_index = (*insert_index).min(self.nodes.len());
+                    self.nodes.insert(insert_index, (**reference_node).clone());
+                    true
+                }
+            },
             ProjectCommand::NodeParameterEdit {
                 node_id,
                 old_value,
@@ -2085,7 +2113,12 @@ impl GraphDocument {
             },
         );
         node.layout_position = GraphPoint::new(0.88, 0.5);
+        let reference_node = node.clone();
         self.nodes.insert(insert_index, node);
+        self.record_project_command(ProjectCommand::ReferenceInputCreate {
+            reference_node: Box::new(reference_node),
+            insert_index,
+        });
         Some(insert_index)
     }
 
@@ -7578,6 +7611,10 @@ pub(crate) enum ProjectCommand {
         deleted_node: Box<GraphNode>,
         remove_index: usize,
     },
+    ReferenceInputCreate {
+        reference_node: Box<GraphNode>,
+        insert_index: usize,
+    },
     NodeParameterEdit {
         node_id: String,
         node_name: String,
@@ -7704,6 +7741,9 @@ impl ProjectCommand {
             }
             Self::NodeDelete { deleted_node, .. } => {
                 format!("Delete {}", deleted_node.name)
+            }
+            Self::ReferenceInputCreate { reference_node, .. } => {
+                format!("Create {}", reference_node.name)
             }
             Self::NodeParameterEdit {
                 node_name,
@@ -10541,6 +10581,73 @@ mod tests {
         assert_eq!(reference_info.status, ReferenceDiagnosticStatus::Resolved);
         assert!(reference_info.preserves_source_data);
         assert!(!reference_info.applies_hidden_transform);
+    }
+
+    #[test]
+    fn reference_input_creation_records_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let null_index = graph.add_null_operator_node("OUT_CURVES");
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .expect("sample graph should include output node");
+        let before_len = graph.nodes.len();
+
+        let reference_index = graph
+            .add_reference_input_node(null_index)
+            .expect("null output should be a compatible reference target");
+        let reference_node_id = graph.nodes[reference_index].node_id.clone();
+        let reference_target = graph.nodes[reference_index]
+            .reference_input
+            .as_ref()
+            .expect("reference node should carry reference input")
+            .targets[0]
+            .clone();
+
+        assert_eq!(reference_index, output_index);
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::ReferenceInputCreate {
+                reference_node,
+                insert_index,
+            }) if reference_node.node_id == reference_node_id
+                && *insert_index == output_index
+                && reference_node
+                    .reference_input
+                    .as_ref()
+                    .is_some_and(|reference_input| reference_input.targets == vec![reference_target.clone()])
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Create Reference Input")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes.len(), before_len);
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|node| node.node_id == reference_node_id)
+        );
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Create Reference Input")
+        );
+
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.nodes.len(), before_len + 1);
+        assert_eq!(graph.nodes[output_index].node_id, reference_node_id);
+        assert_eq!(
+            graph.nodes[output_index]
+                .reference_input
+                .as_ref()
+                .expect("reference node should be restored")
+                .targets,
+            vec![reference_target]
+        );
+        assert!(graph.add_reference_input_node(graph.nodes.len()).is_none());
     }
 
     #[test]
