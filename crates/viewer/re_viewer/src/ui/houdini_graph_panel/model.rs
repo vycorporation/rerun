@@ -250,6 +250,7 @@ pub(crate) enum GraphDataFlowEdgeDiagnosticStatus {
     MissingSourcePort,
     MissingTargetPort,
     IncompatibleDataKind,
+    DuplicateConnection,
     Cycle,
 }
 
@@ -261,6 +262,7 @@ impl GraphDataFlowEdgeDiagnosticStatus {
             Self::MissingSourcePort => "missing source port",
             Self::MissingTargetPort => "missing target port",
             Self::IncompatibleDataKind => "incompatible data kind",
+            Self::DuplicateConnection => "duplicate connection",
             Self::Cycle => "cyclic data flow",
         }
     }
@@ -599,6 +601,42 @@ impl GraphDocument {
         self.data_flow_edge_addition_diagnostic(edge).is_none()
     }
 
+    #[allow(dead_code)]
+    pub fn add_data_flow_edge(
+        &mut self,
+        from_node_id: &str,
+        from_output: &str,
+        to_node_id: &str,
+        to_input: &str,
+    ) -> Result<String, GraphDataFlowEdgeDiagnostic> {
+        let edge = GraphDataFlowEdge {
+            edge_id: Self::data_flow_edge_id(from_node_id, from_output, to_node_id, to_input),
+            from_node_id: from_node_id.to_owned(),
+            from_output: from_output.to_owned(),
+            to_node_id: to_node_id.to_owned(),
+            to_input: to_input.to_owned(),
+        };
+        if let Some(diagnostic) = self.data_flow_edge_addition_diagnostic(&edge) {
+            return Err(diagnostic);
+        }
+
+        let edge_id = edge.edge_id.clone();
+        let readable_path = self.readable_data_flow_edge_path(&edge);
+        self.data_flow_edges.push(edge.clone());
+        if let Some(target_index) = self
+            .nodes
+            .iter()
+            .position(|node| node.node_id == edge.to_node_id)
+        {
+            self.mark_node_stale(target_index);
+        }
+        self.record_project_command(ProjectCommand::DataFlowEdgeAdd {
+            readable_path,
+            edge,
+        });
+        Ok(edge_id)
+    }
+
     pub fn data_flow_edge_diagnostics(&self) -> Vec<GraphDataFlowEdgeDiagnostic> {
         self.data_flow_edges
             .iter()
@@ -640,6 +678,19 @@ impl GraphDocument {
         &self,
         edge: &GraphDataFlowEdge,
     ) -> Option<GraphDataFlowEdgeDiagnostic> {
+        if self
+            .data_flow_edges
+            .iter()
+            .any(|existing_edge| existing_edge.edge_id == edge.edge_id)
+        {
+            return Some(GraphDataFlowEdgeDiagnostic {
+                edge_id: edge.edge_id.clone(),
+                status: GraphDataFlowEdgeDiagnosticStatus::DuplicateConnection,
+                readable_path: self.readable_data_flow_edge_path(edge),
+                message: "Connection already exists.".to_owned(),
+            });
+        }
+
         self.data_flow_edge_endpoint_diagnostic(edge).or_else(|| {
             self.edge_would_create_cycle(&edge.from_node_id, &edge.to_node_id, None)
                 .then(|| GraphDataFlowEdgeDiagnostic {
@@ -649,6 +700,40 @@ impl GraphDocument {
                     message: "Connection would create cyclic v1 data flow.".to_owned(),
                 })
         })
+    }
+
+    fn add_data_flow_edge_without_history(&mut self, edge: GraphDataFlowEdge) -> bool {
+        if self.data_flow_edge_addition_diagnostic(&edge).is_some() {
+            return false;
+        }
+        self.data_flow_edges.push(edge.clone());
+        if let Some(target_index) = self
+            .nodes
+            .iter()
+            .position(|node| node.node_id == edge.to_node_id)
+        {
+            self.mark_node_stale(target_index);
+        }
+        true
+    }
+
+    fn remove_data_flow_edge_without_history(&mut self, edge_id: &str) -> bool {
+        let Some(edge_index) = self
+            .data_flow_edges
+            .iter()
+            .position(|edge| edge.edge_id == edge_id)
+        else {
+            return false;
+        };
+        let edge = self.data_flow_edges.remove(edge_index);
+        if let Some(target_index) = self
+            .nodes
+            .iter()
+            .position(|node| node.node_id == edge.to_node_id)
+        {
+            self.mark_node_stale(target_index);
+        }
+        true
     }
 
     #[allow(dead_code)]
@@ -2081,7 +2166,9 @@ impl GraphDocument {
             return false;
         };
         if self.apply_project_command(&command, ProjectCommandDirection::Undo) {
-            self.rebuild_default_data_flow_edges();
+            if command.rebuilds_default_data_flow_edges_after_apply() {
+                self.rebuild_default_data_flow_edges();
+            }
             self.command_history.redo_stack.push(command);
             true
         } else {
@@ -2095,7 +2182,9 @@ impl GraphDocument {
             return false;
         };
         if self.apply_project_command(&command, ProjectCommandDirection::Redo) {
-            self.rebuild_default_data_flow_edges();
+            if command.rebuilds_default_data_flow_edges_after_apply() {
+                self.rebuild_default_data_flow_edges();
+            }
             self.command_history.undo_stack.push(command);
             true
         } else {
@@ -2257,6 +2346,14 @@ impl GraphDocument {
                     node.evaluation.state = EvaluationState::Stale;
                     node.evaluation.message = Some("Reference target set changed.".to_owned());
                     true
+                }
+            },
+            ProjectCommand::DataFlowEdgeAdd { edge, .. } => match direction {
+                ProjectCommandDirection::Undo => {
+                    self.remove_data_flow_edge_without_history(&edge.edge_id)
+                }
+                ProjectCommandDirection::Redo => {
+                    self.add_data_flow_edge_without_history(edge.clone())
                 }
             },
             ProjectCommand::NodeParameterEdit {
@@ -9688,6 +9785,10 @@ pub(crate) enum ProjectCommand {
         added_entry: ReferenceTargetEntry,
         target_index: usize,
     },
+    DataFlowEdgeAdd {
+        edge: GraphDataFlowEdge,
+        readable_path: String,
+    },
     NodeParameterEdit {
         node_id: String,
         node_name: String,
@@ -9829,6 +9930,9 @@ impl ProjectCommand {
                     added_entry.provenance.source_node_name
                 )
             }
+            Self::DataFlowEdgeAdd { readable_path, .. } => {
+                format!("Add connection {readable_path}")
+            }
             Self::NodeParameterEdit {
                 node_name,
                 parameter_name,
@@ -9957,6 +10061,16 @@ impl ProjectCommand {
             }
             _ => false,
         }
+    }
+
+    fn rebuilds_default_data_flow_edges_after_apply(&self) -> bool {
+        matches!(
+            self,
+            Self::NodeDuplicate { .. }
+                | Self::NodeDelete { .. }
+                | Self::ReferenceInputCreate { .. }
+                | Self::NodeOutputParticipationEdit { .. }
+        )
     }
 }
 
@@ -15603,6 +15717,137 @@ mod tests {
         assert!(!graph.can_add_data_flow_edge(&edge));
         assert_eq!(diagnostic.status, GraphDataFlowEdgeDiagnosticStatus::Cycle);
         assert_eq!(diagnostic.edge_id, "style_to_source_cycle");
+    }
+
+    #[test]
+    fn add_data_flow_edge_records_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let initial_edge_count = graph.data_flow_edges.len();
+        let source_node_id = graph.nodes[0].node_id.clone();
+        let output_node_id = graph.nodes[3].node_id.clone();
+        let edge_id = graph
+            .add_data_flow_edge(
+                &source_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+                &output_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+            )
+            .expect("source to output connection should be a valid DAG edge");
+
+        assert_eq!(graph.data_flow_edges.len(), initial_edge_count + 1);
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == edge_id)
+        );
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::DataFlowEdgeAdd { edge, .. }) if edge.edge_id == edge_id
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Add connection /obj/main/Source:geometry -> /obj/main/Rerun Output:geometry")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.data_flow_edges.len(), initial_edge_count);
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == edge_id)
+        );
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Add connection /obj/main/Source:geometry -> /obj/main/Rerun Output:geometry")
+        );
+
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.data_flow_edges.len(), initial_edge_count + 1);
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == edge_id)
+        );
+    }
+
+    #[test]
+    fn add_data_flow_edge_rejects_duplicate_invalid_and_cyclic_edges() {
+        let mut graph = GraphDocument::sample();
+        let initial_edge_count = graph.data_flow_edges.len();
+        let source_node_id = graph.nodes[0].node_id.clone();
+        let filter_node_id = graph.nodes[1].node_id.clone();
+        let style_node_id = graph.nodes[2].node_id.clone();
+
+        let duplicate = graph
+            .add_data_flow_edge(
+                &source_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+                &filter_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+            )
+            .expect_err("default source to filter connection already exists");
+        assert_eq!(
+            duplicate.status,
+            GraphDataFlowEdgeDiagnosticStatus::DuplicateConnection
+        );
+
+        let invalid_port = graph
+            .add_data_flow_edge(
+                &source_node_id,
+                "mask",
+                &filter_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+            )
+            .expect_err("unknown source port should be rejected");
+        assert_eq!(
+            invalid_port.status,
+            GraphDataFlowEdgeDiagnosticStatus::MissingSourcePort
+        );
+
+        let cycle = graph
+            .add_data_flow_edge(
+                &style_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+                &source_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+            )
+            .expect_err("reverse style to source connection should be cyclic");
+        assert_eq!(cycle.status, GraphDataFlowEdgeDiagnosticStatus::Cycle);
+
+        assert_eq!(graph.data_flow_edges.len(), initial_edge_count);
+        assert!(graph.command_history.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn explicit_data_flow_edge_survives_non_topology_undo() {
+        let mut graph = GraphDocument::sample();
+        let source_node_id = graph.nodes[0].node_id.clone();
+        let output_node_id = graph.nodes[3].node_id.clone();
+        let edge_id = graph
+            .add_data_flow_edge(
+                &source_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+                &output_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+            )
+            .expect("source to output connection should be a valid DAG edge");
+
+        assert!(graph.set_node_parameter_value(1, 0.9));
+        assert!(graph.undo_project_command());
+
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == edge_id)
+        );
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Add connection /obj/main/Source:geometry -> /obj/main/Rerun Output:geometry")
+        );
     }
 
     #[test]
