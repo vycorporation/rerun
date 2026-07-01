@@ -110,6 +110,25 @@ impl WorkbenchCatalog {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct WorkbenchBrowserDraft {
+    display_name: String,
+    scope: WorkbenchLayoutScope,
+    default_for_user: bool,
+    default_for_project: bool,
+}
+
+impl Default for WorkbenchBrowserDraft {
+    fn default() -> Self {
+        Self {
+            display_name: "My Workbench".to_owned(),
+            scope: WorkbenchLayoutScope::Personal,
+            default_for_user: false,
+            default_for_project: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 struct WorkbenchLayoutEntry {
     id: String,
     display_name: String,
@@ -205,30 +224,115 @@ fn register_workbench_duplicate(
     scope: WorkbenchLayoutScope,
     source_entry: &WorkbenchLayoutEntry,
     preset: HoudiniWorkbenchPreset,
+    display_name: &str,
+    default_for_user: bool,
+    default_for_project: bool,
+) -> anyhow::Result<WorkbenchLayoutEntry> {
+    register_workbench_copy(
+        scope,
+        display_name,
+        Some(format!("Copy of {}", source_entry.display_name)),
+        default_for_user,
+        default_for_project,
+        |entry| Some(format!("{} copy", preset.label())).filter(|_| entry.description.is_none()),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn register_saved_workbench_copy(
+    source_entry: &WorkbenchLayoutEntry,
+    draft: &WorkbenchBrowserDraft,
+) -> anyhow::Result<WorkbenchLayoutEntry> {
+    let registered = register_workbench_copy(
+        draft.scope,
+        &draft.display_name,
+        Some(format!("Copy of {}", source_entry.display_name)),
+        draft.default_for_user,
+        draft.default_for_project,
+        |_| None,
+    )?;
+
+    if let (Some(source_path), Some(destination_path)) =
+        (&source_entry.blueprint_path, &registered.blueprint_path)
+        && source_path.exists()
+    {
+        std::fs::copy(source_path, destination_path)?;
+    }
+
+    Ok(registered)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn register_current_workbench(
+    draft: &WorkbenchBrowserDraft,
+) -> anyhow::Result<WorkbenchLayoutEntry> {
+    register_workbench_copy(
+        draft.scope,
+        &draft.display_name,
+        Some("Saved from the current edited workbench layout.".to_owned()),
+        draft.default_for_user,
+        draft.default_for_project,
+        |_| None,
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn register_current_workbench(
+    _draft: &WorkbenchBrowserDraft,
+) -> anyhow::Result<WorkbenchLayoutEntry> {
+    anyhow::bail!("workbench metadata is only available in the native viewer")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn register_saved_workbench_copy(
+    _source_entry: &WorkbenchLayoutEntry,
+    _draft: &WorkbenchBrowserDraft,
+) -> anyhow::Result<WorkbenchLayoutEntry> {
+    anyhow::bail!("workbench metadata is only available in the native viewer")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn register_workbench_copy(
+    scope: WorkbenchLayoutScope,
+    display_name: &str,
+    description: Option<String>,
+    default_for_user: bool,
+    default_for_project: bool,
+    fallback_description: impl FnOnce(&WorkbenchLayoutEntry) -> Option<String>,
 ) -> anyhow::Result<WorkbenchLayoutEntry> {
     let root = workbench_metadata_root()
         .ok_or_else(|| anyhow::anyhow!("could not locate Rerun storage directory"))?;
     let directory = root.join(scope.directory_name());
     std::fs::create_dir_all(&directory)?;
 
-    let display_name = format!("Copy of {}", source_entry.display_name);
+    let display_name = sanitized_workbench_display_name(display_name);
     let slug = sanitize_workbench_id(&display_name);
     let blueprint_path = directory.join(format!("{slug}.rbl"));
     let entry = WorkbenchLayoutEntry {
         id: format!("{}:{slug}", scope.directory_name()),
-        display_name,
+        display_name: display_name.clone(),
         scope,
         source: WorkbenchLayoutSource::SavedBlueprint,
-        description: Some(format!("Personal copy of {}", preset.label())),
+        description,
         blueprint_path: Some(blueprint_path),
-        default_for_project: false,
-        default_for_user: false,
+        default_for_project,
+        default_for_user,
         compatibility_version: workbench_compatibility_version(),
     };
+    let mut entry = entry;
+    if entry.description.is_none() {
+        entry.description = fallback_description(&entry);
+    }
     std::fs::write(
         directory.join(format!("{slug}.json")),
         serde_json::to_string_pretty(&entry)?,
     )?;
+    if entry.default_for_user {
+        set_workbench_default(&root, scope, &entry.id, WorkbenchDefaultKind::Personal)?;
+    }
+    if entry.default_for_project {
+        set_workbench_default(&root, scope, &entry.id, WorkbenchDefaultKind::Project)?;
+    }
     Ok(entry)
 }
 
@@ -237,7 +341,70 @@ fn register_workbench_duplicate(
     _scope: WorkbenchLayoutScope,
     _source_entry: &WorkbenchLayoutEntry,
     _preset: HoudiniWorkbenchPreset,
+    _display_name: &str,
+    _default_for_user: bool,
+    _default_for_project: bool,
 ) -> anyhow::Result<WorkbenchLayoutEntry> {
+    anyhow::bail!("workbench metadata is only available in the native viewer")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkbenchDefaultKind {
+    Personal,
+    Project,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_workbench_default(
+    root: &std::path::Path,
+    scope: WorkbenchLayoutScope,
+    target_id: &str,
+    kind: WorkbenchDefaultKind,
+) -> anyhow::Result<()> {
+    let directory = root.join(scope.directory_name());
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Ok(());
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(json) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut layout) = serde_json::from_str::<WorkbenchLayoutEntry>(&json) else {
+            continue;
+        };
+        if layout.scope != scope {
+            continue;
+        }
+        match kind {
+            WorkbenchDefaultKind::Personal => layout.default_for_user = layout.id == target_id,
+            WorkbenchDefaultKind::Project => layout.default_for_project = layout.id == target_id,
+        }
+        std::fs::write(path, serde_json::to_string_pretty(&layout)?)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_saved_workbench_default(
+    entry: &WorkbenchLayoutEntry,
+    kind: WorkbenchDefaultKind,
+) -> anyhow::Result<()> {
+    let root = workbench_metadata_root()
+        .ok_or_else(|| anyhow::anyhow!("could not locate Rerun storage directory"))?;
+    set_workbench_default(&root, entry.scope, &entry.id, kind)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn set_saved_workbench_default(
+    _entry: &WorkbenchLayoutEntry,
+    _kind: WorkbenchDefaultKind,
+) -> anyhow::Result<()> {
     anyhow::bail!("workbench metadata is only available in the native viewer")
 }
 
@@ -269,6 +436,15 @@ fn sanitize_workbench_id(value: &str) -> String {
         "workbench".to_owned()
     } else {
         sanitized
+    }
+}
+
+fn sanitized_workbench_display_name(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        "My Workbench".to_owned()
+    } else {
+        value.to_owned()
     }
 }
 
@@ -318,6 +494,37 @@ fn workbench_browser_ui(
     viewport_blueprint: &ViewportBlueprint,
     catalog: &WorkbenchCatalog,
 ) {
+    let draft_id = ui.make_persistent_id("houdini_workbench_browser_draft");
+    let mut draft = ui.data_mut(|data| {
+        data.get_persisted_mut_or_insert_with(draft_id, WorkbenchBrowserDraft::default)
+            .clone()
+    });
+
+    ui.horizontal(|ui| {
+        ui.weak("Name");
+        ui.add(egui::TextEdit::singleline(&mut draft.display_name).desired_width(180.0));
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(&mut draft.scope, WorkbenchLayoutScope::Personal, "Personal");
+        ui.selectable_value(&mut draft.scope, WorkbenchLayoutScope::Project, "Project");
+        ui.checkbox(&mut draft.default_for_user, "Personal default");
+        ui.checkbox(&mut draft.default_for_project, "Project default");
+        if ui
+            .small_button("Save Current")
+            .on_hover_text("Save the current edited blueprint as the named workbench.")
+            .clicked()
+        {
+            if let Ok(registered) = register_current_workbench(&draft)
+                && let Some(path) = registered.blueprint_path
+            {
+                save_active_workbench_blueprint(ctx, path);
+            }
+            ui.close();
+        }
+    });
+    ui.data_mut(|data| data.insert_persisted(draft_id, draft.clone()));
+    ui.separator();
+
     ui.strong("Bundled");
     for entry in &catalog.bundled {
         ui.horizontal(|ui| {
@@ -340,9 +547,14 @@ fn workbench_browser_ui(
                 .clicked()
             {
                 if let WorkbenchLayoutSource::BundledPreset(preset) = entry.source {
-                    if let Ok(registered) =
-                        register_workbench_duplicate(WorkbenchLayoutScope::Personal, entry, preset)
-                    {
+                    if let Ok(registered) = register_workbench_duplicate(
+                        draft.scope,
+                        entry,
+                        preset,
+                        &draft.display_name,
+                        draft.default_for_user,
+                        draft.default_for_project,
+                    ) {
                         apply_houdini_workbench_preset(ctx, viewport_blueprint, preset);
                         if let Some(path) = registered.blueprint_path {
                             save_active_workbench_blueprint(ctx, path);
@@ -355,9 +567,9 @@ fn workbench_browser_ui(
     }
 
     ui.separator();
-    saved_workbench_section_ui(ui, ctx, "Personal", &catalog.personal);
+    saved_workbench_section_ui(ui, ctx, "Personal", &catalog.personal, &draft);
     ui.separator();
-    saved_workbench_section_ui(ui, ctx, "Project", &catalog.project);
+    saved_workbench_section_ui(ui, ctx, "Project", &catalog.project, &draft);
 }
 
 fn saved_workbench_section_ui(
@@ -365,6 +577,7 @@ fn saved_workbench_section_ui(
     ctx: &re_viewer_context::ViewerContext<'_>,
     heading: &str,
     entries: &[WorkbenchLayoutEntry],
+    draft: &WorkbenchBrowserDraft,
 ) {
     ui.strong(heading);
     if entries.is_empty() {
@@ -399,6 +612,39 @@ fn saved_workbench_section_ui(
             }
             if entry.default_for_user {
                 ui.weak("personal default");
+            }
+            if !entry.default_for_user
+                && ui
+                    .small_button("Use personal default")
+                    .on_hover_text("Make this saved workbench the personal default.")
+                    .clicked()
+            {
+                let _ = set_saved_workbench_default(entry, WorkbenchDefaultKind::Personal);
+                ui.close();
+            }
+            if !entry.default_for_project
+                && ui
+                    .small_button("Use project default")
+                    .on_hover_text("Make this saved workbench the project default.")
+                    .clicked()
+            {
+                let _ = set_saved_workbench_default(entry, WorkbenchDefaultKind::Project);
+                ui.close();
+            }
+            if entry.scope == WorkbenchLayoutScope::Project
+                && ui
+                    .small_button("Duplicate")
+                    .on_hover_text(
+                        "Copy this project workbench metadata into a personal or project layout.",
+                    )
+                    .clicked()
+            {
+                if let Ok(registered) = register_saved_workbench_copy(entry, draft) {
+                    if let Some(path) = registered.blueprint_path {
+                        open_workbench_blueprint(ctx, path);
+                    }
+                }
+                ui.close();
             }
         });
     }
@@ -739,8 +985,9 @@ mod tests {
     use re_viewer_context::ViewId;
 
     use super::{
-        HoudiniWorkbenchPreset, PresetViews, WorkbenchCatalog, WorkbenchLayoutEntry,
-        WorkbenchLayoutScope, WorkbenchLayoutSource, build_preset_tree, sanitize_workbench_id,
+        HoudiniWorkbenchPreset, PresetViews, WorkbenchCatalog, WorkbenchDefaultKind,
+        WorkbenchLayoutEntry, WorkbenchLayoutScope, WorkbenchLayoutSource, build_preset_tree,
+        sanitize_workbench_id, sanitized_workbench_display_name, set_workbench_default,
         workbench_compatibility_version,
     };
 
@@ -926,6 +1173,65 @@ mod tests {
             "copy-of-houdini-default"
         );
         assert_eq!(sanitize_workbench_id("///"), "workbench");
+        assert_eq!(sanitized_workbench_display_name("  "), "My Workbench");
+        assert_eq!(sanitized_workbench_display_name("  Review  "), "Review");
+    }
+
+    #[test]
+    fn workbench_default_selection_updates_only_matching_scope() {
+        let root = tempfile::tempdir().unwrap();
+        let personal_dir = root.path().join("personal");
+        let project_dir = root.path().join("project");
+        std::fs::create_dir_all(&personal_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let first = saved_entry(
+            "personal:first",
+            "First",
+            WorkbenchLayoutScope::Personal,
+            true,
+            false,
+        );
+        let second = saved_entry(
+            "personal:second",
+            "Second",
+            WorkbenchLayoutScope::Personal,
+            false,
+            false,
+        );
+        let project = saved_entry(
+            "project:shared",
+            "Shared",
+            WorkbenchLayoutScope::Project,
+            false,
+            true,
+        );
+        write_entry(&personal_dir, "first", &first);
+        write_entry(&personal_dir, "second", &second);
+        write_entry(&project_dir, "shared", &project);
+
+        set_workbench_default(
+            root.path(),
+            WorkbenchLayoutScope::Personal,
+            "personal:second",
+            WorkbenchDefaultKind::Personal,
+        )
+        .unwrap();
+
+        let catalog = WorkbenchCatalog::load_from_root(root.path());
+        assert!(
+            catalog
+                .personal
+                .iter()
+                .any(|entry| entry.id == "personal:first" && !entry.default_for_user)
+        );
+        assert!(
+            catalog
+                .personal
+                .iter()
+                .any(|entry| entry.id == "personal:second" && entry.default_for_user)
+        );
+        assert_eq!(catalog.project, vec![project]);
     }
 
     fn saved_entry(
@@ -946,5 +1252,13 @@ mod tests {
             default_for_user,
             compatibility_version: workbench_compatibility_version(),
         }
+    }
+
+    fn write_entry(directory: &std::path::Path, name: &str, entry: &WorkbenchLayoutEntry) {
+        std::fs::write(
+            directory.join(format!("{name}.json")),
+            serde_json::to_string_pretty(entry).unwrap(),
+        )
+        .unwrap();
     }
 }
