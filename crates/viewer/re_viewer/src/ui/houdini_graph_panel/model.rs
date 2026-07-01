@@ -127,19 +127,34 @@ pub(crate) struct GraphDataFlowEdge {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct GraphDataFlowEdgeDiagnostic {
     pub edge_id: String,
     pub status: GraphDataFlowEdgeDiagnosticStatus,
+    pub readable_path: String,
     pub message: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum GraphDataFlowEdgeDiagnosticStatus {
     MissingSourceNode,
     MissingTargetNode,
+    MissingSourcePort,
+    MissingTargetPort,
+    IncompatibleDataKind,
     Cycle,
+}
+
+impl GraphDataFlowEdgeDiagnosticStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingSourceNode => "missing source node",
+            Self::MissingTargetNode => "missing target node",
+            Self::MissingSourcePort => "missing source port",
+            Self::MissingTargetPort => "missing target port",
+            Self::IncompatibleDataKind => "incompatible data kind",
+            Self::Cycle => "cyclic data flow",
+        }
+    }
 }
 
 impl GraphDocument {
@@ -223,7 +238,6 @@ impl GraphDocument {
         self.data_flow_edge_addition_diagnostic(edge).is_none()
     }
 
-    #[allow(dead_code)]
     pub fn data_flow_edge_diagnostics(&self) -> Vec<GraphDataFlowEdgeDiagnostic> {
         self.data_flow_edges
             .iter()
@@ -241,6 +255,7 @@ impl GraphDocument {
                 .then(|| GraphDataFlowEdgeDiagnostic {
                     edge_id: edge.edge_id.clone(),
                     status: GraphDataFlowEdgeDiagnosticStatus::Cycle,
+                    readable_path: self.readable_data_flow_edge_path(edge),
                     message: "Connection would create cyclic v1 data flow.".to_owned(),
                 })
         })
@@ -256,6 +271,7 @@ impl GraphDocument {
                 .then(|| GraphDataFlowEdgeDiagnostic {
                     edge_id: edge.edge_id.clone(),
                     status: GraphDataFlowEdgeDiagnosticStatus::Cycle,
+                    readable_path: self.readable_data_flow_edge_path(edge),
                     message: "Loaded edge participates in cyclic v1 data flow.".to_owned(),
                 })
         })
@@ -266,15 +282,35 @@ impl GraphDocument {
         &self,
         edge: &GraphDataFlowEdge,
     ) -> Option<GraphDataFlowEdgeDiagnostic> {
-        if !self
+        let Some(source_node) = self
             .nodes
             .iter()
-            .any(|node| node.node_id == edge.from_node_id)
-        {
+            .find(|node| node.node_id == edge.from_node_id)
+        else {
             return Some(GraphDataFlowEdgeDiagnostic {
                 edge_id: edge.edge_id.clone(),
                 status: GraphDataFlowEdgeDiagnosticStatus::MissingSourceNode,
+                readable_path: self.readable_data_flow_edge_path(edge),
                 message: format!("Source node id '{}' is missing.", edge.from_node_id),
+            });
+        };
+        if self.node_primary_output_kind(source_node.kind).is_none() {
+            return Some(GraphDataFlowEdgeDiagnostic {
+                edge_id: edge.edge_id.clone(),
+                status: GraphDataFlowEdgeDiagnosticStatus::IncompatibleDataKind,
+                readable_path: self.readable_data_flow_edge_path(edge),
+                message: format!(
+                    "{} cannot produce a geometry-table output.",
+                    source_node.kind.as_str()
+                ),
+            });
+        }
+        if edge.from_output != PRIMARY_GEOMETRY_OUTPUT {
+            return Some(GraphDataFlowEdgeDiagnostic {
+                edge_id: edge.edge_id.clone(),
+                status: GraphDataFlowEdgeDiagnosticStatus::MissingSourcePort,
+                readable_path: self.readable_data_flow_edge_path(edge),
+                message: format!("Source port '{}' is not available.", edge.from_output),
             });
         }
         if !self
@@ -285,7 +321,16 @@ impl GraphDocument {
             return Some(GraphDataFlowEdgeDiagnostic {
                 edge_id: edge.edge_id.clone(),
                 status: GraphDataFlowEdgeDiagnosticStatus::MissingTargetNode,
+                readable_path: self.readable_data_flow_edge_path(edge),
                 message: format!("Target node id '{}' is missing.", edge.to_node_id),
+            });
+        }
+        if edge.to_input != PRIMARY_GEOMETRY_OUTPUT {
+            return Some(GraphDataFlowEdgeDiagnostic {
+                edge_id: edge.edge_id.clone(),
+                status: GraphDataFlowEdgeDiagnosticStatus::MissingTargetPort,
+                readable_path: self.readable_data_flow_edge_path(edge),
+                message: format!("Target port '{}' is not available.", edge.to_input),
             });
         }
         None
@@ -309,6 +354,54 @@ impl GraphDocument {
                 .push(edge.to_node_id.as_str());
         }
         path_exists(to_node_id, from_node_id, &adjacency)
+    }
+
+    fn data_flow_info_for_node(&self, node: &GraphNode) -> NodeDataFlowInfo {
+        let incoming_edge_count = self
+            .data_flow_edges
+            .iter()
+            .filter(|edge| edge.to_node_id == node.node_id)
+            .count();
+        let outgoing_edge_count = self
+            .data_flow_edges
+            .iter()
+            .filter(|edge| edge.from_node_id == node.node_id)
+            .count();
+        let diagnostics = self
+            .data_flow_edge_diagnostics()
+            .into_iter()
+            .filter(|diagnostic| {
+                self.data_flow_edges
+                    .iter()
+                    .find(|edge| edge.edge_id == diagnostic.edge_id)
+                    .is_some_and(|edge| {
+                        edge.from_node_id == node.node_id || edge.to_node_id == node.node_id
+                    })
+            })
+            .collect();
+        NodeDataFlowInfo {
+            incoming_edge_count,
+            outgoing_edge_count,
+            diagnostics,
+        }
+    }
+
+    fn readable_data_flow_edge_path(&self, edge: &GraphDataFlowEdge) -> String {
+        format!(
+            "{}:{} -> {}:{}",
+            self.readable_node_path_for_id(&edge.from_node_id),
+            edge.from_output,
+            self.readable_node_path_for_id(&edge.to_node_id),
+            edge.to_input
+        )
+    }
+
+    fn readable_node_path_for_id(&self, node_id: &str) -> String {
+        self.nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .map(|node| self.readable_node_path_for_name(&node.name))
+            .unwrap_or_else(|| format!("{}/<missing:{node_id}>", self.current_graph_path()))
     }
 
     pub fn sample() -> Self {
@@ -4433,12 +4526,14 @@ impl GraphDocument {
         let coordinate_warnings = self.coordinate_contract_warnings(node);
         let substrate_raster = self.substrate_raster_for_node(node);
         let graph_location = self.graph_location_for_node(node);
+        let data_flow = self.data_flow_info_for_node(node);
 
         Some(match node.kind {
             NodeKind::Source => NodeInfo {
                 kind: node.kind,
                 role: node.kind.role(),
                 graph_location: graph_location.clone(),
+                data_flow: data_flow.clone(),
                 input_count: stage.input_count,
                 output_count: stage.output_count,
                 status: if self.source.import_error.is_some() {
@@ -4474,6 +4569,7 @@ impl GraphDocument {
                 kind: node.kind,
                 role: node.kind.role(),
                 graph_location: graph_location.clone(),
+                data_flow: data_flow.clone(),
                 input_count: stage.input_count,
                 output_count: stage.output_count,
                 status: if filter_warnings.is_empty() {
@@ -4509,6 +4605,7 @@ impl GraphDocument {
                 kind: node.kind,
                 role: node.kind.role(),
                 graph_location: graph_location.clone(),
+                data_flow: data_flow.clone(),
                 input_count: stage.input_count,
                 output_count: stage.output_count,
                 status: if style_warnings.is_empty() {
@@ -4546,6 +4643,7 @@ impl GraphDocument {
                     kind: node.kind,
                     role: node.kind.role(),
                     graph_location: graph_location.clone(),
+                    data_flow: data_flow.clone(),
                     input_count: stage.input_count,
                     output_count: stage.output_count,
                     status: NodeStatus::Healthy,
@@ -4599,6 +4697,7 @@ impl GraphDocument {
                     kind: node.kind,
                     role: node.kind.role(),
                     graph_location: graph_location.clone(),
+                    data_flow: data_flow.clone(),
                     input_count: target_entries.iter().filter(|entry| entry.enabled).count(),
                     output_count: stage.output_count,
                     status: if warnings.is_empty() {
@@ -4665,6 +4764,7 @@ impl GraphDocument {
                     kind: node.kind,
                     role: node.kind.role(),
                     graph_location: graph_location.clone(),
+                    data_flow: data_flow.clone(),
                     input_count: 1,
                     output_count: stage.output_count,
                     status: NodeStatus::Healthy,
@@ -4716,6 +4816,7 @@ impl GraphDocument {
                     kind: node.kind,
                     role: node.kind.role(),
                     graph_location: graph_location.clone(),
+                    data_flow: data_flow.clone(),
                     input_count: declaration.map_or(0, |declaration| declaration.inputs.len()),
                     output_count: declaration.map_or(0, |declaration| declaration.outputs.len()),
                     status: match dependency_status {
@@ -4788,6 +4889,7 @@ impl GraphDocument {
                     kind: node.kind,
                     role: node.kind.role(),
                     graph_location: graph_location.clone(),
+                    data_flow: data_flow.clone(),
                     input_count: declaration.map_or(0, |declaration| declaration.inputs.len()),
                     output_count: declaration.map_or(0, |declaration| declaration.outputs.len()),
                     status: match version_status {
@@ -4877,6 +4979,7 @@ impl GraphDocument {
                     kind: node.kind,
                     role: node.kind.role(),
                     graph_location: graph_location.clone(),
+                    data_flow: data_flow.clone(),
                     input_count: declaration.map_or(0, |declaration| declaration.inputs.len()),
                     output_count: declaration.map_or(0, |declaration| declaration.outputs.len()),
                     status: native_operator_node_status(version_status, load_status),
@@ -4965,6 +5068,7 @@ impl GraphDocument {
                 kind: node.kind,
                 role: node.kind.role(),
                 graph_location,
+                data_flow,
                 input_count: stage.input_count,
                 output_count: stage.output_count,
                 status: NodeStatus::Healthy,
@@ -9346,10 +9450,18 @@ impl GraphLocationInfo {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NodeDataFlowInfo {
+    pub incoming_edge_count: usize,
+    pub outgoing_edge_count: usize,
+    pub diagnostics: Vec<GraphDataFlowEdgeDiagnostic>,
+}
+
 pub(crate) struct NodeInfo {
     pub kind: NodeKind,
     pub role: &'static str,
     pub graph_location: GraphLocationInfo,
+    pub data_flow: NodeDataFlowInfo,
     pub input_count: usize,
     pub output_count: usize,
     pub status: NodeStatus,
@@ -13644,8 +13756,8 @@ mod tests {
     fn graph_data_flow_edge_validation_rejects_cycle_addition() {
         let graph = GraphDocument::sample();
         let edge = GraphDataFlowEdge {
-            edge_id: "output_to_source_cycle".to_owned(),
-            from_node_id: graph.nodes[3].node_id.clone(),
+            edge_id: "style_to_source_cycle".to_owned(),
+            from_node_id: graph.nodes[2].node_id.clone(),
             from_output: "geometry".to_owned(),
             to_node_id: graph.nodes[0].node_id.clone(),
             to_input: "geometry".to_owned(),
@@ -13656,7 +13768,7 @@ mod tests {
 
         assert!(!graph.can_add_data_flow_edge(&edge));
         assert_eq!(diagnostic.status, GraphDataFlowEdgeDiagnosticStatus::Cycle);
-        assert_eq!(diagnostic.edge_id, "output_to_source_cycle");
+        assert_eq!(diagnostic.edge_id, "style_to_source_cycle");
     }
 
     #[test]
@@ -13671,7 +13783,7 @@ mod tests {
         });
         graph.data_flow_edges.push(GraphDataFlowEdge {
             edge_id: "loaded_cycle".to_owned(),
-            from_node_id: graph.nodes[3].node_id.clone(),
+            from_node_id: graph.nodes[2].node_id.clone(),
             from_output: "geometry".to_owned(),
             to_node_id: graph.nodes[0].node_id.clone(),
             to_input: "geometry".to_owned(),
@@ -13694,6 +13806,104 @@ mod tests {
                 .iter()
                 .any(|edge| edge.edge_id == "loaded_cycle")
         );
+    }
+
+    #[test]
+    fn graph_data_flow_edge_diagnostics_distinguish_ports_and_kind() {
+        let mut graph = GraphDocument::sample();
+        graph.data_flow_edges.push(GraphDataFlowEdge {
+            edge_id: "missing_source_port".to_owned(),
+            from_node_id: graph.nodes[0].node_id.clone(),
+            from_output: "mask".to_owned(),
+            to_node_id: graph.nodes[1].node_id.clone(),
+            to_input: "geometry".to_owned(),
+        });
+        graph.data_flow_edges.push(GraphDataFlowEdge {
+            edge_id: "missing_target_port".to_owned(),
+            from_node_id: graph.nodes[0].node_id.clone(),
+            from_output: "geometry".to_owned(),
+            to_node_id: graph.nodes[1].node_id.clone(),
+            to_input: "mask".to_owned(),
+        });
+        graph.data_flow_edges.push(GraphDataFlowEdge {
+            edge_id: "incompatible_output_kind".to_owned(),
+            from_node_id: graph.nodes[3].node_id.clone(),
+            from_output: "geometry".to_owned(),
+            to_node_id: graph.nodes[1].node_id.clone(),
+            to_input: "geometry".to_owned(),
+        });
+
+        let diagnostics = graph.data_flow_edge_diagnostics();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.edge_id == "missing_source_port"
+                && diagnostic.status == GraphDataFlowEdgeDiagnosticStatus::MissingSourcePort
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.edge_id == "missing_target_port"
+                && diagnostic.status == GraphDataFlowEdgeDiagnosticStatus::MissingTargetPort
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.edge_id == "incompatible_output_kind"
+                && diagnostic.status == GraphDataFlowEdgeDiagnosticStatus::IncompatibleDataKind
+        }));
+    }
+
+    #[test]
+    fn selected_node_info_reports_explicit_edge_counts() {
+        let graph = GraphDocument::sample();
+        let source_info = graph
+            .selected_node_info(0)
+            .expect("source node info should exist");
+        let filter_info = graph
+            .selected_node_info(1)
+            .expect("filter node info should exist");
+        let output_info = graph
+            .selected_node_info(3)
+            .expect("output node info should exist");
+
+        assert_eq!(source_info.data_flow.incoming_edge_count, 0);
+        assert_eq!(source_info.data_flow.outgoing_edge_count, 1);
+        assert_eq!(filter_info.data_flow.incoming_edge_count, 1);
+        assert_eq!(filter_info.data_flow.outgoing_edge_count, 1);
+        assert_eq!(output_info.data_flow.incoming_edge_count, 1);
+        assert_eq!(output_info.data_flow.outgoing_edge_count, 0);
+    }
+
+    #[test]
+    fn selected_node_info_reports_readable_connection_diagnostics() {
+        let mut graph = GraphDocument::sample();
+        graph.data_flow_edges.push(GraphDataFlowEdge {
+            edge_id: "filter_bad_target_port".to_owned(),
+            from_node_id: graph.nodes[0].node_id.clone(),
+            from_output: "geometry".to_owned(),
+            to_node_id: graph.nodes[1].node_id.clone(),
+            to_input: "mask".to_owned(),
+        });
+        graph.data_flow_edges.push(GraphDataFlowEdge {
+            edge_id: "style_cycle".to_owned(),
+            from_node_id: graph.nodes[2].node_id.clone(),
+            from_output: "geometry".to_owned(),
+            to_node_id: graph.nodes[0].node_id.clone(),
+            to_input: "geometry".to_owned(),
+        });
+
+        let source_info = graph
+            .selected_node_info(0)
+            .expect("source node info should exist");
+        let filter_info = graph
+            .selected_node_info(1)
+            .expect("filter node info should exist");
+
+        assert!(source_info.data_flow.diagnostics.iter().any(|diagnostic| {
+            diagnostic.status == GraphDataFlowEdgeDiagnosticStatus::Cycle
+                && diagnostic.readable_path
+                    == "/obj/main/Style:geometry -> /obj/main/Source:geometry"
+        }));
+        assert!(filter_info.data_flow.diagnostics.iter().any(|diagnostic| {
+            diagnostic.status == GraphDataFlowEdgeDiagnosticStatus::MissingTargetPort
+                && diagnostic.readable_path == "/obj/main/Source:geometry -> /obj/main/Filter:mask"
+        }));
     }
 
     #[test]
