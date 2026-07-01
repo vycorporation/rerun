@@ -456,6 +456,18 @@ impl ViewportBlueprint {
         view_id
     }
 
+    /// Replace the viewport tree, preserving display names for the provided container tiles.
+    pub fn set_tree_with_container_names(
+        &self,
+        tree: egui_tiles::Tree<ViewId>,
+        container_display_names: Vec<(egui_tiles::TileId, String)>,
+    ) {
+        self.enqueue_command(ViewportCommand::SetTreeWithContainerNames {
+            tree,
+            container_display_names,
+        });
+    }
+
     /// Returns an iterator over all the contents (views and containers) in the viewport.
     pub fn contents_iter(&self) -> impl Iterator<Item = Contents> + '_ {
         std::iter::chain(
@@ -834,7 +846,11 @@ impl ViewportBlueprint {
 
     /// Save the current state of the viewport to the blueprint store.
     /// This should only be called if the tree was edited.
-    pub fn save_tree_as_containers(&self, ctx: &ViewerContext<'_>) {
+    pub fn save_tree_as_containers(
+        &self,
+        ctx: &ViewerContext<'_>,
+        container_display_names: &[(egui_tiles::TileId, String)],
+    ) {
         re_tracing::profile_function!();
 
         re_log::trace!("Saving tree: {:#?}", self.tree);
@@ -912,7 +928,12 @@ impl ViewportBlueprint {
                     visible,
                     &contents_from_tile_id,
                 );
-                if blueprint.display_name.is_none()
+                if let Some((_, display_name)) = container_display_names
+                    .iter()
+                    .find(|(named_tile_id, _)| named_tile_id == tile_id)
+                {
+                    blueprint.display_name = Some(display_name.clone());
+                } else if blueprint.display_name.is_none()
                     && let Some(display_name) =
                         super::auto_layout::default_tab_group_container_name(*container_id)
                 {
@@ -957,9 +978,16 @@ impl ViewportBlueprint {
         }
 
         let mut run_auto_layout = false;
+        let mut container_display_names = Vec::new();
 
         for command in commands {
-            apply_viewport_command(ctx, &mut self, command, &mut run_auto_layout);
+            apply_viewport_command(
+                ctx,
+                &mut self,
+                command,
+                &mut run_auto_layout,
+                &mut container_display_names,
+            );
         }
 
         if run_auto_layout {
@@ -974,7 +1002,7 @@ impl ViewportBlueprint {
         // TODO(emilk): consider diffing the tree against the state it was in at the start of the frame,
         // so that we only save it if it actually changed.
 
-        self.save_tree_as_containers(ctx);
+        self.save_tree_as_containers(ctx, &container_display_names);
     }
 }
 
@@ -994,11 +1022,20 @@ fn apply_viewport_command(
     bp: &mut ViewportBlueprint,
     command: ViewportCommand,
     run_auto_layout: &mut bool,
+    container_display_names: &mut Vec<(egui_tiles::TileId, String)>,
 ) {
     re_log::trace!("Processing viewport command: {command:?}");
     match command {
         ViewportCommand::SetTree(new_tree) => {
             bp.tree = new_tree;
+        }
+
+        ViewportCommand::SetTreeWithContainerNames {
+            tree,
+            container_display_names: names,
+        } => {
+            bp.tree = tree;
+            *container_display_names = names;
         }
 
         ViewportCommand::AddView {

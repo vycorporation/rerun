@@ -67,3 +67,8 @@ Any Houdini-specific wrapper should store only metadata needed for naming, categ
 ## Implementation follow-up
 
 Track the implementation in #72.
+
+Initial implementation slice: bundled workbench layout loading is available from the viewport
+Workbench menu, using native Rerun blueprint views, splits, tab containers, and named containers.
+Follow-up work remains for duplicating presets into named personal layouts and browsing/reloading
+saved personal or project workbenches beyond the existing `.rbl` blueprint save path.
