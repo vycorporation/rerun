@@ -1301,6 +1301,35 @@ impl GraphDocument {
                 };
                 true
             }
+            ProjectCommand::NodeDuplicate {
+                duplicated_node,
+                insert_index,
+                ..
+            } => match direction {
+                ProjectCommandDirection::Undo => {
+                    let Some(node_index) = self
+                        .nodes
+                        .iter()
+                        .position(|node| node.node_id == duplicated_node.node_id)
+                    else {
+                        return false;
+                    };
+                    self.nodes.remove(node_index);
+                    true
+                }
+                ProjectCommandDirection::Redo => {
+                    if self
+                        .nodes
+                        .iter()
+                        .any(|node| node.node_id == duplicated_node.node_id)
+                    {
+                        return false;
+                    }
+                    let insert_index = (*insert_index).min(self.nodes.len());
+                    self.nodes.insert(insert_index, (**duplicated_node).clone());
+                    true
+                }
+            },
             ProjectCommand::NodeParameterEdit {
                 node_id,
                 old_value,
@@ -1750,6 +1779,7 @@ impl GraphDocument {
 
     pub fn duplicate_node(&mut self, node_index: usize) -> Option<usize> {
         let source = self.nodes.get(node_index)?;
+        let source_node_id = source.node_id.clone();
         let source_name = source.name.clone();
         let mut node = source.clone();
 
@@ -1788,7 +1818,14 @@ impl GraphDocument {
         }
 
         let insert_index = (node_index + 1).min(self.nodes.len());
+        let duplicated_node = node.clone();
         self.nodes.insert(insert_index, node);
+        self.record_project_command(ProjectCommand::NodeDuplicate {
+            source_node_id,
+            source_node_name: source_name,
+            duplicated_node: Box::new(duplicated_node),
+            insert_index,
+        });
         Some(insert_index)
     }
 
@@ -7191,18 +7228,24 @@ impl GraphEvaluationMode {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default)]
 pub(crate) struct ProjectCommandHistory {
     pub undo_stack: Vec<ProjectCommand>,
     pub redo_stack: Vec<ProjectCommand>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub(crate) enum ProjectCommand {
     NodeRename {
         node_id: String,
         old_name: String,
         new_name: String,
+    },
+    NodeDuplicate {
+        source_node_id: String,
+        source_node_name: String,
+        duplicated_node: Box<GraphNode>,
+        insert_index: usize,
     },
     NodeParameterEdit {
         node_id: String,
@@ -7284,6 +7327,14 @@ impl ProjectCommand {
     fn summary(&self) -> String {
         match self {
             Self::NodeRename { old_name, .. } => format!("Rename {old_name}"),
+            Self::NodeDuplicate {
+                source_node_id,
+                source_node_name,
+                ..
+            } => {
+                let _ = source_node_id;
+                format!("Duplicate {source_node_name}")
+            }
             Self::NodeParameterEdit {
                 node_name,
                 parameter_name,
@@ -7328,10 +7379,20 @@ impl ProjectCommand {
                     "Expand boxes and notes".to_owned()
                 }
             }
-            Self::LayerVisibilityEdit { layer_name, .. } => {
+            Self::LayerVisibilityEdit {
+                layer_name,
+                layer_kind,
+                ..
+            } => {
+                let _ = layer_kind;
                 format!("Set {layer_name} visibility")
             }
-            Self::LayerOrderEdit { layer_name, .. } => {
+            Self::LayerOrderEdit {
+                layer_name,
+                layer_kind,
+                ..
+            } => {
+                let _ = layer_kind;
                 format!("Set {layer_name} order")
             }
         }
@@ -11202,6 +11263,88 @@ mod tests {
         assert!(graph.nodes[filter_index].show_comment_in_network);
         assert!(!graph.set_node_comment_visibility(filter_index, true));
         assert!(!graph.set_node_comment_visibility(graph.nodes.len(), false));
+    }
+
+    #[test]
+    fn node_duplicate_records_undoable_project_command_with_new_stable_id() {
+        let mut graph = GraphDocument::sample();
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .expect("sample graph should include output node");
+        let source_node_id = graph.nodes[output_index].node_id.clone();
+        let source_parameter = graph.nodes[output_index].parameter.clone();
+        graph.nodes[output_index].comment = "Preserve ordinary editable note.".to_owned();
+        graph.nodes[output_index].show_comment_in_network = true;
+        let original_node_count = graph.nodes.len();
+
+        let duplicate_index = graph
+            .duplicate_node(output_index)
+            .expect("selected output node should duplicate");
+
+        let duplicate = &graph.nodes[duplicate_index];
+        let duplicate_node_id = duplicate.node_id.clone();
+        let duplicate_name = duplicate.name.clone();
+        assert_ne!(duplicate_node_id, source_node_id);
+        assert_eq!(duplicate.parameter.name, source_parameter.name);
+        assert_eq!(duplicate.parameter.value, source_parameter.value);
+        assert_eq!(duplicate.parameter.kind, source_parameter.kind);
+        assert_eq!(duplicate.comment, "Preserve ordinary editable note.");
+        assert!(duplicate.show_comment_in_network);
+        assert!(!duplicate.participates_in_output);
+        assert!(duplicate.output_operator.is_none());
+        assert_eq!(duplicate.evaluation, NodeEvaluation::clean());
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+        assert!(graph.command_history.redo_stack.is_empty());
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodeDuplicate {
+                source_node_id: recorded_source_id,
+                source_node_name,
+                duplicated_node,
+                insert_index,
+            }) if recorded_source_id == &source_node_id
+                && source_node_name == "Rerun Output"
+                && duplicated_node.node_id == duplicate_node_id
+                && *insert_index == duplicate_index
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Duplicate Rerun Output")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes.len(), original_node_count);
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|node| node.node_id == duplicate_node_id)
+        );
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Duplicate Rerun Output")
+        );
+
+        assert!(graph.redo_project_command());
+        let restored_duplicate = graph
+            .nodes
+            .iter()
+            .find(|node| node.node_id == duplicate_node_id)
+            .expect("redo should restore the same duplicated node identity");
+        assert_eq!(restored_duplicate.name, duplicate_name);
+        assert_eq!(restored_duplicate.parameter.name, source_parameter.name);
+        assert_eq!(restored_duplicate.parameter.value, source_parameter.value);
+        assert_eq!(restored_duplicate.parameter.kind, source_parameter.kind);
+        assert_eq!(
+            restored_duplicate.comment,
+            "Preserve ordinary editable note."
+        );
+        assert!(restored_duplicate.show_comment_in_network);
+        assert!(!restored_duplicate.participates_in_output);
+        assert!(restored_duplicate.output_operator.is_none());
+        assert!(!graph.duplicate_node(graph.nodes.len()).is_some());
     }
 
     #[test]
