@@ -3978,20 +3978,34 @@ impl GraphDocument {
         if let Some(filter_node) = self.nodes.iter().find(|node| node.kind == NodeKind::Filter) {
             parameters.push(HoudiniParameterDeclaration {
                 name: "minimum_score".to_owned(),
+                label: Some(filter_node.parameter.name.to_owned()),
                 kind: HoudiniParameterKind::Float,
                 default_value: HoudiniParameterValue::Float(filter_node.parameter.value),
+                current_value: Some(HoudiniParameterValue::Float(filter_node.parameter.value)),
                 range: Some(HoudiniNumericRange { min: 0.0, max: 1.0 }),
                 allowed_values: Vec::new(),
+                group: Some("Filter".to_owned()),
+                binding: Some(HoudiniParameterBinding {
+                    internal_node_id: filter_node.node_id.clone(),
+                    internal_parameter_name: "score_threshold".to_owned(),
+                }),
                 help: "Promoted graph filter threshold.".to_owned(),
             });
         }
         if let Some(style_node) = self.nodes.iter().find(|node| node.kind == NodeKind::Style) {
             parameters.push(HoudiniParameterDeclaration {
                 name: "stroke_scale".to_owned(),
+                label: Some(style_node.parameter.name.to_owned()),
                 kind: HoudiniParameterKind::Float,
                 default_value: HoudiniParameterValue::Float(style_node.parameter.value),
+                current_value: Some(HoudiniParameterValue::Float(style_node.parameter.value)),
                 range: Some(HoudiniNumericRange { min: 0.0, max: 1.0 }),
                 allowed_values: Vec::new(),
+                group: Some("Style".to_owned()),
+                binding: Some(HoudiniParameterBinding {
+                    internal_node_id: style_node.node_id.clone(),
+                    internal_parameter_name: "stroke_scale".to_owned(),
+                }),
                 help: "Promoted graph style stroke scale.".to_owned(),
             });
         }
@@ -8724,11 +8738,25 @@ impl HoudiniDataKind {
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct HoudiniParameterDeclaration {
     pub name: String,
+    #[serde(default)]
+    pub label: Option<String>,
     pub kind: HoudiniParameterKind,
     pub default_value: HoudiniParameterValue,
+    #[serde(default)]
+    pub current_value: Option<HoudiniParameterValue>,
     pub range: Option<HoudiniNumericRange>,
     pub allowed_values: Vec<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub binding: Option<HoudiniParameterBinding>,
     pub help: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct HoudiniParameterBinding {
+    pub internal_node_id: String,
+    pub internal_parameter_name: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -11154,28 +11182,28 @@ mod tests {
         GraphDataFlowEdgeDiagnosticStatus, GraphDocument, GraphEvaluationMode, GraphNode,
         GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniCubicBezierParquetSchema,
         HoudiniDataKind, HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange,
-        HoudiniOperatorPort, HoudiniParameterDeclaration, HoudiniParameterKind,
-        HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
-        NativeOperatorFailureMode, NativeOperatorImplementation, NativeOperatorLoadStatus,
-        NativeOperatorOutputCounts, NativeOperatorProvenance, NetworkBadgeVisibility,
-        NetworkCommentDisplayMode, NetworkNodeRingVisibility, NodeEvaluation, NodeKind,
-        NodeParameter, NodeParameterKind, NodeStatus, OperatorVersionStatus,
-        OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode, OutputTargetId,
-        PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
-        ProceduralAssetSource, ProceduralAssetSubgraphReference, ProjectCommand,
-        ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole, PythonDependencyHealth,
-        PythonEnvironmentDescriptor, PythonEnvironmentPathMode, PythonEnvironmentPaths,
-        PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
-        PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
-        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorDependencyStatus,
-        PythonOperatorEntryPoint, PythonOperatorNumericRange, PythonOperatorOutputCounts,
-        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
-        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
-        PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
-        ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
-        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
-        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
-        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        HoudiniOperatorPort, HoudiniParameterBinding, HoudiniParameterDeclaration,
+        HoudiniParameterKind, HoudiniParameterValue, LayerKind, NativeOperatorCapability,
+        NativeOperatorDeclaration, NativeOperatorFailureMode, NativeOperatorImplementation,
+        NativeOperatorLoadStatus, NativeOperatorOutputCounts, NativeOperatorProvenance,
+        NetworkBadgeVisibility, NetworkCommentDisplayMode, NetworkNodeRingVisibility,
+        NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind, NodeStatus,
+        OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode,
+        OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
+        ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
+        ProjectCommand, ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole,
+        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
+        PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
+        PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
+        PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
+        PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
+        PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
+        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
+        PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
+        PythonRequirementsSource, ReferenceDiagnosticStatus, ReferenceTargetEntry,
+        ReferenceTargetIdentity, ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem,
+        SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
+        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -17610,6 +17638,24 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .iter()
                 .any(|parameter| parameter.name == "minimum_score")
         );
+        let minimum_score = draft
+            .promoted_parameters
+            .iter()
+            .find(|parameter| parameter.name == "minimum_score")
+            .expect("minimum score should be promoted");
+        assert_eq!(minimum_score.label.as_deref(), Some("Minimum score"));
+        assert_eq!(
+            minimum_score.current_value,
+            Some(HoudiniParameterValue::Float(0.55))
+        );
+        assert_eq!(minimum_score.group.as_deref(), Some("Filter"));
+        assert_eq!(
+            minimum_score.binding.as_ref().map(|binding| (
+                binding.internal_node_id.as_str(),
+                binding.internal_parameter_name.as_str()
+            )),
+            Some(("filter.main", "score_threshold"))
+        );
 
         let asset_id = graph.commit_asset_draft(draft);
 
@@ -17633,6 +17679,38 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .is_some_and(|snapshot| snapshot.node_count == 4)
         );
         assert!(!graph.to_sidecar_json().unwrap().contains("cached_output"));
+    }
+
+    #[test]
+    fn legacy_asset_promoted_parameters_load_without_authoring_metadata() {
+        let mut graph = GraphDocument::sample();
+        let draft = graph.create_asset_draft_from_graph(
+            "Legacy Cleanup Asset",
+            "Cleans the current graph.",
+            "Use inside this project.",
+        );
+        graph.commit_asset_draft(draft);
+        let mut value =
+            serde_json::from_str::<serde_json::Value>(&graph.to_sidecar_json().unwrap())
+                .expect("sidecar should be valid json");
+        let parameter = value["procedural_asset_declarations"][0]["promoted_parameters"][0]
+            .as_object_mut()
+            .expect("promoted parameter should be an object");
+        parameter.remove("label");
+        parameter.remove("current_value");
+        parameter.remove("group");
+        parameter.remove("binding");
+        let json = serde_json::to_string_pretty(&value).unwrap();
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        let parameter = &restored.procedural_asset_declarations[0].promoted_parameters[0];
+
+        assert_eq!(parameter.name, "minimum_score");
+        assert!(parameter.label.is_none());
+        assert!(parameter.current_value.is_none());
+        assert!(parameter.group.is_none());
+        assert!(parameter.binding.is_none());
     }
 
     #[test]
@@ -18310,18 +18388,32 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             promoted_parameters: vec![
                 HoudiniParameterDeclaration {
                     name: "minimum_score".to_owned(),
+                    label: Some("Minimum score".to_owned()),
                     kind: HoudiniParameterKind::Float,
                     default_value: HoudiniParameterValue::Float(0.55),
+                    current_value: Some(HoudiniParameterValue::Float(0.55)),
                     range: Some(HoudiniNumericRange { min: 0.0, max: 1.0 }),
                     allowed_values: Vec::new(),
+                    group: Some("Filter".to_owned()),
+                    binding: Some(HoudiniParameterBinding {
+                        internal_node_id: "filter.main".to_owned(),
+                        internal_parameter_name: "score_threshold".to_owned(),
+                    }),
                     help: "Promoted filter threshold.".to_owned(),
                 },
                 HoudiniParameterDeclaration {
                     name: "layer_name".to_owned(),
+                    label: Some("Layer name".to_owned()),
                     kind: HoudiniParameterKind::String,
                     default_value: HoudiniParameterValue::String("Clean curves".to_owned()),
+                    current_value: Some(HoudiniParameterValue::String("Clean curves".to_owned())),
                     range: None,
                     allowed_values: Vec::new(),
+                    group: Some("Output".to_owned()),
+                    binding: Some(HoudiniParameterBinding {
+                        internal_node_id: "output.main".to_owned(),
+                        internal_parameter_name: "layer_name".to_owned(),
+                    }),
                     help: "Output layer label.".to_owned(),
                 },
             ],
@@ -18360,13 +18452,17 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             )],
             parameters: vec![HoudiniParameterDeclaration {
                 name: "tolerance".to_owned(),
+                label: None,
                 kind: HoudiniParameterKind::Float,
                 default_value: HoudiniParameterValue::Float(0.1),
+                current_value: None,
                 range: Some(HoudiniNumericRange {
                     min: 0.0,
                     max: 10.0,
                 }),
                 allowed_values: Vec::new(),
+                group: None,
+                binding: None,
                 help: "Simplification tolerance in graph units.".to_owned(),
             }],
             capabilities: vec![
