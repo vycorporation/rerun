@@ -10,11 +10,12 @@ pub(crate) mod model;
 
 use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState,
-    GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphDocument, GraphPoint,
-    GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding, LayerKind, NativeOperatorLoadStatus,
-    NetworkBadgeVisibility, NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeStatus,
-    PythonEnvironmentResolveTrigger, PythonEnvironmentStatus, PythonOperatorDependencyStatus,
-    ReferenceDiagnosticStatus, SourceMetadata, SubstrateCoordinateContract,
+    GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphDocument,
+    GraphEvaluationMode, GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding,
+    LayerKind, NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkNodeRingVisibility,
+    NetworkViewDisplayOptions, NodeStatus, PythonEnvironmentResolveTrigger,
+    PythonEnvironmentStatus, PythonOperatorDependencyStatus, ReferenceDiagnosticStatus,
+    SourceMetadata, SubstrateCoordinateContract,
 };
 
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
@@ -946,6 +947,29 @@ impl HoudiniGraphPanel {
 
     fn execution_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         ui.strong("Work Items");
+
+        ui.horizontal(|ui| {
+            ui.weak("Evaluation");
+            egui::ComboBox::from_id_salt("houdini_execution_evaluation_mode")
+                .selected_text(graph.evaluation_mode.as_str())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut graph.evaluation_mode,
+                        GraphEvaluationMode::Automatic,
+                        GraphEvaluationMode::Automatic.as_str(),
+                    );
+                    ui.selectable_value(
+                        &mut graph.evaluation_mode,
+                        GraphEvaluationMode::OnInteractionComplete,
+                        GraphEvaluationMode::OnInteractionComplete.as_str(),
+                    );
+                    ui.selectable_value(
+                        &mut graph.evaluation_mode,
+                        GraphEvaluationMode::Manual,
+                        GraphEvaluationMode::Manual.as_str(),
+                    );
+                });
+        });
 
         ui.horizontal(|ui| {
             let has_selected_node = self.selected_node < graph.nodes.len();
