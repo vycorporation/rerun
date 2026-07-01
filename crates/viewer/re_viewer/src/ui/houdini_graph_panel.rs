@@ -2745,11 +2745,25 @@ impl HoudiniGraphPanel {
                 ui.weak("Kind");
                 ui.end_row();
 
-                for layer in &mut graph.layers {
-                    ui.re_checkbox(&mut layer.visible, "");
-                    ui.add(DragValue::new(&mut layer.order).speed(1).range(-99..=99));
-                    ui.add(egui::TextEdit::singleline(&mut layer.name).desired_width(96.0));
-                    ui.label(layer.kind.as_str());
+                for layer_index in 0..graph.layers.len() {
+                    let mut visible = graph.layers[layer_index].visible;
+                    if ui.re_checkbox(&mut visible, "").changed() {
+                        graph.set_layer_visibility(layer_index, visible);
+                    }
+
+                    let mut order = graph.layers[layer_index].order;
+                    if ui
+                        .add(DragValue::new(&mut order).speed(1).range(-99..=99))
+                        .changed()
+                    {
+                        graph.set_layer_order(layer_index, order);
+                    }
+
+                    let kind = graph.layers[layer_index].kind;
+                    if let Some(layer) = graph.layers.get_mut(layer_index) {
+                        ui.add(egui::TextEdit::singleline(&mut layer.name).desired_width(96.0));
+                    }
+                    ui.label(kind.as_str());
                     ui.end_row();
                 }
             });
