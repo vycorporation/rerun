@@ -1957,6 +1957,10 @@ impl HoudiniGraphPanel {
             "{} record(s), {} input(s), {} output(s)",
             info.record_count, info.input_count, info.output_count
         ));
+        ui.weak(format!(
+            "Connections {} in, {} out",
+            info.data_flow.incoming_edge_count, info.data_flow.outgoing_edge_count
+        ));
         ui.weak(format!("Graph {}", info.graph_location.graph_path));
         ui.weak(format!("Node path {}", info.graph_location.node_path));
         ui.weak(if info.graph_location.name_is_unique_in_graph() {
@@ -1975,6 +1979,17 @@ impl HoudiniGraphPanel {
 
         for warning in &info.warnings {
             ui.colored_label(ui.visuals().warn_fg_color, warning);
+        }
+        for diagnostic in &info.data_flow.diagnostics {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!(
+                    "Connection {}: {}",
+                    diagnostic.status.as_str(),
+                    diagnostic.readable_path
+                ),
+            )
+            .on_hover_text(&diagnostic.message);
         }
 
         self.selected_node_comment_ui(ui, graph);
@@ -3965,6 +3980,34 @@ impl HoudiniGraphPanel {
                                 info.graph_location.name_collision_count
                             ),
                         );
+                    }
+                    ui.end_row();
+
+                    ui.weak("Incoming edges");
+                    ui.label(info.data_flow.incoming_edge_count.to_string());
+                    ui.end_row();
+
+                    ui.weak("Outgoing edges");
+                    ui.label(info.data_flow.outgoing_edge_count.to_string());
+                    ui.end_row();
+
+                    ui.weak("Edge diagnostics");
+                    if info.data_flow.diagnostics.is_empty() {
+                        ui.label("none");
+                    } else {
+                        ui.vertical(|ui| {
+                            for diagnostic in &info.data_flow.diagnostics {
+                                ui.colored_label(
+                                    ui.visuals().warn_fg_color,
+                                    format!(
+                                        "{}: {}",
+                                        diagnostic.status.as_str(),
+                                        diagnostic.readable_path
+                                    ),
+                                )
+                                .on_hover_text(&diagnostic.message);
+                            }
+                        });
                     }
                     ui.end_row();
 
