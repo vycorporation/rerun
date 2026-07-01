@@ -243,6 +243,14 @@ pub(crate) struct GraphDataFlowEdgeDiagnostic {
     pub message: String,
 }
 
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct ReconnectNodeDeleteResult {
+    pub deleted_node: GraphNode,
+    pub added_edges: Vec<GraphDataFlowEdge>,
+    pub skipped_diagnostics: Vec<GraphDataFlowEdgeDiagnostic>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GraphDataFlowEdgeDiagnosticStatus {
     MissingSourceNode,
@@ -3718,6 +3726,72 @@ impl GraphDocument {
             data_flow_edges_after,
         });
         Some(deleted_node)
+    }
+
+    #[allow(dead_code)]
+    pub fn remove_node_reconnecting_data_flow(
+        &mut self,
+        index: usize,
+    ) -> Option<ReconnectNodeDeleteResult> {
+        if self.nodes.get(index)?.kind == NodeKind::Output {
+            return None;
+        }
+        let data_flow_edges_before = self.data_flow_edges.clone();
+        let deleted_node_id = self.nodes.get(index)?.node_id.clone();
+        let incoming_edges = data_flow_edges_before
+            .iter()
+            .filter(|edge| edge.to_node_id == deleted_node_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let outgoing_edges = data_flow_edges_before
+            .iter()
+            .filter(|edge| edge.from_node_id == deleted_node_id)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let deleted_node = self.nodes.remove(index);
+        self.data_flow_edges.retain(|edge| {
+            edge.from_node_id != deleted_node.node_id && edge.to_node_id != deleted_node.node_id
+        });
+
+        let mut added_edges = Vec::new();
+        let mut skipped_diagnostics = Vec::new();
+        for incoming_edge in &incoming_edges {
+            for outgoing_edge in &outgoing_edges {
+                let edge = GraphDataFlowEdge {
+                    edge_id: Self::data_flow_edge_id(
+                        &incoming_edge.from_node_id,
+                        &incoming_edge.from_output,
+                        &outgoing_edge.to_node_id,
+                        &outgoing_edge.to_input,
+                    ),
+                    from_node_id: incoming_edge.from_node_id.clone(),
+                    from_output: incoming_edge.from_output.clone(),
+                    to_node_id: outgoing_edge.to_node_id.clone(),
+                    to_input: outgoing_edge.to_input.clone(),
+                };
+                if let Some(diagnostic) = self.data_flow_edge_addition_diagnostic(&edge) {
+                    skipped_diagnostics.push(diagnostic);
+                    continue;
+                }
+                if self.add_data_flow_edge_without_history(edge.clone()) {
+                    added_edges.push(edge);
+                }
+            }
+        }
+
+        let data_flow_edges_after = self.data_flow_edges.clone();
+        self.record_project_command(ProjectCommand::NodeDelete {
+            deleted_node: Box::new(deleted_node.clone()),
+            remove_index: index,
+            data_flow_edges_before,
+            data_flow_edges_after,
+        });
+        Some(ReconnectNodeDeleteResult {
+            deleted_node,
+            added_edges,
+            skipped_diagnostics,
+        })
     }
 
     pub fn mark_reference_inputs_stale_for_target_index(&mut self, target_index: usize) {
@@ -13481,6 +13555,180 @@ mod tests {
                 .data_flow_edges
                 .iter()
                 .any(|edge| edge.edge_id == filter_to_style_edge_id)
+        );
+    }
+
+    #[test]
+    fn reconnect_node_delete_adds_valid_bypass_edge() {
+        let mut graph = GraphDocument::sample();
+        let source_node_id = graph.nodes[0].node_id.clone();
+        let filter_node_id = graph.nodes[1].node_id.clone();
+        let style_node_id = graph.nodes[2].node_id.clone();
+        let source_to_filter_edge_id = GraphDocument::data_flow_edge_id(
+            &source_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+            &filter_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+        );
+        let filter_to_style_edge_id = GraphDocument::data_flow_edge_id(
+            &filter_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+            &style_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+        );
+        let bypass_edge_id = GraphDocument::data_flow_edge_id(
+            &source_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+            &style_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+        );
+
+        let result = graph
+            .remove_node_reconnecting_data_flow(1)
+            .expect("ordinary filter node should be removable with reconnect");
+
+        assert_eq!(result.deleted_node.node_id, filter_node_id);
+        assert_eq!(result.added_edges.len(), 1);
+        assert_eq!(result.added_edges[0].edge_id, bypass_edge_id);
+        assert!(result.skipped_diagnostics.is_empty());
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == bypass_edge_id)
+        );
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == source_to_filter_edge_id)
+        );
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == filter_to_style_edge_id)
+        );
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodeDelete {
+                deleted_node,
+                remove_index,
+                ..
+            }) if deleted_node.node_id == filter_node_id && *remove_index == 1
+        ));
+
+        assert!(graph.undo_project_command());
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == source_to_filter_edge_id)
+        );
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == filter_to_style_edge_id)
+        );
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == bypass_edge_id)
+        );
+
+        assert!(graph.redo_project_command());
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == bypass_edge_id)
+        );
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == source_to_filter_edge_id)
+        );
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == filter_to_style_edge_id)
+        );
+    }
+
+    #[test]
+    fn reconnect_node_delete_reports_skipped_cycle_candidate() {
+        let mut graph = GraphDocument::sample();
+        let source_node_id = graph.nodes[0].node_id.clone();
+        let filter_node_id = graph.nodes[1].node_id.clone();
+        let style_node_id = graph.nodes[2].node_id.clone();
+        let bypass_edge_id = GraphDocument::data_flow_edge_id(
+            &source_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+            &style_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+        );
+        let explicit_cycle_edge_id = GraphDocument::data_flow_edge_id(
+            &style_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+            &source_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+        );
+        graph.data_flow_edges.push(GraphDataFlowEdge {
+            edge_id: explicit_cycle_edge_id.clone(),
+            from_node_id: style_node_id.clone(),
+            from_output: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            to_node_id: source_node_id.clone(),
+            to_input: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+        });
+
+        let result = graph
+            .remove_node_reconnecting_data_flow(1)
+            .expect("ordinary filter node should be removable with reconnect");
+
+        assert_eq!(result.deleted_node.node_id, filter_node_id);
+        assert!(result.added_edges.is_empty());
+        assert_eq!(result.skipped_diagnostics.len(), 1);
+        assert_eq!(result.skipped_diagnostics[0].edge_id, bypass_edge_id);
+        assert_eq!(
+            result.skipped_diagnostics[0].status,
+            GraphDataFlowEdgeDiagnosticStatus::Cycle
+        );
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == bypass_edge_id)
+        );
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == explicit_cycle_edge_id)
+        );
+
+        assert!(graph.undo_project_command());
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == explicit_cycle_edge_id)
+        );
+        assert!(graph.redo_project_command());
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == bypass_edge_id)
+        );
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == explicit_cycle_edge_id)
         );
     }
 
