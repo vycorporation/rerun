@@ -569,9 +569,11 @@ impl GraphDocument {
                     let from_node = nodes[0];
                     let to_node = nodes[1];
                     GraphDataFlowEdge {
-                        edge_id: format!(
-                            "{}:{PRIMARY_GEOMETRY_OUTPUT}->{}:{PRIMARY_GEOMETRY_OUTPUT}",
-                            from_node.node_id, to_node.node_id
+                        edge_id: Self::data_flow_edge_id(
+                            &from_node.node_id,
+                            PRIMARY_GEOMETRY_OUTPUT,
+                            &to_node.node_id,
+                            PRIMARY_GEOMETRY_OUTPUT,
                         ),
                         from_node_id: from_node.node_id.clone(),
                         from_output: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
@@ -581,6 +583,15 @@ impl GraphDocument {
                 })
             })
             .collect()
+    }
+
+    fn data_flow_edge_id(
+        from_node_id: &str,
+        from_output: &str,
+        to_node_id: &str,
+        to_input: &str,
+    ) -> String {
+        format!("{from_node_id}:{from_output}->{to_node_id}:{to_input}")
     }
 
     #[allow(dead_code)]
@@ -3751,10 +3762,13 @@ impl GraphDocument {
             ),
             role: ProjectGraphRole::Subgraph,
         };
+        let internal_graph_id = internal_graph.graph_id.clone();
+        let original_data_flow_edges = self.data_flow_edges.clone();
         let (boundary, external_edges) = self.collapse_boundary_for_node_set(&captured_node_ids)?;
         let selection_center = self.node_set_layout_center(&captured_node_ids);
 
         let container_index = self.add_graph_container_node(name, internal_graph);
+        let container_node_id = self.nodes[container_index].node_id.clone();
         if let Some(center) = selection_center
             && let Some(node) = self.nodes.get_mut(container_index)
         {
@@ -3767,13 +3781,79 @@ impl GraphDocument {
         else {
             return Ok(container_index);
         };
+        let captured_node_ids_for_move = captured_node_ids.clone();
+        let external_edges_for_rewire = external_edges.clone();
         container.boundary = boundary;
         container.collapse_manifest = Some(GraphContainerCollapseManifest {
             source_graph_id,
             captured_node_ids,
             external_edges,
         });
+        self.move_nodes_to_graph(&captured_node_ids_for_move, &internal_graph_id);
+        self.data_flow_edges = Self::rewired_collapse_edges(
+            &original_data_flow_edges,
+            &container_node_id,
+            &external_edges_for_rewire,
+        );
         Ok(container_index)
+    }
+
+    fn move_nodes_to_graph(&mut self, node_ids: &[String], graph_id: &str) {
+        let node_ids = node_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        for node in &mut self.nodes {
+            if node_ids.contains(node.node_id.as_str()) {
+                node.parent_graph_id = graph_id.to_owned();
+            }
+        }
+    }
+
+    fn rewired_collapse_edges(
+        original_edges: &[GraphDataFlowEdge],
+        container_node_id: &str,
+        external_edges: &[GraphContainerExternalEdge],
+    ) -> Vec<GraphDataFlowEdge> {
+        let external_edges_by_id = external_edges
+            .iter()
+            .map(|edge| (edge.edge_id.as_str(), edge))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        original_edges
+            .iter()
+            .map(|edge| {
+                let Some(external_edge) = external_edges_by_id.get(edge.edge_id.as_str()) else {
+                    return edge.clone();
+                };
+                match external_edge.direction {
+                    GraphBoundaryMappingDirection::Input => GraphDataFlowEdge {
+                        edge_id: Self::data_flow_edge_id(
+                            &external_edge.external_node_id,
+                            &external_edge.external_port_name,
+                            container_node_id,
+                            &external_edge.public_port_name,
+                        ),
+                        from_node_id: external_edge.external_node_id.clone(),
+                        from_output: external_edge.external_port_name.clone(),
+                        to_node_id: container_node_id.to_owned(),
+                        to_input: external_edge.public_port_name.clone(),
+                    },
+                    GraphBoundaryMappingDirection::Output => GraphDataFlowEdge {
+                        edge_id: Self::data_flow_edge_id(
+                            container_node_id,
+                            &external_edge.public_port_name,
+                            &external_edge.external_node_id,
+                            &external_edge.external_port_name,
+                        ),
+                        from_node_id: container_node_id.to_owned(),
+                        from_output: external_edge.public_port_name.clone(),
+                        to_node_id: external_edge.external_node_id.clone(),
+                        to_input: external_edge.external_port_name.clone(),
+                    },
+                }
+            })
+            .collect()
     }
 
     fn captured_node_ids_for_indices(
@@ -17346,6 +17426,24 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(manifest.external_edges.len(), 2);
         assert!(graph.nodes.iter().any(|node| node.node_id == "filter.main"));
         assert!(graph.nodes.iter().any(|node| node.node_id == "style.main"));
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "filter.main")
+                .expect("filter node should remain graph-owned")
+                .parent_graph_id,
+            "graph.cleanup_subnet"
+        );
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "style.main")
+                .expect("style node should remain graph-owned")
+                .parent_graph_id,
+            "graph.cleanup_subnet"
+        );
 
         let input_edge = manifest
             .external_edges
@@ -17366,6 +17464,38 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(output_edge.external_node_id, output_node_id);
         assert_eq!(output_edge.public_port_name, PRIMARY_GEOMETRY_OUTPUT);
         assert_eq!(output_edge.data_kind, HoudiniDataKind::GeometryTable);
+
+        let main_layout = graph.graph_layout();
+        assert_eq!(main_layout.nodes.len(), 3);
+        assert_eq!(main_layout.edges.len(), 2);
+        assert_eq!(
+            graph.nodes[main_layout.edges[0].from_node].node_id,
+            source_node_id
+        );
+        assert_eq!(
+            graph.nodes[main_layout.edges[0].to_node].node_id,
+            container_node_id
+        );
+        assert_eq!(
+            graph.nodes[main_layout.edges[1].from_node].node_id,
+            container_node_id
+        );
+        assert_eq!(
+            graph.nodes[main_layout.edges[1].to_node].node_id,
+            output_node_id
+        );
+
+        let internal_layout = graph.graph_layout_for_graph("graph.cleanup_subnet");
+        assert_eq!(internal_layout.nodes.len(), 2);
+        assert_eq!(internal_layout.edges.len(), 1);
+        assert_eq!(
+            graph.nodes[internal_layout.edges[0].from_node].node_id,
+            "filter.main"
+        );
+        assert_eq!(
+            graph.nodes[internal_layout.edges[0].to_node].node_id,
+            "style.main"
+        );
 
         let info = graph
             .selected_node_info(container_index)
@@ -17421,6 +17551,33 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .expect("collapse manifest should restore")
                 .captured_node_ids,
             vec!["filter.main".to_owned(), "style.main".to_owned()]
+        );
+        assert_eq!(restored.data_flow_edges, graph.data_flow_edges);
+        assert_eq!(
+            restored
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "filter.main")
+                .expect("filter node should restore")
+                .parent_graph_id,
+            "graph.cleanup_subnet"
+        );
+        assert_eq!(
+            restored
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "style.main")
+                .expect("style node should restore")
+                .parent_graph_id,
+            "graph.cleanup_subnet"
+        );
+        assert_eq!(restored.graph_layout().edges.len(), 2);
+        assert_eq!(
+            restored
+                .graph_layout_for_graph("graph.cleanup_subnet")
+                .edges
+                .len(),
+            1
         );
     }
 

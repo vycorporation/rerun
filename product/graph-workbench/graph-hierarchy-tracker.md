@@ -41,6 +41,7 @@ for the graph hierarchy lane.
 | `#164` | complete | Graph-local node name policy | Adds durable parent graph metadata to nodes and scopes create, rename, duplicate, readable paths, and name collision inspection to the parent graph while preserving stable node IDs. |
 | `#166` | complete | Selected graph navigation model seam | Adds graph navigation targets plus safe selected-graph and graph-container enter model actions without moving nodes between graphs. |
 | `#168` | complete | Selected graph storage layout scope | Scopes graph-local node index helpers, generated default data-flow edges, and graph layout to selected graph storage while retaining loaded cross-graph diagnostics. |
+| `#170` | complete | Physical graph container collapse storage | Moves captured nodes into the new internal graph and rewires external crossings through typed graph-container boundary edges. |
 
 ## Next implementation candidates
 
@@ -59,6 +60,9 @@ for the graph hierarchy lane.
    - `#168` scopes layout and generated default data-flow edges to graph-local
      node storage, which gives selected graph navigation an honest model view
      before physical collapse moves nodes.
+   - `#170` moves connected collapsed node sets into the internal graph and
+     rewires compatible external crossings through typed graph-container
+     boundary ports.
    - Keep selected-node collapse separate from network box organization.
 
 3. Typed graph boundary inputs and outputs.
