@@ -918,6 +918,93 @@ impl GraphDocument {
         true
     }
 
+    pub fn set_annotation_title(&mut self, annotation_index: usize, title: String) -> bool {
+        let Some(annotation) = self.annotations.get_mut(annotation_index) else {
+            return false;
+        };
+        if annotation.title == title {
+            return false;
+        }
+        let old_title = annotation.title.clone();
+        annotation.title = title.clone();
+        let annotation_id = annotation.annotation_id.clone();
+        self.record_project_command(ProjectCommand::AnnotationTitleEdit {
+            annotation_id,
+            annotation_title: old_title.clone(),
+            old_title,
+            new_title: title,
+        });
+        true
+    }
+
+    pub fn set_annotation_text(&mut self, annotation_index: usize, text: String) -> bool {
+        let Some(annotation) = self.annotations.get_mut(annotation_index) else {
+            return false;
+        };
+        if annotation.kind != GraphAnnotationKind::StickyNote || annotation.text == text {
+            return false;
+        }
+        let old_text = annotation.text.clone();
+        annotation.text = text.clone();
+        let annotation_id = annotation.annotation_id.clone();
+        let annotation_title = annotation.title.clone();
+        self.record_project_command(ProjectCommand::AnnotationTextEdit {
+            annotation_id,
+            annotation_title,
+            old_text,
+            new_text: text,
+        });
+        true
+    }
+
+    pub fn set_annotation_collapsed(&mut self, annotation_index: usize, collapsed: bool) -> bool {
+        let Some(annotation) = self.annotations.get_mut(annotation_index) else {
+            return false;
+        };
+        if annotation.collapsed == collapsed {
+            return false;
+        }
+        let old_collapsed = annotation.collapsed;
+        annotation.collapsed = collapsed;
+        let annotation_id = annotation.annotation_id.clone();
+        let annotation_title = annotation.title.clone();
+        self.record_project_command(ProjectCommand::AnnotationCollapsedEdit {
+            annotation_id,
+            annotation_title,
+            old_collapsed,
+            new_collapsed: collapsed,
+        });
+        true
+    }
+
+    pub fn set_all_annotations_collapsed(&mut self, collapsed: bool) -> bool {
+        let collapsed_annotations = self
+            .annotations
+            .iter_mut()
+            .filter_map(|annotation| {
+                if annotation.collapsed == collapsed {
+                    return None;
+                }
+                let old_collapsed = annotation.collapsed;
+                annotation.collapsed = collapsed;
+                Some(AnnotationCollapsedCommandSnapshot {
+                    annotation_id: annotation.annotation_id.clone(),
+                    old_collapsed,
+                    new_collapsed: collapsed,
+                })
+            })
+            .collect::<Vec<_>>();
+        if collapsed_annotations.is_empty() {
+            return false;
+        }
+
+        self.record_project_command(ProjectCommand::AnnotationsCollapsedEdit {
+            collapsed,
+            annotations: collapsed_annotations,
+        });
+        true
+    }
+
     pub fn resize_network_box_to_contents(&mut self, annotation_index: usize) -> bool {
         let Some(annotation) = self.annotations.get(annotation_index) else {
             return false;
@@ -1144,6 +1231,12 @@ impl GraphDocument {
     }
 
     fn record_project_command(&mut self, command: ProjectCommand) {
+        if let Some(last_command) = self.command_history.undo_stack.last_mut()
+            && last_command.coalesce_with(&command)
+        {
+            self.command_history.redo_stack.clear();
+            return;
+        }
         self.command_history.undo_stack.push(command);
         self.command_history.redo_stack.clear();
     }
@@ -1324,6 +1417,76 @@ impl GraphDocument {
                     ProjectCommandDirection::Undo => *old_size,
                     ProjectCommandDirection::Redo => *new_size,
                 };
+                true
+            }
+            ProjectCommand::AnnotationTitleEdit {
+                annotation_id,
+                old_title,
+                new_title,
+                ..
+            } => {
+                let Some(annotation) = self
+                    .annotations
+                    .iter_mut()
+                    .find(|annotation| annotation.annotation_id == *annotation_id)
+                else {
+                    return false;
+                };
+                annotation.title = match direction {
+                    ProjectCommandDirection::Undo => old_title.clone(),
+                    ProjectCommandDirection::Redo => new_title.clone(),
+                };
+                true
+            }
+            ProjectCommand::AnnotationTextEdit {
+                annotation_id,
+                old_text,
+                new_text,
+                ..
+            } => {
+                let Some(annotation) = self
+                    .annotations
+                    .iter_mut()
+                    .find(|annotation| annotation.annotation_id == *annotation_id)
+                else {
+                    return false;
+                };
+                annotation.text = match direction {
+                    ProjectCommandDirection::Undo => old_text.clone(),
+                    ProjectCommandDirection::Redo => new_text.clone(),
+                };
+                true
+            }
+            ProjectCommand::AnnotationCollapsedEdit {
+                annotation_id,
+                old_collapsed,
+                new_collapsed,
+                ..
+            } => {
+                let Some(annotation) = self
+                    .annotations
+                    .iter_mut()
+                    .find(|annotation| annotation.annotation_id == *annotation_id)
+                else {
+                    return false;
+                };
+                annotation.collapsed = match direction {
+                    ProjectCommandDirection::Undo => *old_collapsed,
+                    ProjectCommandDirection::Redo => *new_collapsed,
+                };
+                true
+            }
+            ProjectCommand::AnnotationsCollapsedEdit { annotations, .. } => {
+                for collapsed_annotation in annotations {
+                    if let Some(annotation) = self.annotations.iter_mut().find(|annotation| {
+                        annotation.annotation_id == collapsed_annotation.annotation_id
+                    }) {
+                        annotation.collapsed = match direction {
+                            ProjectCommandDirection::Undo => collapsed_annotation.old_collapsed,
+                            ProjectCommandDirection::Redo => collapsed_annotation.new_collapsed,
+                        };
+                    }
+                }
                 true
             }
             ProjectCommand::LayerVisibilityEdit {
@@ -7079,6 +7242,28 @@ pub(crate) enum ProjectCommand {
         old_size: GraphPoint,
         new_size: GraphPoint,
     },
+    AnnotationTitleEdit {
+        annotation_id: String,
+        annotation_title: String,
+        old_title: String,
+        new_title: String,
+    },
+    AnnotationTextEdit {
+        annotation_id: String,
+        annotation_title: String,
+        old_text: String,
+        new_text: String,
+    },
+    AnnotationCollapsedEdit {
+        annotation_id: String,
+        annotation_title: String,
+        old_collapsed: bool,
+        new_collapsed: bool,
+    },
+    AnnotationsCollapsedEdit {
+        collapsed: bool,
+        annotations: Vec<AnnotationCollapsedCommandSnapshot>,
+    },
     LayerVisibilityEdit {
         layer_index: usize,
         layer_name: String,
@@ -7121,12 +7306,70 @@ impl ProjectCommand {
             } => {
                 format!("Resize {annotation_title}")
             }
+            Self::AnnotationTitleEdit {
+                annotation_title, ..
+            } => {
+                format!("Edit {annotation_title} title")
+            }
+            Self::AnnotationTextEdit {
+                annotation_title, ..
+            } => {
+                format!("Edit {annotation_title} note")
+            }
+            Self::AnnotationCollapsedEdit {
+                annotation_title, ..
+            } => {
+                format!("Set {annotation_title} collapsed")
+            }
+            Self::AnnotationsCollapsedEdit { collapsed, .. } => {
+                if *collapsed {
+                    "Collapse boxes and notes".to_owned()
+                } else {
+                    "Expand boxes and notes".to_owned()
+                }
+            }
             Self::LayerVisibilityEdit { layer_name, .. } => {
                 format!("Set {layer_name} visibility")
             }
             Self::LayerOrderEdit { layer_name, .. } => {
                 format!("Set {layer_name} order")
             }
+        }
+    }
+
+    fn coalesce_with(&mut self, next: &Self) -> bool {
+        match (self, next) {
+            (
+                Self::AnnotationTitleEdit {
+                    annotation_id,
+                    new_title,
+                    ..
+                },
+                Self::AnnotationTitleEdit {
+                    annotation_id: next_annotation_id,
+                    new_title: next_new_title,
+                    ..
+                },
+            ) if annotation_id == next_annotation_id => {
+                *new_title = next_new_title.clone();
+                true
+            }
+            (
+                Self::AnnotationTextEdit {
+                    annotation_id,
+                    new_text,
+                    ..
+                },
+                Self::AnnotationTextEdit {
+                    annotation_id: next_annotation_id,
+                    new_text: next_new_text,
+                    ..
+                },
+            ) if annotation_id == next_annotation_id => {
+                *new_text = next_new_text.clone();
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -7136,6 +7379,13 @@ pub(crate) struct NodeLayoutCommandSnapshot {
     node_id: String,
     old_position: GraphPoint,
     new_position: GraphPoint,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AnnotationCollapsedCommandSnapshot {
+    annotation_id: String,
+    old_collapsed: bool,
+    new_collapsed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11125,6 +11375,180 @@ mod tests {
     }
 
     #[test]
+    fn annotation_title_edits_coalesce_into_one_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let box_index = graph
+            .annotations
+            .iter()
+            .position(|annotation| annotation.kind == GraphAnnotationKind::NetworkBox)
+            .expect("sample graph should include a network box");
+        let original_title = graph.annotations[box_index].title.clone();
+
+        assert!(graph.set_annotation_title(box_index, "Region Prep".to_owned()));
+        assert!(graph.set_annotation_title(box_index, "Region Prep Notes".to_owned()));
+
+        assert_eq!(graph.annotations[box_index].title, "Region Prep Notes");
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::AnnotationTitleEdit {
+                annotation_title,
+                old_title,
+                new_title,
+                ..
+            }) if annotation_title == &original_title
+                && old_title == &original_title
+                && new_title == "Region Prep Notes"
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some(format!("Edit {original_title} title").as_str())
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.annotations[box_index].title, original_title);
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.annotations[box_index].title, "Region Prep Notes");
+        assert!(!graph.set_annotation_title(box_index, "Region Prep Notes".to_owned()));
+        assert!(!graph.set_annotation_title(graph.annotations.len(), "Missing".to_owned()));
+    }
+
+    #[test]
+    fn sticky_note_text_edits_coalesce_into_one_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let note_index = graph
+            .annotations
+            .iter()
+            .position(|annotation| annotation.kind == GraphAnnotationKind::StickyNote)
+            .expect("sample graph should include a sticky note");
+        let original_text = graph.annotations[note_index].text.clone();
+        let title = graph.annotations[note_index].title.clone();
+
+        assert!(graph.set_annotation_text(note_index, "Review".to_owned()));
+        assert!(graph.set_annotation_text(note_index, "Review before output".to_owned()));
+
+        assert_eq!(graph.annotations[note_index].text, "Review before output");
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::AnnotationTextEdit {
+                annotation_title,
+                old_text,
+                new_text,
+                ..
+            }) if annotation_title == &title
+                && old_text == &original_text
+                && new_text == "Review before output"
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some(format!("Edit {title} note").as_str())
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.annotations[note_index].text, original_text);
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.annotations[note_index].text, "Review before output");
+        assert!(!graph.set_annotation_text(note_index, "Review before output".to_owned()));
+        assert!(!graph.set_annotation_text(graph.annotations.len(), "Missing".to_owned()));
+        assert!(!graph.set_annotation_text(0, "Network boxes do not use body text".to_owned()));
+    }
+
+    #[test]
+    fn annotation_collapsed_state_records_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let box_index = graph
+            .annotations
+            .iter()
+            .position(|annotation| annotation.kind == GraphAnnotationKind::NetworkBox)
+            .expect("sample graph should include a network box");
+        let title = graph.annotations[box_index].title.clone();
+        assert!(!graph.annotations[box_index].collapsed);
+
+        assert!(graph.set_annotation_collapsed(box_index, true));
+
+        assert!(graph.annotations[box_index].collapsed);
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::AnnotationCollapsedEdit {
+                annotation_title,
+                old_collapsed: false,
+                new_collapsed: true,
+                ..
+            }) if annotation_title == &title
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some(format!("Set {title} collapsed").as_str())
+        );
+
+        assert!(graph.undo_project_command());
+        assert!(!graph.annotations[box_index].collapsed);
+        assert!(graph.redo_project_command());
+        assert!(graph.annotations[box_index].collapsed);
+        assert!(!graph.set_annotation_collapsed(box_index, true));
+        assert!(!graph.set_annotation_collapsed(graph.annotations.len(), false));
+    }
+
+    #[test]
+    fn all_annotation_collapse_records_one_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        assert!(
+            graph
+                .annotations
+                .iter()
+                .any(|annotation| !annotation.collapsed)
+        );
+
+        assert!(graph.set_all_annotations_collapsed(true));
+
+        assert!(
+            graph
+                .annotations
+                .iter()
+                .all(|annotation| annotation.collapsed)
+        );
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::AnnotationsCollapsedEdit {
+                collapsed: true,
+                annotations,
+            }) if annotations.len() == graph.annotations.len()
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Collapse boxes and notes")
+        );
+
+        assert!(graph.undo_project_command());
+        assert!(
+            graph
+                .annotations
+                .iter()
+                .all(|annotation| !annotation.collapsed)
+        );
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Collapse boxes and notes")
+        );
+
+        assert!(graph.redo_project_command());
+        assert!(
+            graph
+                .annotations
+                .iter()
+                .all(|annotation| annotation.collapsed)
+        );
+        assert!(!graph.set_all_annotations_collapsed(true));
+        assert!(graph.set_all_annotations_collapsed(false));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Expand boxes and notes")
+        );
+    }
+
+    #[test]
     fn command_history_is_runtime_state_not_sidecar_state() {
         let mut graph = GraphDocument::sample();
         let original_position = graph.nodes[1].layout_position;
@@ -11147,6 +11571,10 @@ mod tests {
         ));
         assert!(graph.set_annotation_size(0, GraphPoint::new(0.42, 0.36)));
         assert!(graph.finish_annotation_resize(0, original_annotation_size));
+        assert!(graph.set_annotation_title(0, "Workflow Notes".to_owned()));
+        assert!(graph.set_annotation_text(1, "Check overlay bounds.".to_owned()));
+        assert!(graph.set_annotation_collapsed(0, true));
+        assert!(graph.set_all_annotations_collapsed(true));
         assert!(!graph.command_history.undo_stack.is_empty());
 
         let json = graph.to_sidecar_json().unwrap();
