@@ -280,9 +280,9 @@ struct GraphSearchResult {
     detail: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum GraphSearchTarget {
-    Node(usize),
+    Node { index: usize, graph_id: String },
     Annotation(usize),
 }
 
@@ -2765,11 +2765,13 @@ impl HoudiniGraphPanel {
 
         ui.separator();
         for result in results {
-            let selected = match result.target {
-                GraphSearchTarget::Node(index) => {
-                    self.selected_annotation.is_none() && self.selected_node == index
+            let selected = match &result.target {
+                GraphSearchTarget::Node { index, graph_id } => {
+                    self.selected_annotation.is_none()
+                        && self.selected_node == *index
+                        && graph.current_graph_id() == graph_id
                 }
-                GraphSearchTarget::Annotation(index) => self.selected_annotation == Some(index),
+                GraphSearchTarget::Annotation(index) => self.selected_annotation == Some(*index),
             };
             let clicked = ui
                 .selectable_label(selected, format!("{}  {}", result.kind, result.label))
@@ -2777,7 +2779,7 @@ impl HoudiniGraphPanel {
                 .clicked();
             ui.weak(&result.detail);
             if clicked {
-                self.apply_graph_search_result(result.target);
+                self.apply_graph_search_result(graph, result.target.clone());
             }
         }
     }
@@ -2790,8 +2792,16 @@ impl HoudiniGraphPanel {
 
         let mut results = Vec::new();
         for (index, node) in graph.nodes.iter().enumerate() {
+            let graph_location = graph
+                .selected_node_info(index)
+                .map(|info| info.graph_location);
+            let node_path = graph_location
+                .as_ref()
+                .map(|location| location.node_path.as_str())
+                .unwrap_or(node.name.as_str());
             let parameter_value = format!("{:.2}", node.parameter.value);
             let haystack = [
+                node_path,
                 node.name.as_str(),
                 node.kind.as_str(),
                 node.parameter.name,
@@ -2804,11 +2814,18 @@ impl HoudiniGraphPanel {
             .to_lowercase();
             if haystack.contains(&filter) {
                 results.push(GraphSearchResult {
-                    target: GraphSearchTarget::Node(index),
+                    target: GraphSearchTarget::Node {
+                        index,
+                        graph_id: graph_location
+                            .as_ref()
+                            .map(|location| location.graph_id.clone())
+                            .unwrap_or_else(|| graph.current_graph_id().to_owned()),
+                    },
                     label: node.name.clone(),
                     kind: "Node",
                     detail: format!(
-                        "{}; {} = {:.2}",
+                        "{}; {}; {} = {:.2}",
+                        node_path,
                         node.kind.as_str(),
                         node.parameter.name,
                         node.parameter.value
@@ -2842,9 +2859,10 @@ impl HoudiniGraphPanel {
         results
     }
 
-    fn apply_graph_search_result(&mut self, target: GraphSearchTarget) {
+    fn apply_graph_search_result(&mut self, graph: &mut GraphDocument, target: GraphSearchTarget) {
         match target {
-            GraphSearchTarget::Node(index) => {
+            GraphSearchTarget::Node { index, graph_id } => {
+                let _ = graph.select_graph_by_id(&graph_id);
                 self.selected_node = index;
                 self.selected_annotation = None;
                 self.context_menu_canvas = false;
@@ -5845,4 +5863,55 @@ fn draw_arrowhead(painter: &egui::Painter, tip: Pos2, color: Color32) {
         color,
         Stroke::NONE,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GraphSearchTarget, HoudiniGraphPanel,
+        model::{ProjectGraphMetadata, ProjectGraphRole},
+    };
+    use crate::ui::houdini_graph_panel::model::GraphDocument;
+
+    #[test]
+    fn graph_search_result_switches_to_node_parent_graph() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry.graphs.push(ProjectGraphMetadata {
+            graph_id: "analysis".to_owned(),
+            name: "Analysis".to_owned(),
+            path: "/obj/analysis".to_owned(),
+            role: ProjectGraphRole::Subgraph,
+        });
+        graph
+            .select_graph_by_id("analysis")
+            .expect("analysis graph should be selectable");
+        let analysis_node_index = graph.add_null_operator_node("OUT_A");
+        graph
+            .select_graph_by_id("main")
+            .expect("main graph should be selectable");
+
+        let mut panel = HoudiniGraphPanel {
+            graph_search_filter: "/obj/analysis/out_a".to_owned(),
+            ..HoudiniGraphPanel::default()
+        };
+        let result = panel
+            .graph_search_results(&graph)
+            .into_iter()
+            .find(|result| {
+                matches!(
+                    &result.target,
+                    GraphSearchTarget::Node { index, graph_id }
+                        if *index == analysis_node_index && graph_id == "analysis"
+                )
+            })
+            .expect("search should find the analysis node by readable path");
+        assert!(result.detail.contains("/obj/analysis/OUT_A"));
+
+        panel.apply_graph_search_result(&mut graph, result.target);
+
+        assert_eq!(graph.current_graph_id(), "analysis");
+        assert_eq!(panel.selected_node, analysis_node_index);
+        assert!(panel.selected_annotation.is_none());
+        assert!(panel.node_info_open);
+    }
 }

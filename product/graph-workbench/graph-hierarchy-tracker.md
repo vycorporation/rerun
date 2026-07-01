@@ -44,6 +44,7 @@ for the graph hierarchy lane.
 | `#170` | complete | Physical graph container collapse storage | Moves captured nodes into the new internal graph and rewires external crossings through typed graph-container boundary edges. |
 | `#172` | complete | Graph container enter inspector action | Adds a workbench node-info Enter action for resolved navigable graph containers using the selected-graph navigation seam. |
 | `#174` | complete | Selected graph data-flow diagnostics | Adds graph-scoped data-flow diagnostic queries and surfaces selected-graph invalid/cyclic connection diagnostics in the workbench Info pane. |
+| `#176` | complete | Cross-graph search result navigation | Carries graph IDs and readable node paths through workbench search so node results switch to their parent graph before selection. |
 
 ## Next implementation candidates
 
@@ -85,6 +86,8 @@ for the graph hierarchy lane.
 5. Cross-graph readable paths.
    - Use readable graph/node paths for navigation, search, node info, and delete
      warnings.
+   - `#176` makes workbench node search path-aware and switches to a result's
+     parent graph before focusing the node.
    - Keep durable references backed by stable graph IDs and node IDs.
 
 ## Maintenance
