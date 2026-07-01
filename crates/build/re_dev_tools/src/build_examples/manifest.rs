@@ -25,6 +25,9 @@ pub struct Manifest {
 
     #[argh(option, description = "include only examples in this channel")]
     channel: Channel,
+
+    #[argh(option, description = "include only these examples")]
+    examples: Vec<String>,
 }
 
 impl Manifest {
@@ -43,9 +46,16 @@ impl Manifest {
         let base_source_url = get_base_source_url(build_env)?;
 
         let workspace_root = re_build_tools::cargo_metadata()?.workspace_root;
-        let manifest = self
-            .channel
-            .examples(workspace_root)?
+        let examples = if self.examples.is_empty() {
+            self.channel.examples(workspace_root)?
+        } else {
+            Channel::Nightly
+                .examples(workspace_root)?
+                .into_iter()
+                .filter(|example| self.examples.contains(&example.name))
+                .collect()
+        };
+        let manifest = examples
             .into_iter()
             .filter(|example| example.include_in_manifest)
             .map(|example| ManifestEntry::new(example, &base_url, &base_source_url))

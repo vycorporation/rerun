@@ -12,6 +12,7 @@ use crate::ui::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HoudiniWorkbenchPreset {
     NetworkAndInspector,
+    HoudiniDefault,
     GraphReview,
 }
 
@@ -38,6 +39,7 @@ impl HoudiniWorkbenchPreset {
     fn label(self) -> &'static str {
         match self {
             Self::NetworkAndInspector => "Network + Inspector",
+            Self::HoudiniDefault => "Houdini Default",
             Self::GraphReview => "Graph Review",
         }
     }
@@ -46,6 +48,9 @@ impl HoudiniWorkbenchPreset {
         match self {
             Self::NetworkAndInspector => {
                 "Network editor beside Parameters, Display, Info, Ops, Find, and Layers tabs."
+            }
+            Self::HoudiniDefault => {
+                "Display viewport on the left, with Parameters and Network stacked on the right."
             }
             Self::GraphReview => {
                 "Output viewport beside inspection tabs, with project data and exports nearby."
@@ -69,6 +74,7 @@ pub(crate) fn houdini_workbench_toolbar_ui(
                 ui.menu_button("Layouts", |ui| {
                     for preset in [
                         HoudiniWorkbenchPreset::NetworkAndInspector,
+                        HoudiniWorkbenchPreset::HoudiniDefault,
                         HoudiniWorkbenchPreset::GraphReview,
                     ] {
                         if ui
@@ -246,6 +252,23 @@ fn build_preset_tree(
                 vec![network, inspector],
             )
         }
+        HoudiniWorkbenchPreset::HoudiniDefault => {
+            let display = tiles.insert_pane(views.display);
+            let parameters = tiles.insert_pane(views.parameters);
+            let network = tiles.insert_pane(views.network);
+            let right_side = insert_named_vertical(
+                &mut tiles,
+                &mut container_display_names,
+                "Parameters + Network",
+                vec![parameters, network],
+            );
+            insert_named_horizontal(
+                &mut tiles,
+                &mut container_display_names,
+                "Houdini Default Workbench",
+                vec![display, right_side],
+            )
+        }
         HoudiniWorkbenchPreset::GraphReview => {
             let graph = tiles.insert_pane(views.graph);
             let data_tabs = insert_named_tabs(
@@ -374,5 +397,23 @@ mod tests {
         );
         assert!(names.iter().any(|(_, name)| name == "Review"));
         assert!(names.iter().any(|(_, name)| name == "Project Data"));
+    }
+
+    #[test]
+    fn houdini_default_preset_places_display_beside_params_and_network() {
+        let (tree, names) =
+            build_preset_tree(HoudiniWorkbenchPreset::HoudiniDefault, preset_views());
+
+        assert!(tree.root().is_some());
+        assert_eq!(
+            tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
+            3
+        );
+        assert!(
+            names
+                .iter()
+                .any(|(_, name)| name == "Houdini Default Workbench")
+        );
+        assert!(names.iter().any(|(_, name)| name == "Parameters + Network"));
     }
 }
