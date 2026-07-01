@@ -126,6 +126,22 @@ pub(crate) struct GraphDataFlowEdge {
     pub to_input: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct GraphDataFlowEdgeDiagnostic {
+    pub edge_id: String,
+    pub status: GraphDataFlowEdgeDiagnosticStatus,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum GraphDataFlowEdgeDiagnosticStatus {
+    MissingSourceNode,
+    MissingTargetNode,
+    Cycle,
+}
+
 impl GraphDocument {
     pub fn current_graph_id(&self) -> &str {
         self.graph_registry
@@ -200,6 +216,99 @@ impl GraphDocument {
                 }
             })
             .collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn can_add_data_flow_edge(&self, edge: &GraphDataFlowEdge) -> bool {
+        self.data_flow_edge_addition_diagnostic(edge).is_none()
+    }
+
+    #[allow(dead_code)]
+    pub fn data_flow_edge_diagnostics(&self) -> Vec<GraphDataFlowEdgeDiagnostic> {
+        self.data_flow_edges
+            .iter()
+            .filter_map(|edge| self.data_flow_edge_diagnostic(edge))
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    fn data_flow_edge_addition_diagnostic(
+        &self,
+        edge: &GraphDataFlowEdge,
+    ) -> Option<GraphDataFlowEdgeDiagnostic> {
+        self.data_flow_edge_endpoint_diagnostic(edge).or_else(|| {
+            self.edge_would_create_cycle(&edge.from_node_id, &edge.to_node_id, None)
+                .then(|| GraphDataFlowEdgeDiagnostic {
+                    edge_id: edge.edge_id.clone(),
+                    status: GraphDataFlowEdgeDiagnosticStatus::Cycle,
+                    message: "Connection would create cyclic v1 data flow.".to_owned(),
+                })
+        })
+    }
+
+    #[allow(dead_code)]
+    fn data_flow_edge_diagnostic(
+        &self,
+        edge: &GraphDataFlowEdge,
+    ) -> Option<GraphDataFlowEdgeDiagnostic> {
+        self.data_flow_edge_endpoint_diagnostic(edge).or_else(|| {
+            self.edge_would_create_cycle(&edge.from_node_id, &edge.to_node_id, Some(&edge.edge_id))
+                .then(|| GraphDataFlowEdgeDiagnostic {
+                    edge_id: edge.edge_id.clone(),
+                    status: GraphDataFlowEdgeDiagnosticStatus::Cycle,
+                    message: "Loaded edge participates in cyclic v1 data flow.".to_owned(),
+                })
+        })
+    }
+
+    #[allow(dead_code)]
+    fn data_flow_edge_endpoint_diagnostic(
+        &self,
+        edge: &GraphDataFlowEdge,
+    ) -> Option<GraphDataFlowEdgeDiagnostic> {
+        if !self
+            .nodes
+            .iter()
+            .any(|node| node.node_id == edge.from_node_id)
+        {
+            return Some(GraphDataFlowEdgeDiagnostic {
+                edge_id: edge.edge_id.clone(),
+                status: GraphDataFlowEdgeDiagnosticStatus::MissingSourceNode,
+                message: format!("Source node id '{}' is missing.", edge.from_node_id),
+            });
+        }
+        if !self
+            .nodes
+            .iter()
+            .any(|node| node.node_id == edge.to_node_id)
+        {
+            return Some(GraphDataFlowEdgeDiagnostic {
+                edge_id: edge.edge_id.clone(),
+                status: GraphDataFlowEdgeDiagnosticStatus::MissingTargetNode,
+                message: format!("Target node id '{}' is missing.", edge.to_node_id),
+            });
+        }
+        None
+    }
+
+    #[allow(dead_code)]
+    fn edge_would_create_cycle(
+        &self,
+        from_node_id: &str,
+        to_node_id: &str,
+        ignored_edge_id: Option<&str>,
+    ) -> bool {
+        let mut adjacency = std::collections::BTreeMap::<&str, Vec<&str>>::new();
+        for edge in &self.data_flow_edges {
+            if ignored_edge_id.is_some_and(|edge_id| edge.edge_id == edge_id) {
+                continue;
+            }
+            adjacency
+                .entry(edge.from_node_id.as_str())
+                .or_default()
+                .push(edge.to_node_id.as_str());
+        }
+        path_exists(to_node_id, from_node_id, &adjacency)
     }
 
     pub fn sample() -> Self {
@@ -6378,6 +6487,28 @@ fn node_matches_snapshot_identity(node: &GraphNode, snapshot: &NodeSidecar) -> b
     }
 }
 
+#[allow(dead_code)]
+fn path_exists<'a>(
+    start: &'a str,
+    target: &str,
+    adjacency: &std::collections::BTreeMap<&'a str, Vec<&'a str>>,
+) -> bool {
+    let mut stack = vec![start];
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(node_id) = stack.pop() {
+        if node_id == target {
+            return true;
+        }
+        if !visited.insert(node_id) {
+            continue;
+        }
+        if let Some(next_nodes) = adjacency.get(node_id) {
+            stack.extend(next_nodes.iter().copied());
+        }
+    }
+    false
+}
+
 fn readable_reference_path(graph_id: &str, node: &GraphNode, output_name: &str) -> String {
     format!("{graph_id}/{}:{output_name}", node.name)
 }
@@ -10110,31 +10241,32 @@ mod tests {
     use super::{
         AttributeTableQuery, AttributeTableSort, EvaluationState, ExportGeometry,
         GeneratedNodeBindingState, GeneratedNodeInfo, GeneratedNodeSource, Geometry,
-        GeometryBounds, GeometryKind, GraphAnnotationKind, GraphColor, GraphDocument,
-        GraphEvaluationMode, GraphNode, GraphPoint, GraphStyle, GraphWorkItemStatus,
-        HoudiniCubicBezierParquetSchema, HoudiniDataKind, HoudiniGeometryRecord,
-        HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
-        HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
-        NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
-        NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
-        NativeOperatorProvenance, NetworkBadgeVisibility, NetworkCommentDisplayMode,
-        NetworkNodeRingVisibility, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
-        NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
-        OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
-        ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
-        ProjectCommand, ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole,
-        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
-        PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
-        PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
-        PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
-        PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
-        PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
-        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
-        PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
-        PythonRequirementsSource, ReferenceDiagnosticStatus, ReferenceTargetEntry,
-        ReferenceTargetIdentity, ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem,
-        SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
-        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        GeometryBounds, GeometryKind, GraphAnnotationKind, GraphColor, GraphDataFlowEdge,
+        GraphDataFlowEdgeDiagnosticStatus, GraphDocument, GraphEvaluationMode, GraphNode,
+        GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniCubicBezierParquetSchema,
+        HoudiniDataKind, HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange,
+        HoudiniOperatorPort, HoudiniParameterDeclaration, HoudiniParameterKind,
+        HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
+        NativeOperatorFailureMode, NativeOperatorImplementation, NativeOperatorLoadStatus,
+        NativeOperatorOutputCounts, NativeOperatorProvenance, NetworkBadgeVisibility,
+        NetworkCommentDisplayMode, NetworkNodeRingVisibility, NodeEvaluation, NodeKind,
+        NodeParameter, NodeParameterKind, NodeStatus, OperatorVersionStatus,
+        OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode, OutputTargetId,
+        PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
+        ProceduralAssetSource, ProceduralAssetSubgraphReference, ProjectCommand,
+        ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole, PythonDependencyHealth,
+        PythonEnvironmentDescriptor, PythonEnvironmentPathMode, PythonEnvironmentPaths,
+        PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
+        PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
+        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorDependencyStatus,
+        PythonOperatorEntryPoint, PythonOperatorNumericRange, PythonOperatorOutputCounts,
+        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
+        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
+        PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
+        ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
+        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
+        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
+        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -13489,6 +13621,78 @@ mod tests {
         assert_eq!(
             restored.graph_layout().edges.len(),
             graph.graph_layout().edges.len()
+        );
+    }
+
+    #[test]
+    fn graph_data_flow_edge_validation_accepts_dag_addition() {
+        let graph = GraphDocument::sample();
+        let edge = GraphDataFlowEdge {
+            edge_id: "source_to_output_preview".to_owned(),
+            from_node_id: graph.nodes[0].node_id.clone(),
+            from_output: "geometry".to_owned(),
+            to_node_id: graph.nodes[3].node_id.clone(),
+            to_input: "geometry".to_owned(),
+        };
+
+        assert!(graph.can_add_data_flow_edge(&edge));
+        assert!(graph.data_flow_edge_addition_diagnostic(&edge).is_none());
+        assert!(graph.data_flow_edge_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn graph_data_flow_edge_validation_rejects_cycle_addition() {
+        let graph = GraphDocument::sample();
+        let edge = GraphDataFlowEdge {
+            edge_id: "output_to_source_cycle".to_owned(),
+            from_node_id: graph.nodes[3].node_id.clone(),
+            from_output: "geometry".to_owned(),
+            to_node_id: graph.nodes[0].node_id.clone(),
+            to_input: "geometry".to_owned(),
+        };
+        let diagnostic = graph
+            .data_flow_edge_addition_diagnostic(&edge)
+            .expect("reverse edge should be cyclic");
+
+        assert!(!graph.can_add_data_flow_edge(&edge));
+        assert_eq!(diagnostic.status, GraphDataFlowEdgeDiagnosticStatus::Cycle);
+        assert_eq!(diagnostic.edge_id, "output_to_source_cycle");
+    }
+
+    #[test]
+    fn graph_data_flow_edge_diagnostics_retain_loaded_invalid_edges() {
+        let mut graph = GraphDocument::sample();
+        graph.data_flow_edges.push(GraphDataFlowEdge {
+            edge_id: "missing_source".to_owned(),
+            from_node_id: "missing.node".to_owned(),
+            from_output: "geometry".to_owned(),
+            to_node_id: graph.nodes[0].node_id.clone(),
+            to_input: "geometry".to_owned(),
+        });
+        graph.data_flow_edges.push(GraphDataFlowEdge {
+            edge_id: "loaded_cycle".to_owned(),
+            from_node_id: graph.nodes[3].node_id.clone(),
+            from_output: "geometry".to_owned(),
+            to_node_id: graph.nodes[0].node_id.clone(),
+            to_input: "geometry".to_owned(),
+        });
+
+        let diagnostics = graph.data_flow_edge_diagnostics();
+
+        assert_eq!(graph.data_flow_edges.len(), graph.nodes.len() + 1);
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.edge_id == "missing_source"
+                && diagnostic.status == GraphDataFlowEdgeDiagnosticStatus::MissingSourceNode
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.edge_id == "loaded_cycle"
+                && diagnostic.status == GraphDataFlowEdgeDiagnosticStatus::Cycle
+        }));
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == "loaded_cycle")
         );
     }
 
