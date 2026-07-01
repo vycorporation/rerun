@@ -26,6 +26,7 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Issue `#114`: add undo/redo for reference target enablement and removal.
 - Issue `#120`: add undo/redo for graph annotation deletion.
 - Issue `#121`: add undo/redo for reference input node creation.
+- Issue `#122`: add undo/redo for reference target addition.
 
 ## Implementation notes
 
@@ -46,4 +47,5 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Reference target commands restore per-target enablement and removed target entries by stable target identity without copying source data or rebinding by name.
 - Annotation delete commands restore the captured network box or sticky note by stable annotation ID and do not remove or restore member nodes as graph data.
 - Reference input creation commands restore the captured reference node, stable target identity, and source provenance without copying source output data or rebinding by name.
+- Reference target add commands restore the captured target entry, enablement, source provenance, and insertion index without copying source output data or rebinding by name.
 - Sidecar save/load intentionally omits the undo and redo stacks so history does not become a second persistence format.
