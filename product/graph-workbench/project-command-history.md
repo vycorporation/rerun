@@ -21,6 +21,7 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Issue `#108`: add undo/redo for ordinary node duplication with new stable node identities.
 - Issue `#110`: add undo/redo for node manual cook flag edits.
 - Issue `#111`: add undo/redo for network box and sticky note creation.
+- Issue `#112`: add undo/redo for network box resize-to-contents edits.
 
 ## Implementation notes
 
@@ -36,4 +37,5 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Node duplicate commands restore ordinary copied graph material with the captured new stable node ID, while output participation and output operators are not silently copied.
 - Node manual cook commands restore project intent for whether a node waits for explicit evaluation without replaying work items or cached outputs.
 - Organization creation commands restore network boxes and sticky notes with their captured stable annotation identities and do not change graph data flow.
+- Network box fit commands restore old and new organization bounds without moving member nodes or changing data flow.
 - Sidecar save/load intentionally omits the undo and redo stacks so history does not become a second persistence format.
