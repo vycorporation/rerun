@@ -637,6 +637,24 @@ impl GraphDocument {
         Ok(edge_id)
     }
 
+    #[allow(dead_code)]
+    pub fn remove_data_flow_edge(&mut self, edge_id: &str) -> Option<GraphDataFlowEdge> {
+        let edge = self
+            .data_flow_edges
+            .iter()
+            .find(|edge| edge.edge_id == edge_id)?
+            .clone();
+        let readable_path = self.readable_data_flow_edge_path(&edge);
+        if !self.remove_data_flow_edge_without_history(edge_id) {
+            return None;
+        }
+        self.record_project_command(ProjectCommand::DataFlowEdgeRemove {
+            readable_path,
+            edge: edge.clone(),
+        });
+        Some(edge)
+    }
+
     pub fn data_flow_edge_diagnostics(&self) -> Vec<GraphDataFlowEdgeDiagnostic> {
         self.data_flow_edges
             .iter()
@@ -2354,6 +2372,14 @@ impl GraphDocument {
                 }
                 ProjectCommandDirection::Redo => {
                     self.add_data_flow_edge_without_history(edge.clone())
+                }
+            },
+            ProjectCommand::DataFlowEdgeRemove { edge, .. } => match direction {
+                ProjectCommandDirection::Undo => {
+                    self.add_data_flow_edge_without_history(edge.clone())
+                }
+                ProjectCommandDirection::Redo => {
+                    self.remove_data_flow_edge_without_history(&edge.edge_id)
                 }
             },
             ProjectCommand::NodeParameterEdit {
@@ -9789,6 +9815,10 @@ pub(crate) enum ProjectCommand {
         edge: GraphDataFlowEdge,
         readable_path: String,
     },
+    DataFlowEdgeRemove {
+        edge: GraphDataFlowEdge,
+        readable_path: String,
+    },
     NodeParameterEdit {
         node_id: String,
         node_name: String,
@@ -9932,6 +9962,9 @@ impl ProjectCommand {
             }
             Self::DataFlowEdgeAdd { readable_path, .. } => {
                 format!("Add connection {readable_path}")
+            }
+            Self::DataFlowEdgeRemove { readable_path, .. } => {
+                format!("Remove connection {readable_path}")
             }
             Self::NodeParameterEdit {
                 node_name,
@@ -15848,6 +15881,69 @@ mod tests {
             graph.undo_project_command_label().as_deref(),
             Some("Add connection /obj/main/Source:geometry -> /obj/main/Rerun Output:geometry")
         );
+    }
+
+    #[test]
+    fn remove_data_flow_edge_records_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let initial_edge_count = graph.data_flow_edges.len();
+        let source_node_id = graph.nodes[0].node_id.clone();
+        let output_node_id = graph.nodes[3].node_id.clone();
+        let edge_id = graph
+            .add_data_flow_edge(
+                &source_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+                &output_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+            )
+            .expect("source to output connection should be a valid DAG edge");
+        assert_eq!(graph.data_flow_edges.len(), initial_edge_count + 1);
+
+        let removed_edge = graph
+            .remove_data_flow_edge(&edge_id)
+            .expect("explicit edge should be removable");
+
+        assert_eq!(removed_edge.edge_id, edge_id);
+        assert_eq!(graph.data_flow_edges.len(), initial_edge_count);
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == edge_id)
+        );
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Remove connection /obj/main/Source:geometry -> /obj/main/Rerun Output:geometry")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.data_flow_edges.len(), initial_edge_count + 1);
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == edge_id)
+        );
+
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.data_flow_edges.len(), initial_edge_count);
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == edge_id)
+        );
+    }
+
+    #[test]
+    fn remove_data_flow_edge_rejects_missing_edge_without_history() {
+        let mut graph = GraphDocument::sample();
+        let initial_edge_count = graph.data_flow_edges.len();
+
+        assert!(graph.remove_data_flow_edge("missing.edge").is_none());
+
+        assert_eq!(graph.data_flow_edges.len(), initial_edge_count);
+        assert!(graph.command_history.undo_stack.is_empty());
     }
 
     #[test]
