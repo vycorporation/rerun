@@ -57,6 +57,9 @@ pub(crate) struct HoudiniDataView;
 pub(crate) struct HoudiniOutputsView;
 
 #[derive(Default)]
+pub(crate) struct HoudiniShelfView;
+
+#[derive(Default)]
 pub(crate) struct HoudiniExecutionView;
 
 #[derive(Default)]
@@ -440,6 +443,13 @@ houdini_workbench_view_class!(
     "Layers",
     "Layer visibility and output ordering for the shared Houdini graph.",
     show_layers_view
+);
+houdini_workbench_view_class!(
+    HoudiniShelfView,
+    "HoudiniShelf",
+    "Shelf",
+    "Built-in graph-backed Houdini shelf tools.",
+    show_shelf_view
 );
 houdini_workbench_view_class!(
     HoudiniExecutionView,

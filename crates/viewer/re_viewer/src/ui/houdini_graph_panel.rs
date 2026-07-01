@@ -100,6 +100,7 @@ pub(crate) struct HoudiniGraphPanel {
     graph_document_status: Option<String>,
     recording_status: Option<String>,
     benchmark_status: Option<String>,
+    shelf_status: Option<String>,
     benchmark_curve_count: usize,
     benchmark_polygon_count: usize,
     operator_filter: String,
@@ -148,6 +149,7 @@ impl Default for HoudiniGraphPanel {
             graph_document_status: None,
             recording_status: None,
             benchmark_status: None,
+            shelf_status: None,
             benchmark_curve_count: 10_000,
             benchmark_polygon_count: 1_000,
             operator_filter: String::new(),
@@ -326,6 +328,16 @@ impl HoudiniGraphPanel {
             ..Default::default()
         }
         .show(ui, |ui| self.outputs_workspace_ui(ui, &mut graph));
+    }
+
+    pub(crate) fn show_shelf_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
+        install_shared_houdini_graph(ui.ctx(), shared_graph);
+        let mut graph = lock_houdini_graph(shared_graph);
+        egui::Frame {
+            inner_margin: egui::Margin::same(8),
+            ..Default::default()
+        }
+        .show(ui, |ui| self.shelf_workspace_ui(ui, &mut graph));
     }
 
     pub(crate) fn show_execution_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
@@ -943,6 +955,103 @@ impl HoudiniGraphPanel {
         ui.add_space(8.0);
         ui.strong("Node Info");
         self.node_info_ui(ui, graph);
+    }
+
+    fn shelf_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        egui::ScrollArea::vertical()
+            .id_salt("houdini_shelf_tools")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.strong("Evaluate");
+                ui.horizontal_wrapped(|ui| {
+                    let has_selected_node = self.selected_node < graph.nodes.len();
+                    if ui
+                        .add_enabled(has_selected_node, egui::Button::new("Queue Selected"))
+                        .on_hover_text("Queue the selected graph node as a work item.")
+                        .clicked()
+                    {
+                        graph.queue_node_evaluation(self.selected_node);
+                        self.shelf_status = graph
+                            .nodes
+                            .get(self.selected_node)
+                            .map(|node| format!("Queued selected node: {}", node.name));
+                    }
+                    if ui
+                        .add_enabled(has_selected_node, egui::Button::new("Run Selected"))
+                        .on_hover_text("Request a manual run for the selected graph node.")
+                        .clicked()
+                    {
+                        graph.request_node_run(self.selected_node);
+                        self.shelf_status = graph.nodes.get(self.selected_node).map(|node| {
+                            format!("Requested run for selected node: {}", node.name)
+                        });
+                    }
+                    if ui
+                        .button("Evaluate Output")
+                        .on_hover_text("Evaluate participating output nodes through the graph model.")
+                        .clicked()
+                    {
+                        graph.demand_output_evaluation();
+                        self.shelf_status = Some("Evaluated graph output.".to_owned());
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.strong("Starter Graphs");
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button("Malware Byteplot")
+                        .on_hover_text("Load the malware byteplot starter graph.")
+                        .clicked()
+                    {
+                        *graph = GraphDocument::malware_starter();
+                        self.selected_node = 0;
+                        self.selected_annotation = None;
+                        self.node_info_open = true;
+                        self.active_graph_pane = GraphWorkbenchPane::Info;
+                        self.shelf_status =
+                            Some("Loaded malware byteplot starter graph.".to_owned());
+                    }
+                    if ui
+                        .button("Cubic Sample")
+                        .on_hover_text("Load the built-in native cubic Bezier sample graph.")
+                        .clicked()
+                    {
+                        *graph = GraphDocument::sample();
+                        self.selected_node = 0;
+                        self.selected_annotation = None;
+                        self.node_info_open = true;
+                        self.active_graph_pane = GraphWorkbenchPane::Info;
+                        self.shelf_status = Some("Loaded cubic sample graph.".to_owned());
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.strong("Assets");
+                if ui
+                    .button("Create Asset Node")
+                    .on_hover_text(
+                        "Create a project-local asset from the current graph and place an instance node.",
+                    )
+                    .clicked()
+                {
+                    let (asset_id, node_index) = graph.create_asset_instance_from_graph(
+                        self.asset_name.trim(),
+                        self.asset_description.trim(),
+                        self.asset_help.trim(),
+                    );
+                    self.selected_node = node_index;
+                    self.selected_annotation = None;
+                    self.active_graph_pane = GraphWorkbenchPane::Info;
+                    self.asset_status = Some(format!("Created project asset: {asset_id}"));
+                    self.shelf_status = Some(format!("Created asset node: {asset_id}"));
+                }
+
+                if let Some(status) = &self.shelf_status {
+                    ui.add_space(8.0);
+                    ui.weak(status);
+                }
+            });
     }
 
     fn execution_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
