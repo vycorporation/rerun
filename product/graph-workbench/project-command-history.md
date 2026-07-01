@@ -27,6 +27,7 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Issue `#120`: add undo/redo for graph annotation deletion.
 - Issue `#121`: add undo/redo for reference input node creation.
 - Issue `#122`: add undo/redo for reference target addition.
+- Issue `#123`: include network box membership and bounds changes in coalesced node drag undo/redo.
 
 ## Implementation notes
 
@@ -48,4 +49,5 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Annotation delete commands restore the captured network box or sticky note by stable annotation ID and do not remove or restore member nodes as graph data.
 - Reference input creation commands restore the captured reference node, stable target identity, and source provenance without copying source output data or rebinding by name.
 - Reference target add commands restore the captured target entry, enablement, source provenance, and insertion index without copying source output data or rebinding by name.
+- Node drag commands restore network box membership and expansion state captured by the same completed drag gesture; these organization changes remain visual metadata only.
 - Sidecar save/load intentionally omits the undo and redo stacks so history does not become a second persistence format.

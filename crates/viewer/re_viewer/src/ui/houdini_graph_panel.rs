@@ -12,8 +12,8 @@ use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState,
     GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphDocument,
     GraphEvaluationMode, GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding,
-    LayerKind, NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkCommentDisplayMode,
-    NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeStatus,
+    LayerKind, NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot,
+    NetworkCommentDisplayMode, NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeStatus,
     PythonEnvironmentResolveTrigger, PythonEnvironmentStatus, PythonOperatorDependencyStatus,
     ReferenceDiagnosticStatus, SourceMetadata, SubstrateCoordinateContract,
 };
@@ -86,6 +86,7 @@ pub(crate) struct HoudiniGraphPanel {
     active_graph_pane: GraphWorkbenchPane,
     dragging_node: Option<usize>,
     node_drag_start_position: Option<GraphPoint>,
+    node_drag_start_network_box_states: Vec<NetworkBoxOrganizationSnapshot>,
     node_drag_peak_delta_pixels: f32,
     dragging_annotation: Option<usize>,
     annotation_drag_start_position: Option<GraphPoint>,
@@ -139,6 +140,7 @@ impl Default for HoudiniGraphPanel {
             active_graph_pane: GraphWorkbenchPane::Parameters,
             dragging_node: None,
             node_drag_start_position: None,
+            node_drag_start_network_box_states: Vec::new(),
             node_drag_peak_delta_pixels: 0.0,
             dragging_annotation: None,
             annotation_drag_start_position: None,
@@ -3125,6 +3127,8 @@ impl HoudiniGraphPanel {
                         self.dragging_node = Some(index);
                         self.node_drag_start_position =
                             graph.nodes.get(index).map(|node| node.layout_position);
+                        self.node_drag_start_network_box_states =
+                            graph.network_box_organization_snapshots();
                         self.node_drag_peak_delta_pixels = 0.0;
                         hit_node = true;
                         break;
@@ -3256,7 +3260,11 @@ impl HoudiniGraphPanel {
                     self.node_drag_peak_delta_pixels >= NETWORK_BOX_FAST_DRAG_PEAK_DELTA_PIXELS,
                 );
                 if let Some(start_position) = self.node_drag_start_position {
-                    graph.finish_node_layout_drag(dragging_node, start_position);
+                    graph.finish_node_layout_drag_with_network_box_snapshots(
+                        dragging_node,
+                        start_position,
+                        &self.node_drag_start_network_box_states,
+                    );
                 }
             }
             if let Some(dragging_annotation) = self.dragging_annotation
@@ -3275,6 +3283,7 @@ impl HoudiniGraphPanel {
             }
             self.dragging_node = None;
             self.node_drag_start_position = None;
+            self.node_drag_start_network_box_states.clear();
             self.node_drag_peak_delta_pixels = 0.0;
             self.dragging_annotation = None;
             self.annotation_drag_start_position = None;
