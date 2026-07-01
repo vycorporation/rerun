@@ -1223,6 +1223,50 @@ impl GraphDocument {
         }
     }
 
+    pub fn duplicate_node(&mut self, node_index: usize) -> Option<usize> {
+        let source = self.nodes.get(node_index)?;
+        let source_name = source.name.clone();
+        let mut node = source.clone();
+
+        node.node_id = self.unique_node_id(node.kind.duplicate_node_id_prefix());
+        node.name = self.unique_node_name(&source_name);
+        node.layout_position = GraphPoint::new(
+            source.layout_position.x + 0.12,
+            source.layout_position.y + 0.08,
+        );
+        node.generated = None;
+        node.output_operator = None;
+        node.evaluation = NodeEvaluation::clean();
+        node.participates_in_output = false;
+
+        if let Some(reference_input) = node.reference_input.as_mut() {
+            reference_input.targets.clear();
+        }
+        if let Some(python_operator) = node.python_operator.as_mut() {
+            python_operator.instance_id = node.node_id.clone();
+            python_operator.cache_key = None;
+            python_operator.provenance = None;
+            python_operator.provenance_summary = None;
+            python_operator.last_failure_summary = None;
+        }
+        if let Some(procedural_asset) = node.procedural_asset.as_mut() {
+            procedural_asset.instance_id = node.node_id.clone();
+            procedural_asset.output_summary = None;
+        }
+        if let Some(native_operator) = node.native_operator.as_mut() {
+            native_operator.instance_id = node.node_id.clone();
+            native_operator.cache_key = None;
+            native_operator.provenance = None;
+            native_operator.provenance_summary = None;
+            native_operator.last_valid_cache_key = None;
+            native_operator.last_failure_summary = None;
+        }
+
+        let insert_index = (node_index + 1).min(self.nodes.len());
+        self.nodes.insert(insert_index, node);
+        Some(insert_index)
+    }
+
     fn unique_node_id(&self, prefix: &str) -> String {
         let mut suffix = 1;
         loop {
@@ -5125,6 +5169,7 @@ impl LayerSidecar {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct GraphNode {
     pub node_id: String,
     pub name: String,
@@ -7540,6 +7585,21 @@ impl NodeKind {
             Self::Output => "Publish",
         }
     }
+
+    fn duplicate_node_id_prefix(self) -> &'static str {
+        match self {
+            Self::Source => "source_copy",
+            Self::Filter => "filter_copy",
+            Self::Style => "style_copy",
+            Self::Null => "null_copy",
+            Self::ReferenceInput => "reference_input_copy",
+            Self::SubstrateProjection => "substrate_projection_copy",
+            Self::PythonOperator => "python_operator_copy",
+            Self::ProceduralAsset => "asset_copy",
+            Self::NativeOperator => "native_operator_copy",
+            Self::Output => "output_copy",
+        }
+    }
 }
 
 pub(crate) struct NodeInfo {
@@ -9330,6 +9390,55 @@ mod tests {
         assert_eq!(resolution.status, ReferenceDiagnosticStatus::Resolved);
         assert_eq!(resolution.target.node_id, target.node_id);
         assert_eq!(resolution.readable_path, "main/Source_2:geometry");
+    }
+
+    #[test]
+    fn duplicate_node_creates_new_identity_without_publication_state() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+        graph.set_node_parameter_value(filter_index, 0.82);
+        graph.nodes[filter_index].comment = "Review high-confidence regions.".to_owned();
+        graph.nodes[filter_index].show_comment_in_network = true;
+        graph.nodes[filter_index].generated = Some(GeneratedNodeInfo::managed(
+            GeneratedNodeSource::AttributeTableCommit,
+        ));
+        graph.nodes[filter_index].output_operator = Some(OutputOperatorNode::generic_scene());
+        graph.nodes[filter_index].evaluation = NodeEvaluation {
+            state: EvaluationState::Running,
+            manual: true,
+            message: Some("Running expensive filter".to_owned()),
+        };
+        graph.nodes[filter_index].participates_in_output = true;
+
+        let original_id = graph.nodes[filter_index].node_id.clone();
+        let original_position = graph.nodes[filter_index].layout_position;
+
+        let duplicate_index = graph
+            .duplicate_node(filter_index)
+            .expect("selected filter should duplicate");
+        let duplicate = &graph.nodes[duplicate_index];
+
+        assert_eq!(duplicate.kind, NodeKind::Filter);
+        assert_eq!(duplicate.name, "Filter_2");
+        assert_ne!(duplicate.node_id, original_id);
+        assert!(duplicate.node_id.starts_with("filter_copy."));
+        assert_eq!(duplicate.parameter.value, 0.82);
+        assert_eq!(duplicate.comment, "Review high-confidence regions.");
+        assert!(duplicate.show_comment_in_network);
+        assert_eq!(
+            duplicate.layout_position,
+            GraphPoint::new(original_position.x + 0.12, original_position.y + 0.08)
+        );
+        assert!(duplicate.generated.is_none());
+        assert!(duplicate.output_operator.is_none());
+        assert_eq!(duplicate.evaluation, NodeEvaluation::clean());
+        assert!(!duplicate.participates_in_output);
+        assert_eq!(graph.nodes[filter_index].node_id, original_id);
+        assert!(graph.duplicate_node(graph.nodes.len()).is_none());
     }
 
     #[test]

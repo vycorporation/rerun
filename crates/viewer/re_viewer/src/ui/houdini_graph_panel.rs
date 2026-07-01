@@ -205,6 +205,7 @@ enum OperatorPaletteAction {
     AddOutNull,
     AddReference,
     AddRepairProjection,
+    DuplicateSelected,
     AddNetworkBox,
     AddStickyNote,
     DuplicatePolygons,
@@ -426,6 +427,13 @@ impl HoudiniGraphPanel {
             });
 
             ui.menu_button("Edit", |ui| {
+                self.operator_menu_action_ui_with_label(
+                    ui,
+                    graph,
+                    OperatorPaletteAction::DuplicateSelected,
+                    "Duplicate Selected",
+                );
+                ui.separator();
                 if ui.button("Parameters").clicked() {
                     self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
                     ui.close();
@@ -890,6 +898,17 @@ impl HoudiniGraphPanel {
                     )
                 {
                     self.selected_node = index;
+                    self.node_info_open = true;
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
+                    true
+                } else {
+                    false
+                }
+            }
+            OperatorPaletteAction::DuplicateSelected => {
+                if let Some(index) = graph.duplicate_node(self.selected_node) {
+                    self.selected_node = index;
+                    self.selected_annotation = None;
                     self.node_info_open = true;
                     self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
                     true
@@ -4660,6 +4679,9 @@ fn operator_palette_entries(
             OperatorPaletteAction::AddRepairProjection,
         ));
     }
+    entries.push(operator_palette_entry(
+        OperatorPaletteAction::DuplicateSelected,
+    ));
 
     if include_organization {
         entries.extend([
@@ -4687,6 +4709,7 @@ fn operator_palette_action_available(
         OperatorPaletteAction::AddRepairProjection => graph
             .reference_coordinate_repair_summary(selected_node)
             .is_some(),
+        OperatorPaletteAction::DuplicateSelected => selected_node < graph.nodes.len(),
         OperatorPaletteAction::AddOutNull
         | OperatorPaletteAction::AddReference
         | OperatorPaletteAction::AddNetworkBox
@@ -4730,6 +4753,13 @@ fn operator_palette_entry(action: OperatorPaletteAction) -> OperatorPaletteEntry
             label: "Repair Projection",
             detail: "Insert a visible substrate projection node for the selected reference.",
             aliases: &["projection", "repair", "coordinates"],
+        },
+        OperatorPaletteAction::DuplicateSelected => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::Create,
+            label: "Duplicate Selected",
+            detail: "Duplicate the selected node with a new stable node identity.",
+            aliases: &["copy", "paste", "clone"],
         },
         OperatorPaletteAction::AddNetworkBox => OperatorPaletteEntry {
             action,
