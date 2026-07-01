@@ -1994,6 +1994,7 @@ impl HoudiniGraphPanel {
 
         self.selected_node_comment_ui(ui, graph);
         self.generated_node_binding_controls_ui(ui, graph);
+        self.graph_container_controls_ui(ui, graph, &info);
 
         ui.re_checkbox(&mut self.node_info_show_additional, "Show additional info");
         if self.node_info_show_additional {
@@ -2009,6 +2010,45 @@ impl HoudiniGraphPanel {
                     self.node_info_ui(ui, graph);
                 });
         }
+    }
+
+    fn graph_container_controls_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        info: &self::model::NodeInfo,
+    ) {
+        let Some(container) = &info.graph_container else {
+            return;
+        };
+
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(ui.visuals().selection.stroke.color, "Graph container");
+            ui.label(container.status.as_str());
+            if let Some(path) = &container.internal_graph_path {
+                ui.weak(path);
+            } else {
+                ui.colored_label(ui.visuals().warn_fg_color, "missing internal graph");
+            }
+
+            if container.navigable
+                && ui
+                    .button("Enter")
+                    .on_hover_text("Open this container's internal graph.")
+                    .clicked()
+                && graph.enter_graph_container_node(self.selected_node).is_ok()
+            {
+                self.selected_node = graph
+                    .current_graph_node_indices()
+                    .first()
+                    .copied()
+                    .unwrap_or(graph.nodes.len());
+                self.selected_annotation = None;
+                self.node_info_open = true;
+                self.reset_graph_view();
+            }
+        });
     }
 
     fn generated_node_binding_controls_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
