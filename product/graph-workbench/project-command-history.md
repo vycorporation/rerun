@@ -16,6 +16,7 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Issue `#98`: add undo/redo for stable-ID-safe node renames.
 - Issue `#100`: add undo/redo for node output participation and comment visibility flags.
 - Issue `#102`: add undo/redo for coalesced node layout drag commands.
+- Issue `#104`: add undo/redo for coalesced annotation drag and resize commands.
 
 ## Implementation notes
 
@@ -26,4 +27,5 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Node rename commands restore user-facing node names while references continue to resolve by stable node ID.
 - Node flag commands restore output participation and comment visibility intent only; they do not replay running work or cached output.
 - Node layout drag commands coalesce high-frequency drag updates into one old-position/new-position command at gesture completion.
+- Annotation gesture commands coalesce drag and resize updates; network box drag restores the member node positions moved by the gesture.
 - Sidecar save/load intentionally omits the undo and redo stacks so history does not become a second persistence format.
