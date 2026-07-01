@@ -3965,6 +3965,57 @@ impl GraphDocument {
     }
 
     #[allow(dead_code)]
+    pub fn match_procedural_asset_definition(&mut self, node_index: usize) -> bool {
+        let Some(node) = self.nodes.get_mut(node_index) else {
+            return false;
+        };
+        let Some(asset_node) = node.procedural_asset.as_mut() else {
+            return false;
+        };
+        if !asset_node.contents_unlocked {
+            return false;
+        }
+
+        asset_node.contents_unlocked = false;
+        node.evaluation.state = EvaluationState::Stale;
+        node.evaluation.message = Some(
+            "Asset contents matched to the pinned definition without changing the pinned version."
+                .to_owned(),
+        );
+        true
+    }
+
+    #[allow(dead_code)]
+    pub fn upgrade_procedural_asset_to_current_definition(&mut self, node_index: usize) -> bool {
+        let Some(node) = self.nodes.get_mut(node_index) else {
+            return false;
+        };
+        let Some(asset_node) = node.procedural_asset.as_mut() else {
+            return false;
+        };
+        let Some(declaration) = self
+            .procedural_asset_declarations
+            .iter()
+            .find(|declaration| declaration.asset_id == asset_node.asset_id)
+        else {
+            return false;
+        };
+        if asset_node.instance_version == declaration.version {
+            return false;
+        }
+
+        asset_node.instance_version = declaration.version.clone();
+        asset_node.version_status = OperatorVersionStatus::Current;
+        asset_node.contents_unlocked = false;
+        node.evaluation.state = EvaluationState::Stale;
+        node.evaluation.message = Some(format!(
+            "Asset instance upgraded to definition version {}.",
+            asset_node.instance_version
+        ));
+        true
+    }
+
+    #[allow(dead_code)]
     pub fn unlocked_asset_graph_id_for_node(&self, node_index: usize) -> Option<String> {
         self.nodes
             .get(node_index)?
@@ -5572,6 +5623,10 @@ impl GraphDocument {
                         instance_version: asset_node.instance_version.clone(),
                         current_version: declaration.map(|declaration| declaration.version.clone()),
                         contents_unlocked: asset_node.contents_unlocked,
+                        can_match_definition: asset_node.contents_unlocked,
+                        can_upgrade_to_current_definition: declaration.is_some_and(|declaration| {
+                            declaration.version != asset_node.instance_version
+                        }),
                         local_graph_id: asset_node
                             .contents_unlocked
                             .then(|| unlocked_asset_graph_id(&asset_node.instance_id)),
@@ -10397,6 +10452,10 @@ pub(crate) struct ProceduralAssetNodeInfo {
     pub instance_version: String,
     pub current_version: Option<String>,
     pub contents_unlocked: bool,
+    #[allow(dead_code)]
+    pub can_match_definition: bool,
+    #[allow(dead_code)]
+    pub can_upgrade_to_current_definition: bool,
     pub local_graph_id: Option<String>,
     pub description: String,
     pub labels: Vec<String>,
@@ -17613,6 +17672,100 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             info.evaluation.message.as_deref(),
             Some("Asset declaration version changed after this instance was created.")
         );
+    }
+
+    #[test]
+    fn matching_asset_definition_relocks_without_upgrading_pinned_version() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        let node_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        graph.procedural_asset_declarations[0].version = "0.2.0".to_owned();
+        graph.refresh_asset_version_statuses();
+        assert!(graph.set_procedural_asset_contents_unlocked(node_index, true));
+
+        let unlocked_info = graph
+            .selected_node_info(node_index)
+            .expect("asset info should exist")
+            .procedural_asset
+            .expect("asset node info should exist");
+        assert!(unlocked_info.can_match_definition);
+        assert!(unlocked_info.can_upgrade_to_current_definition);
+
+        assert!(graph.match_procedural_asset_definition(node_index));
+        graph.refresh_asset_version_statuses();
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("asset info should exist");
+        let asset = info.procedural_asset.expect("asset node info should exist");
+        assert!(!asset.contents_unlocked);
+        assert!(!asset.can_match_definition);
+        assert!(asset.can_upgrade_to_current_definition);
+        assert_eq!(asset.instance_version, "0.1.0");
+        assert_eq!(asset.current_version.as_deref(), Some("0.2.0"));
+        assert_eq!(asset.version_status, OperatorVersionStatus::NewerAvailable);
+        assert_eq!(
+            info.evaluation.message.as_deref(),
+            Some("Asset declaration version changed after this instance was created.")
+        );
+    }
+
+    #[test]
+    fn upgrading_asset_instance_explicitly_changes_pinned_version() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        let node_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        graph.procedural_asset_declarations[0].version = "0.2.0".to_owned();
+        graph.refresh_asset_version_statuses();
+        assert!(graph.set_procedural_asset_contents_unlocked(node_index, true));
+
+        assert!(graph.upgrade_procedural_asset_to_current_definition(node_index));
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("asset info should exist");
+        let asset = info.procedural_asset.expect("asset node info should exist");
+        assert_eq!(asset.instance_version, "0.2.0");
+        assert_eq!(asset.current_version.as_deref(), Some("0.2.0"));
+        assert_eq!(asset.version_status, OperatorVersionStatus::Current);
+        assert!(!asset.contents_unlocked);
+        assert!(!asset.can_match_definition);
+        assert!(!asset.can_upgrade_to_current_definition);
+        assert_eq!(info.status, NodeStatus::Healthy);
+        assert_eq!(
+            info.evaluation.message.as_deref(),
+            Some("Asset instance upgraded to definition version 0.2.0.")
+        );
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        let restored_asset = restored.nodes[node_index]
+            .procedural_asset
+            .as_ref()
+            .expect("asset instance should restore");
+
+        assert_eq!(restored_asset.instance_version, "0.2.0");
+        assert!(!restored_asset.contents_unlocked);
+    }
+
+    #[test]
+    fn asset_instance_actions_reject_missing_or_current_definitions() {
+        let mut graph = GraphDocument::sample();
+        let missing_index = graph.add_procedural_asset_node("vy.asset.missing");
+        assert!(!graph.match_procedural_asset_definition(missing_index));
+        assert!(!graph.upgrade_procedural_asset_to_current_definition(missing_index));
+
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        let current_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        assert!(!graph.match_procedural_asset_definition(current_index));
+        assert!(!graph.upgrade_procedural_asset_to_current_definition(current_index));
     }
 
     #[test]
