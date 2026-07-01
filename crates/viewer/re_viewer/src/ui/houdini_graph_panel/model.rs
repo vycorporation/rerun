@@ -1423,6 +1423,42 @@ impl GraphDocument {
                     true
                 }
             },
+            ProjectCommand::ReferenceTargetAdd {
+                reference_node_id,
+                added_entry,
+                target_index,
+                ..
+            } => match direction {
+                ProjectCommandDirection::Undo => {
+                    self.apply_reference_target_remove(reference_node_id, &added_entry.target)
+                }
+                ProjectCommandDirection::Redo => {
+                    let Some(node) = self
+                        .nodes
+                        .iter_mut()
+                        .find(|node| node.node_id == *reference_node_id)
+                    else {
+                        return false;
+                    };
+                    let Some(reference_input) = node.reference_input.as_mut() else {
+                        return false;
+                    };
+                    if reference_input
+                        .targets
+                        .iter()
+                        .any(|entry| entry.target == added_entry.target)
+                    {
+                        return false;
+                    }
+                    let insert_index = (*target_index).min(reference_input.targets.len());
+                    reference_input
+                        .targets
+                        .insert(insert_index, added_entry.clone());
+                    node.evaluation.state = EvaluationState::Stale;
+                    node.evaluation.message = Some("Reference target set changed.".to_owned());
+                    true
+                }
+            },
             ProjectCommand::NodeParameterEdit {
                 node_id,
                 old_value,
@@ -2128,38 +2164,52 @@ impl GraphDocument {
         reference_node_index: usize,
         target_node_index: usize,
     ) -> bool {
-        let Some(target) = self.reference_target_for_node(target_node_index) else {
-            return false;
-        };
-        let Some(source_node) = self.nodes.get(target_node_index) else {
-            return false;
-        };
-        let provenance = ReferenceTargetProvenance::from_node(source_node, &target);
-        let Some(reference_input) = self
-            .nodes
-            .get_mut(reference_node_index)
-            .and_then(|node| node.reference_input.as_mut())
+        let Some(command) = self
+            .add_reference_target_to_node_without_history(reference_node_index, target_node_index)
         else {
             return false;
         };
+        self.record_project_command(command);
+        true
+    }
+
+    fn add_reference_target_to_node_without_history(
+        &mut self,
+        reference_node_index: usize,
+        target_node_index: usize,
+    ) -> Option<ProjectCommand> {
+        let Some(target) = self.reference_target_for_node(target_node_index) else {
+            return None;
+        };
+        let Some(source_node) = self.nodes.get(target_node_index) else {
+            return None;
+        };
+        let provenance = ReferenceTargetProvenance::from_node(source_node, &target);
+        let reference_node = self.nodes.get_mut(reference_node_index)?;
+        let reference_input = reference_node.reference_input.as_mut()?;
         if reference_input
             .targets
             .iter()
             .any(|entry| entry.target == target)
         {
-            return false;
+            return None;
         }
 
-        reference_input.targets.push(ReferenceTargetEntry {
+        let target_index = reference_input.targets.len();
+        let added_entry = ReferenceTargetEntry {
             target,
             enabled: true,
             provenance,
-        });
-        if let Some(node) = self.nodes.get_mut(reference_node_index) {
-            node.evaluation.state = EvaluationState::Stale;
-            node.evaluation.message = Some("Reference target set changed.".to_owned());
-        }
-        true
+        };
+        reference_input.targets.push(added_entry.clone());
+        reference_node.evaluation.state = EvaluationState::Stale;
+        reference_node.evaluation.message = Some("Reference target set changed.".to_owned());
+        Some(ProjectCommand::ReferenceTargetAdd {
+            reference_node_id: reference_node.node_id.clone(),
+            reference_node_name: reference_node.name.clone(),
+            added_entry,
+            target_index,
+        })
     }
 
     #[allow(dead_code)]
@@ -7615,6 +7665,12 @@ pub(crate) enum ProjectCommand {
         reference_node: Box<GraphNode>,
         insert_index: usize,
     },
+    ReferenceTargetAdd {
+        reference_node_id: String,
+        reference_node_name: String,
+        added_entry: ReferenceTargetEntry,
+        target_index: usize,
+    },
     NodeParameterEdit {
         node_id: String,
         node_name: String,
@@ -7744,6 +7800,16 @@ impl ProjectCommand {
             }
             Self::ReferenceInputCreate { reference_node, .. } => {
                 format!("Create {}", reference_node.name)
+            }
+            Self::ReferenceTargetAdd {
+                reference_node_name,
+                added_entry,
+                ..
+            } => {
+                format!(
+                    "Add {reference_node_name} target {}",
+                    added_entry.provenance.source_node_name
+                )
             }
             Self::NodeParameterEdit {
                 node_name,
@@ -11180,6 +11246,65 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn reference_target_addition_records_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+        let added_entry = graph.nodes[reference_index]
+            .reference_input
+            .as_ref()
+            .expect("reference input should exist")
+            .targets[1]
+            .clone();
+
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::ReferenceTargetAdd {
+                reference_node_name,
+                added_entry: recorded_entry,
+                target_index: 1,
+                ..
+            }) if reference_node_name == "Reference Input" && recorded_entry == &added_entry
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Add Reference Input target OUT_B")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(
+            graph.nodes[reference_index]
+                .reference_input
+                .as_ref()
+                .expect("reference input should exist")
+                .targets
+                .len(),
+            1
+        );
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Add Reference Input target OUT_B")
+        );
+
+        assert!(graph.redo_project_command());
+        let restored_targets = &graph.nodes[reference_index]
+            .reference_input
+            .as_ref()
+            .expect("reference input should exist")
+            .targets;
+        assert_eq!(restored_targets.len(), 2);
+        assert_eq!(restored_targets[1], added_entry);
+        assert!(!graph.add_reference_target_to_node(reference_index, second_null_index));
+        assert!(!graph.add_reference_target_to_node(graph.nodes.len(), second_null_index));
+        assert!(!graph.add_reference_target_to_node(reference_index, graph.nodes.len()));
     }
 
     #[test]
