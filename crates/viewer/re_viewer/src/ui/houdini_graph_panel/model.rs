@@ -5272,6 +5272,8 @@ pub(crate) struct NetworkViewDisplayOptions {
     #[serde(default = "default_background_brightness")]
     pub background_brightness: f32,
     #[serde(default)]
+    pub comment_display_mode: NetworkCommentDisplayMode,
+    #[serde(default)]
     pub error_badge: NetworkBadgeVisibility,
     #[serde(default)]
     pub warning_badge: NetworkBadgeVisibility,
@@ -5301,6 +5303,7 @@ impl Default for NetworkViewDisplayOptions {
             long_wire_fading: default_long_wire_fading(),
             grid_spacing: default_grid_spacing(),
             background_brightness: default_background_brightness(),
+            comment_display_mode: NetworkCommentDisplayMode::ManualOnly,
             error_badge: NetworkBadgeVisibility::Large,
             warning_badge: NetworkBadgeVisibility::Normal,
             comment_badge: NetworkBadgeVisibility::Large,
@@ -5329,6 +5332,34 @@ fn default_grid_spacing() -> f32 {
 
 fn default_background_brightness() -> f32 {
     0.12
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum NetworkCommentDisplayMode {
+    #[default]
+    ManualOnly,
+    AllCommented,
+}
+
+impl NetworkCommentDisplayMode {
+    pub const ALL: [Self; 2] = [Self::ManualOnly, Self::AllCommented];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ManualOnly => "Manual",
+            Self::AllCommented => "All Commented",
+        }
+    }
+
+    pub fn shows_comment(self, comment: &str, show_comment_in_network: bool) -> bool {
+        if comment.trim().is_empty() {
+            return false;
+        }
+        match self {
+            Self::ManualOnly => show_comment_in_network,
+            Self::AllCommented => true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -8503,10 +8534,10 @@ mod tests {
         HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
         NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
         NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
-        NativeOperatorProvenance, NetworkBadgeVisibility, NetworkNodeRingVisibility,
-        NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind, NodeStatus,
-        OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode,
-        OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
+        NativeOperatorProvenance, NetworkBadgeVisibility, NetworkCommentDisplayMode,
+        NetworkNodeRingVisibility, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
+        NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
+        OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
         ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
         ProjectCommand, PythonDependencyHealth, PythonEnvironmentDescriptor,
         PythonEnvironmentPathMode, PythonEnvironmentPaths, PythonEnvironmentResolveState,
@@ -11572,6 +11603,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         graph.network_view.long_wire_fading = 0.25;
         graph.network_view.grid_spacing = 3.0;
         graph.network_view.background_brightness = 0.68;
+        graph.network_view.comment_display_mode = NetworkCommentDisplayMode::AllCommented;
         graph.network_view.error_badge = NetworkBadgeVisibility::Hide;
         graph.network_view.warning_badge = NetworkBadgeVisibility::Large;
         graph.network_view.comment_badge = NetworkBadgeVisibility::Normal;
@@ -11588,6 +11620,14 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         restored.apply_sidecar_json(&json).unwrap();
 
         assert_eq!(restored.network_view, graph.network_view);
+    }
+
+    #[test]
+    fn network_comment_display_mode_controls_comment_visibility() {
+        assert!(NetworkCommentDisplayMode::ManualOnly.shows_comment("review", true));
+        assert!(!NetworkCommentDisplayMode::ManualOnly.shows_comment("review", false));
+        assert!(NetworkCommentDisplayMode::AllCommented.shows_comment("review", false));
+        assert!(!NetworkCommentDisplayMode::AllCommented.shows_comment("   ", true));
     }
 
     #[test]
@@ -11617,6 +11657,10 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(
             restored.network_view.comment_badge,
             NetworkBadgeVisibility::Large
+        );
+        assert_eq!(
+            restored.network_view.comment_display_mode,
+            NetworkCommentDisplayMode::ManualOnly
         );
         assert_eq!(
             restored.network_view.lock_badge,

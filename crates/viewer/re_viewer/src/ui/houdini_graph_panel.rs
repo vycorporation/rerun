@@ -12,10 +12,10 @@ use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState,
     GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphDocument,
     GraphEvaluationMode, GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding,
-    LayerKind, NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkNodeRingVisibility,
-    NetworkViewDisplayOptions, NodeStatus, PythonEnvironmentResolveTrigger,
-    PythonEnvironmentStatus, PythonOperatorDependencyStatus, ReferenceDiagnosticStatus,
-    SourceMetadata, SubstrateCoordinateContract,
+    LayerKind, NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkCommentDisplayMode,
+    NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeStatus,
+    PythonEnvironmentResolveTrigger, PythonEnvironmentStatus, PythonOperatorDependencyStatus,
+    ReferenceDiagnosticStatus, SourceMetadata, SubstrateCoordinateContract,
 };
 
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
@@ -1746,6 +1746,20 @@ impl HoudiniGraphPanel {
                     ui.weak("x");
                     ui.label("1.0");
                 });
+                ui.horizontal(|ui| {
+                    ui.weak("Comments");
+                    egui::ComboBox::from_id_salt("houdini_graph_comment_display_mode")
+                        .selected_text(options.comment_display_mode.label())
+                        .show_ui(ui, |ui| {
+                            for mode in NetworkCommentDisplayMode::ALL {
+                                ui.selectable_value(
+                                    &mut options.comment_display_mode,
+                                    mode,
+                                    mode.label(),
+                                );
+                            }
+                        });
+                });
                 badge_visibility_combo_ui(ui, "Error Badge", &mut options.error_badge);
                 badge_visibility_combo_ui(ui, "Warning Badge", &mut options.warning_badge);
                 badge_visibility_combo_ui(ui, "Comment Badge", &mut options.comment_badge);
@@ -3336,7 +3350,7 @@ impl HoudiniGraphPanel {
                     ui.visuals().warn_fg_color,
                 );
             }
-            if node.show_comment_in_network && !node.comment.trim().is_empty() {
+            if network_comment_visible(network_view.comment_display_mode, node) {
                 painter.text(
                     node_rect.right_center() + egui::vec2(10.0, 0.0),
                     Align2::LEFT_CENTER,
@@ -4854,6 +4868,10 @@ fn format_node_comment(comment: &str) -> String {
         let prefix = comment.chars().take(33).collect::<String>();
         format!("{prefix}…")
     }
+}
+
+fn network_comment_visible(mode: NetworkCommentDisplayMode, node: &self::model::GraphNode) -> bool {
+    mode.shows_comment(&node.comment, node.show_comment_in_network)
 }
 
 fn faded_color(color: Color32, alpha: f32) -> Color32 {
