@@ -11,8 +11,8 @@ pub(crate) mod model;
 use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState,
     GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphDocument, GraphPoint,
-    GraphStyle, HoudiniNodeBinding, LayerKind, NativeOperatorLoadStatus, NetworkBadgeVisibility,
-    NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeStatus,
+    GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding, LayerKind, NativeOperatorLoadStatus,
+    NetworkBadgeVisibility, NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeStatus,
     PythonEnvironmentResolveTrigger, PythonEnvironmentStatus, PythonOperatorDependencyStatus,
     ReferenceDiagnosticStatus, SourceMetadata, SubstrateCoordinateContract,
 };
@@ -325,6 +325,16 @@ impl HoudiniGraphPanel {
             ..Default::default()
         }
         .show(ui, |ui| self.outputs_workspace_ui(ui, &mut graph));
+    }
+
+    pub(crate) fn show_execution_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
+        install_shared_houdini_graph(ui.ctx(), shared_graph);
+        let mut graph = lock_houdini_graph(shared_graph);
+        egui::Frame {
+            inner_margin: egui::Margin::same(8),
+            ..Default::default()
+        }
+        .show(ui, |ui| self.execution_workspace_ui(ui, &mut graph));
     }
 
     pub(crate) fn show_project_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
@@ -932,6 +942,89 @@ impl HoudiniGraphPanel {
         ui.add_space(8.0);
         ui.strong("Node Info");
         self.node_info_ui(ui, graph);
+    }
+
+    fn execution_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.strong("Work Items");
+
+        ui.horizontal(|ui| {
+            let has_selected_node = self.selected_node < graph.nodes.len();
+            if ui
+                .add_enabled(has_selected_node, egui::Button::new("Queue Selected"))
+                .clicked()
+            {
+                graph.queue_node_evaluation(self.selected_node);
+            }
+            if ui
+                .add_enabled(has_selected_node, egui::Button::new("Run Selected"))
+                .clicked()
+            {
+                graph.request_node_run(self.selected_node);
+            }
+            if ui
+                .add_enabled(has_selected_node, egui::Button::new("Cancel"))
+                .clicked()
+            {
+                graph.cancel_node_run(self.selected_node);
+            }
+            if ui
+                .add_enabled(has_selected_node, egui::Button::new("Retry"))
+                .clicked()
+            {
+                graph.retry_work_item_for_node(self.selected_node);
+            }
+            if ui
+                .add_enabled(has_selected_node, egui::Button::new("Complete"))
+                .clicked()
+            {
+                graph.complete_node_run(self.selected_node);
+            }
+        });
+
+        ui.weak("Runtime evaluation state; not saved with the graph sidecar.");
+        ui.add_space(8.0);
+
+        if graph.work_items.is_empty() {
+            ui.weak("No graph evaluation work has been requested.");
+            return;
+        }
+
+        egui::ScrollArea::vertical()
+            .id_salt("houdini_execution_work_items")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("houdini_execution_work_item_grid")
+                    .num_columns(6)
+                    .spacing([12.0, 6.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("Node");
+                        ui.strong("Output");
+                        ui.strong("Status");
+                        ui.strong("Progress");
+                        ui.strong("Fingerprint");
+                        ui.strong("Summary");
+                        ui.end_row();
+
+                        for item in graph.work_items.iter().rev() {
+                            ui.label(&item.node_name);
+                            ui.label(&item.output_name);
+                            ui.colored_label(
+                                work_item_status_color(ui, item.status),
+                                item.status.as_str(),
+                            );
+                            ui.label(format!("{:.0}%", item.progress * 100.0));
+                            ui.monospace(&item.fingerprint);
+                            ui.vertical(|ui| {
+                                ui.label(&item.summary);
+                                if let Some(diagnostic) = &item.diagnostic {
+                                    ui.colored_label(ui.visuals().warn_fg_color, diagnostic);
+                                }
+                            });
+                            ui.end_row();
+                        }
+                    });
+            });
     }
 
     fn project_workspace_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -4273,6 +4366,18 @@ fn evaluation_color(ui: &Ui, state: EvaluationState) -> Color32 {
         EvaluationState::Stale | EvaluationState::Manual => ui.visuals().warn_fg_color,
         EvaluationState::Running => ui.visuals().selection.stroke.color,
         EvaluationState::Failed => ui.visuals().error_fg_color,
+    }
+}
+
+fn work_item_status_color(ui: &Ui, status: GraphWorkItemStatus) -> Color32 {
+    match status {
+        GraphWorkItemStatus::Waiting | GraphWorkItemStatus::Superseded => {
+            ui.visuals().warn_fg_color
+        }
+        GraphWorkItemStatus::Running => ui.visuals().selection.stroke.color,
+        GraphWorkItemStatus::Cached => ui.visuals().weak_text_color(),
+        GraphWorkItemStatus::Canceled | GraphWorkItemStatus::Failed => ui.visuals().error_fg_color,
+        GraphWorkItemStatus::Complete => ui.visuals().text_color(),
     }
 }
 
