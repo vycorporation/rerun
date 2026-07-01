@@ -42,6 +42,7 @@ for the graph hierarchy lane.
 | `#166` | complete | Selected graph navigation model seam | Adds graph navigation targets plus safe selected-graph and graph-container enter model actions without moving nodes between graphs. |
 | `#168` | complete | Selected graph storage layout scope | Scopes graph-local node index helpers, generated default data-flow edges, and graph layout to selected graph storage while retaining loaded cross-graph diagnostics. |
 | `#170` | complete | Physical graph container collapse storage | Moves captured nodes into the new internal graph and rewires external crossings through typed graph-container boundary edges. |
+| `#172` | complete | Graph container enter inspector action | Adds a workbench node-info Enter action for resolved navigable graph containers using the selected-graph navigation seam. |
 
 ## Next implementation candidates
 
@@ -51,6 +52,8 @@ for the graph hierarchy lane.
    - Selected graph switching and resolved graph-container enter actions are
      covered by `#166` without turning path display into a second durable
      identity.
+   - `#172` wires resolved graph-container enter navigation into the workbench
+     inspector.
 
 2. Graph container storage.
    - `#142` adds graph container metadata that can point to an internal named
