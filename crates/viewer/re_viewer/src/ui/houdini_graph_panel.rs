@@ -1743,6 +1743,18 @@ impl HoudiniGraphPanel {
             });
         }
 
+        if let Some(raster) = &info.substrate_raster {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("Raster");
+                ui.label(&raster.display_name);
+                ui.weak(raster.format_summary());
+                ui.weak(format!("{} bytes", raster.byte_len()));
+                if let Some(source_path) = &raster.source_path {
+                    ui.weak(source_path);
+                }
+            });
+        }
+
         if let Some(reference_input) = &info.reference_input {
             ui.horizontal_wrapped(|ui| {
                 ui.weak("Reference");
@@ -2247,9 +2259,10 @@ impl HoudiniGraphPanel {
                     match graph.save_rerun_recording(&path) {
                         Ok(recording) => {
                             self.recording_status = Some(format!(
-                                "Saved recording: {} ({} items, {} polygons, {} native cubics). {}",
+                                "Saved recording: {} ({} items, {} rasters, {} polygons, {} native cubics). {}",
                                 recording.path.display(),
                                 recording.item_count,
+                                recording.substrate_raster_count,
                                 recording.polygon_count,
                                 recording.native_cubic_bezier_count,
                                 recording.limitation_note

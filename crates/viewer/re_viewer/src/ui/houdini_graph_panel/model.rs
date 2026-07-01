@@ -28,6 +28,7 @@ pub(crate) struct GraphDocument {
     pub network_view: NetworkViewDisplayOptions,
     pub layers: Vec<Layer>,
     pub style: GraphStyle,
+    pub substrate_raster: Option<SubstrateRaster>,
     pub geometry: Vec<Geometry>,
     pub recording_geometry: Vec<Geometry>,
     pub python_operator_declarations: Vec<PythonOperatorDeclaration>,
@@ -251,6 +252,7 @@ impl GraphDocument {
                 },
             ],
             style: GraphStyle::default(),
+            substrate_raster: None,
             geometry,
             recording_geometry: Vec::new(),
             python_operator_declarations: Vec::new(),
@@ -558,6 +560,7 @@ impl GraphDocument {
                 opacity: 0.78,
                 stroke_scale: 0.68,
             },
+            substrate_raster: Some(SubstrateRaster::mock_malware_byteplot()),
             geometry,
             recording_geometry: Vec::new(),
             python_operator_declarations: Vec::new(),
@@ -2826,6 +2829,7 @@ impl GraphDocument {
         let reference_consumers = self.reference_consumers_for_node(index);
         let reference_output_warning = self.reference_output_change_warning_for_node(index);
         let coordinate_warnings = self.coordinate_contract_warnings(node);
+        let substrate_raster = self.substrate_raster_for_node(node);
 
         Some(match node.kind {
             NodeKind::Source => NodeInfo {
@@ -2847,6 +2851,7 @@ impl GraphDocument {
                 summary: "Source geometry lives in the graph model before any viewer adaptation.",
                 source_metadata: Some(self.source.metadata.clone()),
                 coordinate_contract: node.coordinate_contract.clone(),
+                substrate_raster: substrate_raster.clone(),
                 source_error: self.source.import_error.clone(),
                 style: None,
                 generated: node.generated,
@@ -2880,6 +2885,7 @@ impl GraphDocument {
                 summary: "Filter removes geometry that does not satisfy its typed attribute rule.",
                 source_metadata: None,
                 coordinate_contract: node.coordinate_contract.clone(),
+                substrate_raster: substrate_raster.clone(),
                 source_error: None,
                 style: None,
                 generated: node.generated,
@@ -2913,6 +2919,7 @@ impl GraphDocument {
                 summary: "Style changes viewer presentation without mutating graph geometry.",
                 source_metadata: None,
                 coordinate_contract: node.coordinate_contract.clone(),
+                substrate_raster: substrate_raster.clone(),
                 source_error: None,
                 style: Some(self.resolved_style()),
                 generated: node.generated,
@@ -2944,6 +2951,7 @@ impl GraphDocument {
                     summary: "Null operator is a visible typed pass-through anchor. OUT_* and IN_* are naming conventions only.",
                     source_metadata: None,
                     coordinate_contract: node.coordinate_contract.clone(),
+                    substrate_raster: substrate_raster.clone(),
                     source_error: None,
                     style: Some(self.resolved_style()),
                     generated: node.generated,
@@ -3001,6 +3009,7 @@ impl GraphDocument {
                     summary: "Reference input imports one compatible graph output by stable identity. It is live, one-way, and does not copy source data.",
                     source_metadata: None,
                     coordinate_contract: node.coordinate_contract.clone(),
+                    substrate_raster: substrate_raster.clone(),
                     source_error: None,
                     style: None,
                     generated: node.generated,
@@ -3059,6 +3068,7 @@ impl GraphDocument {
                     summary: "Substrate projection is a visible graph operator created by assisted repair.",
                     source_metadata: None,
                     coordinate_contract: node.coordinate_contract.clone(),
+                    substrate_raster: substrate_raster.clone(),
                     source_error: None,
                     style: None,
                     generated: node.generated,
@@ -3115,6 +3125,7 @@ impl GraphDocument {
                     summary: "Python operator is graph-visible but execution is deferred to the trusted project environment lane.",
                     source_metadata: None,
                     coordinate_contract: node.coordinate_contract.clone(),
+                    substrate_raster: substrate_raster.clone(),
                     source_error: None,
                     style: None,
                     generated: node.generated,
@@ -3183,6 +3194,7 @@ impl GraphDocument {
                     summary: "Procedural asset instance wraps a typed graph subgraph without depending on viewer state.",
                     source_metadata: None,
                     coordinate_contract: node.coordinate_contract.clone(),
+                    substrate_raster: substrate_raster.clone(),
                     source_error: None,
                     style: None,
                     generated: node.generated,
@@ -3265,6 +3277,7 @@ impl GraphDocument {
                     summary: "Native operator node is graph-visible; loading and execution are handled by the trusted native lane.",
                     source_metadata: None,
                     coordinate_contract: node.coordinate_contract.clone(),
+                    substrate_raster: substrate_raster.clone(),
                     source_error: None,
                     style: None,
                     generated: node.generated,
@@ -3351,6 +3364,7 @@ impl GraphDocument {
                 summary: "Output prepares boundary data while preserving native graph geometry.",
                 source_metadata: None,
                 coordinate_contract: node.coordinate_contract.clone(),
+                substrate_raster: substrate_raster.clone(),
                 source_error: None,
                 style: None,
                 generated: node.generated,
@@ -3574,6 +3588,7 @@ impl GraphDocument {
             ),
         );
         self.recording_geometry = geometry;
+        self.substrate_raster = None;
         self.update_source_node_readiness();
         self.render_feasibility_summary()
     }
@@ -3645,6 +3660,7 @@ impl GraphDocument {
         RerunSceneOutput {
             stroke_scale: viewer_output.stroke_scale,
             style,
+            substrate_raster: self.substrate_raster.clone(),
             export_segments,
             query_bridge,
             items,
@@ -3659,7 +3675,7 @@ impl GraphDocument {
     ) -> anyhow::Result<DurableRecordingResult> {
         use re_sdk::RecordingStreamBuilder;
         use re_sdk_types::{
-            archetypes::{LineStrips2D, Points2D, TextDocument},
+            archetypes::{Image, LineStrips2D, Points2D, TextDocument},
             components::{LineStrip2D, Position2D, Radius},
         };
 
@@ -3671,6 +3687,18 @@ impl GraphDocument {
             "houdini_graph/metadata",
             &TextDocument::new(scene.recording_metadata_markdown(self)),
         )?;
+
+        if let Some(raster) = &scene.substrate_raster {
+            let entity_path = raster.recording_entity_path();
+            rec.log_static(
+                entity_path.as_str(),
+                &Image::from_l8(raster.luma8_pixels(), [raster.width, raster.height]),
+            )?;
+            rec.log_static(
+                format!("{entity_path}/metadata"),
+                &TextDocument::new(raster.recording_metadata_markdown()),
+            )?;
+        }
 
         for (index, item) in scene.items.iter().enumerate() {
             let entity_base = format!(
@@ -3749,6 +3777,7 @@ impl GraphDocument {
             item_count: scene.items.len(),
             polygon_count: scene.polygon_count(),
             native_cubic_bezier_count: scene.native_cubic_bezier_count(),
+            substrate_raster_count: usize::from(scene.substrate_raster.is_some()),
             limitation_note: CUBIC_RECORDING_LIMITATION.to_owned(),
         })
     }
@@ -3763,6 +3792,7 @@ impl GraphDocument {
         if self.source.mode == GraphSourceMode::DemoFallback {
             self.source.metadata = previous_metadata;
         }
+        self.substrate_raster = None;
         self.update_source_node_readiness();
     }
 
@@ -3784,6 +3814,7 @@ impl GraphDocument {
                     .into_iter()
                     .map(|record| record.geometry)
                     .collect();
+                self.substrate_raster = None;
                 self.update_source_node_readiness();
                 Ok(count)
             }
@@ -3838,6 +3869,7 @@ impl GraphDocument {
         self.update_source_from_query_bridge(query_bridge);
         self.source.mode = GraphSourceMode::RecordingQuery;
         self.recording_geometry = records.into_iter().map(|record| record.geometry).collect();
+        self.substrate_raster = None;
         self.source.metadata = SourceMetadata::from_geometry(
             SourceProvenance::RecordingQuery,
             None,
@@ -3956,6 +3988,12 @@ impl GraphDocument {
             contract.origin,
             contract.y_axis,
         )]
+    }
+
+    fn substrate_raster_for_node(&self, node: &GraphNode) -> Option<SubstrateRaster> {
+        let raster = self.substrate_raster.as_ref()?;
+        let contract = node.coordinate_contract.as_ref()?;
+        (raster.substrate_id == contract.substrate_id).then(|| raster.clone())
     }
 }
 
@@ -4476,6 +4514,8 @@ struct HoudiniGraphSidecar {
     layers: Vec<LayerSidecar>,
     #[serde(default)]
     style: GraphStyle,
+    #[serde(default)]
+    substrate_raster: Option<SubstrateRaster>,
     demo_geometry: Vec<Geometry>,
     recording_geometry: Vec<Geometry>,
     #[serde(default)]
@@ -4541,6 +4581,7 @@ impl HoudiniGraphSidecar {
                 })
                 .collect(),
             style: graph.resolved_style(),
+            substrate_raster: graph.substrate_raster.clone(),
             demo_geometry: graph.geometry.clone(),
             recording_geometry: graph.recording_geometry.clone(),
             python_operator_declarations: graph.python_operator_declarations.clone(),
@@ -4573,6 +4614,10 @@ impl HoudiniGraphSidecar {
         graph.annotations = self.annotations;
         graph.network_view = self.network_view;
         graph.style = self.style;
+        graph.substrate_raster = self.substrate_raster.or_else(|| {
+            (graph.source.mode == GraphSourceMode::SyntheticMalware)
+                .then(SubstrateRaster::mock_malware_byteplot)
+        });
         graph.python_operator_declarations = self.python_operator_declarations;
         graph.procedural_asset_declarations = self.procedural_asset_declarations;
         graph.native_operator_declarations = self.native_operator_declarations;
@@ -5513,6 +5558,118 @@ impl SubstrateCoordinateContract {
             to_contract.y_axis
         )
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SubstrateRaster {
+    pub substrate_id: String,
+    pub display_name: String,
+    pub width: u32,
+    pub height: u32,
+    pub color_model: SubstrateRasterColorModel,
+    pub source_path: Option<String>,
+    pub recipe: SubstrateRasterRecipe,
+}
+
+impl SubstrateRaster {
+    fn mock_malware_byteplot() -> Self {
+        Self {
+            substrate_id: "malware-byteplot-pixel-space".to_owned(),
+            display_name: "Mock malware byteplot".to_owned(),
+            width: 256,
+            height: 256,
+            color_model: SubstrateRasterColorModel::L8,
+            source_path: Some("examples/malware_byteplot/mock-byteplot.png".to_owned()),
+            recipe: SubstrateRasterRecipe::MockMalwareByteplot,
+        }
+    }
+
+    pub fn byte_len(&self) -> usize {
+        (self.width as usize) * (self.height as usize)
+    }
+
+    pub fn format_summary(&self) -> String {
+        format!(
+            "{} {}x{}",
+            self.color_model.as_str(),
+            self.width,
+            self.height
+        )
+    }
+
+    fn recording_entity_path(&self) -> String {
+        format!(
+            "houdini_graph/substrates/{}",
+            sanitize_entity_path_part(&self.substrate_id)
+        )
+    }
+
+    fn luma8_pixels(&self) -> Vec<u8> {
+        match self.recipe {
+            SubstrateRasterRecipe::MockMalwareByteplot => {
+                let mut pixels = Vec::with_capacity(self.byte_len());
+                for y in 0..self.height {
+                    for x in 0..self.width {
+                        let gradient = ((x.wrapping_mul(5) + y.wrapping_mul(3)) & 0xff) as u8;
+                        let band = if (x / 16 + y / 32) % 2 == 0 { 34 } else { 0 };
+                        let section = if (48..112).contains(&x) && (24..120).contains(&y) {
+                            58
+                        } else if (132..228).contains(&x) && (36..132).contains(&y) {
+                            42
+                        } else if (28..144).contains(&x) && (136..224).contains(&y) {
+                            64
+                        } else if (130..240).contains(&x) && (136..236).contains(&y) {
+                            50
+                        } else {
+                            0
+                        };
+                        let texture =
+                            (((x ^ y).wrapping_mul(13) + (x * y).wrapping_mul(3)) & 0x1f) as u8;
+                        pixels
+                            .push(gradient.saturating_add(band).saturating_add(section) ^ texture);
+                    }
+                }
+                pixels
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn recording_metadata_markdown(&self) -> String {
+        format!(
+            "# Substrate raster\n\n\
+             Name: `{}`\n\n\
+             Substrate id: `{}`\n\n\
+             Format: `{}`\n\n\
+             Byte length: `{}`\n\n\
+             Source path: `{}`\n\n\
+             Recipe: `{:?}`\n",
+            self.display_name,
+            self.substrate_id,
+            self.format_summary(),
+            self.byte_len(),
+            self.source_path.as_deref().unwrap_or("none"),
+            self.recipe
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SubstrateRasterColorModel {
+    L8,
+}
+
+impl SubstrateRasterColorModel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::L8 => "L8",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SubstrateRasterRecipe {
+    MockMalwareByteplot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -7074,6 +7231,7 @@ pub(crate) struct NodeInfo {
     pub summary: &'static str,
     pub source_metadata: Option<SourceMetadata>,
     pub coordinate_contract: Option<SubstrateCoordinateContract>,
+    pub substrate_raster: Option<SubstrateRaster>,
     pub source_error: Option<String>,
     pub style: Option<GraphStyle>,
     pub generated: Option<GeneratedNodeInfo>,
@@ -7576,6 +7734,7 @@ pub(crate) struct RerunSceneOutput {
     pub debug_items: Vec<RerunSceneDebugItem>,
     pub stroke_scale: f32,
     pub style: GraphStyle,
+    pub substrate_raster: Option<SubstrateRaster>,
     pub export_segments: usize,
     pub query_bridge: Option<RerunQueryBridge>,
 }
@@ -7622,6 +7781,7 @@ impl RerunSceneOutput {
              Source path: `{source_path}`\n\n\
              Source provenance: `{}`\n\n\
              Output items: `{}`\n\n\
+             Substrate rasters: `{}`\n\n\
              Polygons: `{}`\n\n\
              Native cubic Beziers: `{}`\n\n\
              Limitation: {}\n\n\
@@ -7629,6 +7789,7 @@ impl RerunSceneOutput {
              | --- | --- | --- | ---: | --- |\n",
             graph.source.metadata.provenance.as_str(),
             self.items.len(),
+            usize::from(self.substrate_raster.is_some()),
             self.polygon_count(),
             self.native_cubic_bezier_count(),
             CUBIC_RECORDING_LIMITATION
@@ -7664,6 +7825,7 @@ pub(crate) struct DurableRecordingResult {
     pub item_count: usize,
     pub polygon_count: usize,
     pub native_cubic_bezier_count: usize,
+    pub substrate_raster_count: usize,
     pub limitation_note: String,
 }
 
@@ -8451,6 +8613,14 @@ mod tests {
         assert_eq!(graph.polygon_count(), 4);
         assert_eq!(graph.cubic_bezier_count(), 0);
         assert_eq!(graph.visible_output_count(), 3);
+        let raster = graph
+            .substrate_raster
+            .as_ref()
+            .expect("malware starter should carry a raster substrate");
+        assert_eq!(raster.substrate_id, "malware-byteplot-pixel-space");
+        assert_eq!(raster.format_summary(), "L8 256x256");
+        assert_eq!(raster.byte_len(), 256 * 256);
+        assert_eq!(raster.luma8_pixels().len(), raster.byte_len());
         assert!(
             graph
                 .source
@@ -8488,6 +8658,13 @@ mod tests {
         assert_eq!(output_info.output_count, 3);
         assert_eq!(
             output_info
+                .substrate_raster
+                .as_ref()
+                .map(|raster| raster.display_name.as_str()),
+            Some("Mock malware byteplot")
+        );
+        assert_eq!(
+            output_info
                 .coordinate_contract
                 .as_ref()
                 .map(|contract| (contract.width, contract.height)),
@@ -8510,6 +8687,10 @@ mod tests {
         assert_eq!(contract.height, 256);
         assert_eq!(contract.origin, SubstrateOrigin::TopLeft);
         assert_eq!(contract.y_axis, SubstrateYAxis::Down);
+
+        let scene = graph.rerun_scene_output();
+        assert_eq!(scene.substrate_raster, graph.substrate_raster);
+        assert_eq!(scene.polygon_count(), 3);
     }
 
     #[test]
@@ -8551,6 +8732,7 @@ mod tests {
         );
         assert_eq!(restored.nodes.len(), graph.nodes.len());
         assert_eq!(restored.visible_output_count(), 3);
+        assert_eq!(restored.substrate_raster, graph.substrate_raster);
         assert!(
             restored
                 .annotations
@@ -11179,11 +11361,30 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(recording.item_count, 4);
         assert_eq!(recording.polygon_count, 0);
         assert_eq!(recording.native_cubic_bezier_count, 4);
+        assert_eq!(recording.substrate_raster_count, 0);
         assert!(
             recording
                 .limitation_note
                 .contains("cubic Bezier semantics as graph-owned control-point metadata")
         );
+        assert!(recording_path.exists());
+        assert!(std::fs::metadata(&recording_path).unwrap().len() > 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn malware_starter_recording_writes_substrate_raster_with_overlays() {
+        let recording_dir = tempfile::tempdir().unwrap();
+        let recording_path = recording_dir.path().join("malware-byteplot-output.rrd");
+        let graph = GraphDocument::malware_starter();
+
+        let recording = graph.save_rerun_recording(&recording_path).unwrap();
+
+        assert_eq!(recording.path, recording_path);
+        assert_eq!(recording.item_count, 3);
+        assert_eq!(recording.polygon_count, 3);
+        assert_eq!(recording.native_cubic_bezier_count, 0);
+        assert_eq!(recording.substrate_raster_count, 1);
         assert!(recording_path.exists());
         assert!(std::fs::metadata(&recording_path).unwrap().len() > 0);
     }

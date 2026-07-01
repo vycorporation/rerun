@@ -1731,6 +1731,7 @@ mod tests {
 
     fn native_cubic_scene(count: usize) -> RerunSceneOutput {
         RerunSceneOutput {
+            substrate_raster: None,
             items: (0..count)
                 .map(|index| {
                     let curve = cubic(index);
@@ -1754,6 +1755,7 @@ mod tests {
 
     fn polygon_scene(count: usize) -> RerunSceneOutput {
         RerunSceneOutput {
+            substrate_raster: None,
             items: (0..count)
                 .map(|index| {
                     let offset = index as f32 * 0.001;
@@ -1790,6 +1792,7 @@ mod tests {
             score: 1.0,
         };
         let scene = RerunSceneOutput {
+            substrate_raster: None,
             items: vec![RerunSceneItem::NativeCubicBezier {
                 curve,
                 layer: LayerKind::Curves,
@@ -1816,6 +1819,7 @@ mod tests {
     #[test]
     fn view_bounds_expand_flat_geometry() {
         let scene = RerunSceneOutput {
+            substrate_raster: None,
             items: vec![RerunSceneItem::Polygon {
                 points: vec![point(2.0, 5.0), point(4.0, 5.0)],
                 layer: LayerKind::Polygons,
@@ -1840,6 +1844,7 @@ mod tests {
     #[test]
     fn view_transform_preserves_geometry_aspect_ratio() {
         let scene = RerunSceneOutput {
+            substrate_raster: None,
             items: vec![RerunSceneItem::Polygon {
                 points: vec![point(0.0, 0.0), point(10.0, 10.0)],
                 layer: LayerKind::Polygons,
@@ -1865,6 +1870,7 @@ mod tests {
     #[test]
     fn hit_testing_selects_polygon_containing_pointer() {
         let scene = RerunSceneOutput {
+            substrate_raster: None,
             items: vec![RerunSceneItem::Polygon {
                 points: vec![
                     point(0.0, 0.0),
@@ -1902,6 +1908,7 @@ mod tests {
             score: 0.9,
         };
         let scene = RerunSceneOutput {
+            substrate_raster: None,
             items: vec![RerunSceneItem::NativeCubicBezier {
                 curve,
                 layer: LayerKind::Curves,
