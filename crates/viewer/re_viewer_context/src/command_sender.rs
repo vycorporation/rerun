@@ -28,6 +28,10 @@ pub enum SystemCommand {
     /// Will not load any new data if the source is already one of the active data sources.
     LoadDataSource(LogDataSource),
 
+    /// Save the currently active blueprint to a specific file path.
+    #[cfg(not(target_arch = "wasm32"))]
+    SaveActiveBlueprintToPath(std::path::PathBuf),
+
     /// Add a new receiver for log messages.
     AddReceiver(LogReceiver),
 

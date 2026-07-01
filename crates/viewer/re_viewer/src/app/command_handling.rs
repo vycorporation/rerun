@@ -180,6 +180,12 @@ impl App {
                 // This adds new system commands, which will be handled later in the loop.
                 self.go_to_dataset_data(store_id, fragment);
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            SystemCommand::SaveActiveBlueprintToPath(path) => {
+                if let Err(err) = save_active_blueprint_to_path(self, store_hub, path) {
+                    re_log::error!("Failed to save workbench blueprint: {err}");
+                }
+            }
             SystemCommand::CopyViewerUrl(url) => {
                 if cfg!(target_arch = "wasm32") {
                     match combine_with_base_url(
@@ -1838,6 +1844,51 @@ fn save_blueprint(
     let title = "Save blueprint";
 
     save_entity_db(app, rrd_version, file_name, title.to_owned(), messages)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save_active_blueprint_to_path(
+    app: &mut App,
+    store_hub: &mut StoreHub,
+    path: std::path::PathBuf,
+) -> anyhow::Result<()> {
+    let app_id = app
+        .state
+        .active_recording_id()
+        .map(|store_id| store_id.application_id().clone())
+        .context("No active recording for workbench blueprint save")?;
+
+    store_hub.ensure_active_blueprint_for_app(&app_id);
+    let blueprint = store_hub
+        .active_blueprint_for_app(&app_id)
+        .context("No active blueprint for workbench save")?;
+
+    let rrd_version = blueprint
+        .store_info()
+        .and_then(|info| info.store_version)
+        .unwrap_or(re_build_info::CrateVersion::LOCAL);
+    let new_store_id = blueprint
+        .store_id()
+        .clone()
+        .with_recording_id(RecordingId::random());
+    let mut saved_blueprint = blueprint
+        .clone_with_new_id(new_store_id)
+        .context("Cloning current blueprint")?;
+
+    if let Some(undo_state) = app.state.blueprint_undo_state.get(blueprint.store_id()) {
+        undo_state.clone().clear_redo_buffer(&mut saved_blueprint);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let messages = saved_blueprint.to_messages(None).collect_vec();
+    app.background_tasks.spawn_file_saver(move || {
+        crate::saving::encode_to_file(rrd_version, &path, messages.into_iter())?;
+        Ok(path)
+    })?;
+    Ok(())
 }
 
 // TODO(emilk): unify this with `ViewerContext::save_file_dialog`
