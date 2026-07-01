@@ -2845,6 +2845,7 @@ impl GraphDocument {
                 parameter: node.parameter.clone(),
                 summary: "Source geometry lives in the graph model before any viewer adaptation.",
                 source_metadata: Some(self.source.metadata.clone()),
+                coordinate_contract: node.coordinate_contract.clone(),
                 source_error: self.source.import_error.clone(),
                 style: None,
                 generated: node.generated,
@@ -2877,6 +2878,7 @@ impl GraphDocument {
                 parameter: node.parameter.clone(),
                 summary: "Filter removes geometry that does not satisfy its typed attribute rule.",
                 source_metadata: None,
+                coordinate_contract: node.coordinate_contract.clone(),
                 source_error: None,
                 style: None,
                 generated: node.generated,
@@ -2909,6 +2911,7 @@ impl GraphDocument {
                 parameter: node.parameter.clone(),
                 summary: "Style changes viewer presentation without mutating graph geometry.",
                 source_metadata: None,
+                coordinate_contract: node.coordinate_contract.clone(),
                 source_error: None,
                 style: Some(self.resolved_style()),
                 generated: node.generated,
@@ -2939,6 +2942,7 @@ impl GraphDocument {
                     parameter: node.parameter.clone(),
                     summary: "Null operator is a visible typed pass-through anchor. OUT_* and IN_* are naming conventions only.",
                     source_metadata: None,
+                    coordinate_contract: node.coordinate_contract.clone(),
                     source_error: None,
                     style: Some(self.resolved_style()),
                     generated: node.generated,
@@ -2995,6 +2999,7 @@ impl GraphDocument {
                     parameter: node.parameter.clone(),
                     summary: "Reference input imports one compatible graph output by stable identity. It is live, one-way, and does not copy source data.",
                     source_metadata: None,
+                    coordinate_contract: node.coordinate_contract.clone(),
                     source_error: None,
                     style: None,
                     generated: node.generated,
@@ -3052,6 +3057,7 @@ impl GraphDocument {
                     parameter: node.parameter.clone(),
                     summary: "Substrate projection is a visible graph operator created by assisted repair.",
                     source_metadata: None,
+                    coordinate_contract: node.coordinate_contract.clone(),
                     source_error: None,
                     style: None,
                     generated: node.generated,
@@ -3104,6 +3110,7 @@ impl GraphDocument {
                     parameter: node.parameter.clone(),
                     summary: "Python operator is graph-visible but execution is deferred to the trusted project environment lane.",
                     source_metadata: None,
+                    coordinate_contract: node.coordinate_contract.clone(),
                     source_error: None,
                     style: None,
                     generated: node.generated,
@@ -3171,6 +3178,7 @@ impl GraphDocument {
                     parameter: node.parameter.clone(),
                     summary: "Procedural asset instance wraps a typed graph subgraph without depending on viewer state.",
                     source_metadata: None,
+                    coordinate_contract: node.coordinate_contract.clone(),
                     source_error: None,
                     style: None,
                     generated: node.generated,
@@ -3252,6 +3260,7 @@ impl GraphDocument {
                     parameter: node.parameter.clone(),
                     summary: "Native operator node is graph-visible; loading and execution are handled by the trusted native lane.",
                     source_metadata: None,
+                    coordinate_contract: node.coordinate_contract.clone(),
                     source_error: None,
                     style: None,
                     generated: node.generated,
@@ -3337,6 +3346,7 @@ impl GraphDocument {
                 parameter: node.parameter.clone(),
                 summary: "Output prepares boundary data while preserving native graph geometry.",
                 source_metadata: None,
+                coordinate_contract: node.coordinate_contract.clone(),
                 source_error: None,
                 style: None,
                 generated: node.generated,
@@ -7020,6 +7030,7 @@ pub(crate) struct NodeInfo {
     pub parameter: NodeParameter,
     pub summary: &'static str,
     pub source_metadata: Option<SourceMetadata>,
+    pub coordinate_contract: Option<SubstrateCoordinateContract>,
     pub source_error: Option<String>,
     pub style: Option<GraphStyle>,
     pub generated: Option<GeneratedNodeInfo>,
@@ -8432,6 +8443,13 @@ mod tests {
             .selected_node_info(output_index)
             .expect("output node info should exist");
         assert_eq!(output_info.output_count, 3);
+        assert_eq!(
+            output_info
+                .coordinate_contract
+                .as_ref()
+                .map(|contract| (contract.width, contract.height)),
+            Some((256, 256))
+        );
         assert_eq!(
             output_info
                 .output_operator

@@ -1734,6 +1734,15 @@ impl HoudiniGraphPanel {
         ui: &mut Ui,
         info: &self::model::NodeInfo,
     ) {
+        if let Some(contract) = &info.coordinate_contract {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("Substrate");
+                ui.label(&contract.substrate_id);
+                ui.weak(format!("{}x{}", contract.width, contract.height));
+                ui.weak(format!("{:?}/{:?}", contract.origin, contract.y_axis));
+            });
+        }
+
         if let Some(reference_input) = &info.reference_input {
             ui.horizontal_wrapped(|ui| {
                 ui.weak("Reference");
