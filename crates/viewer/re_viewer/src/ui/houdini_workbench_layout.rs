@@ -6,7 +6,7 @@ use re_viewport_blueprint::{ViewBlueprint, ViewportBlueprint};
 use crate::ui::{
     HoudiniDataView, HoudiniDisplayView, HoudiniExecutionView, HoudiniFindView, HoudiniGraphView,
     HoudiniInfoView, HoudiniLayersView, HoudiniNetworkView, HoudiniOperatorsView,
-    HoudiniOutputsView, HoudiniParametersView, HoudiniProjectView,
+    HoudiniOutputsView, HoudiniParametersView, HoudiniProjectView, HoudiniShelfView,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -33,6 +33,7 @@ struct PresetViews {
     layers: ViewId,
     data: ViewId,
     outputs: ViewId,
+    shelf: ViewId,
     execution: ViewId,
     project: ViewId,
     graph: ViewId,
@@ -52,19 +53,19 @@ impl HoudiniWorkbenchPreset {
     fn description(self) -> &'static str {
         match self {
             Self::NetworkAndInspector => {
-                "Network editor beside Parameters, Display, Info, Ops, Find, and Layers tabs."
+                "Network editor beside Shelf, Parameters, Display, Info, Ops, Find, and Layers tabs."
             }
             Self::HoudiniDefault => {
-                "Rendered graph viewport on the left, with Parameters and Network stacked on the right."
+                "Rendered graph viewport on the left, with Shelf, Parameters, and Network stacked on the right."
             }
             Self::GraphReview => {
-                "Output viewport beside inspection tabs, with project data and exports nearby."
+                "Output viewport beside inspection tabs, with Shelf, project data, and exports nearby."
             }
             Self::DataInspection => {
-                "Rendered graph viewport beside project data, attributes, info, and outputs."
+                "Rendered graph viewport beside Shelf, project data, attributes, info, and outputs."
             }
             Self::OutputDebug => {
-                "Rendered graph viewport beside output, display, layers, info, find, and ops tabs."
+                "Rendered graph viewport beside Shelf, output, display, layers, info, find, and ops tabs."
             }
         }
     }
@@ -756,6 +757,11 @@ fn resolve_preset_views(
         view_spec::<HoudiniOutputsView>("Outputs"),
         &mut views_to_add,
     );
+    let shelf = resolve_view(
+        viewport_blueprint,
+        view_spec::<HoudiniShelfView>("Shelf"),
+        &mut views_to_add,
+    );
     let execution = resolve_view(
         viewport_blueprint,
         view_spec::<HoudiniExecutionView>("Execution"),
@@ -783,6 +789,7 @@ fn resolve_preset_views(
             layers,
             data,
             outputs,
+            shelf,
             execution,
             project,
             graph,
@@ -833,6 +840,7 @@ fn build_preset_tree(
                 &mut container_display_names,
                 "Inspector",
                 vec![
+                    views.shelf,
                     views.parameters,
                     views.display,
                     views.info,
@@ -851,13 +859,14 @@ fn build_preset_tree(
         }
         HoudiniWorkbenchPreset::HoudiniDefault => {
             let graph = tiles.insert_pane(views.graph);
+            let shelf = tiles.insert_pane(views.shelf);
             let parameters = tiles.insert_pane(views.parameters);
             let network = tiles.insert_pane(views.network);
             let right_side = insert_named_vertical(
                 &mut tiles,
                 &mut container_display_names,
-                "Parameters + Network",
-                vec![parameters, network],
+                "Shelf + Parameters + Network",
+                vec![shelf, parameters, network],
             );
             insert_named_horizontal(
                 &mut tiles,
@@ -872,7 +881,13 @@ fn build_preset_tree(
                 &mut tiles,
                 &mut container_display_names,
                 "Project Data",
-                vec![views.data, views.outputs, views.execution, views.project],
+                vec![
+                    views.shelf,
+                    views.data,
+                    views.outputs,
+                    views.execution,
+                    views.project,
+                ],
             );
             let review_tabs = insert_named_tabs(
                 &mut tiles,
@@ -899,7 +914,13 @@ fn build_preset_tree(
                 &mut tiles,
                 &mut container_display_names,
                 "Data + Attributes",
-                vec![views.data, views.execution, views.project, views.info],
+                vec![
+                    views.shelf,
+                    views.data,
+                    views.execution,
+                    views.project,
+                    views.info,
+                ],
             );
             let outputs = tiles.insert_pane(views.outputs);
             let side = insert_named_vertical(
@@ -921,7 +942,13 @@ fn build_preset_tree(
                 &mut tiles,
                 &mut container_display_names,
                 "Output",
-                vec![views.outputs, views.execution, views.display, views.layers],
+                vec![
+                    views.shelf,
+                    views.outputs,
+                    views.execution,
+                    views.display,
+                    views.layers,
+                ],
             );
             let debug_tabs = insert_named_tabs(
                 &mut tiles,
@@ -1014,9 +1041,10 @@ mod tests {
             layers: view_id(7),
             data: view_id(8),
             outputs: view_id(9),
-            execution: view_id(10),
-            project: view_id(11),
-            graph: view_id(12),
+            shelf: view_id(10),
+            execution: view_id(11),
+            project: view_id(12),
+            graph: view_id(13),
         }
     }
 
@@ -1028,7 +1056,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            8
+            9
         );
         assert!(names.iter().any(|(_, name)| name == "Network Workbench"));
         assert!(names.iter().any(|(_, name)| name == "Inspector"));
@@ -1041,7 +1069,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            9
+            10
         );
         assert!(
             names
@@ -1060,14 +1088,18 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            3
+            4
         );
         assert!(
             names
                 .iter()
                 .any(|(_, name)| name == "Houdini Default Workbench")
         );
-        assert!(names.iter().any(|(_, name)| name == "Parameters + Network"));
+        assert!(
+            names
+                .iter()
+                .any(|(_, name)| name == "Shelf + Parameters + Network")
+        );
 
         let root_id = tree.root().expect("preset should have a root tile");
         let root_container = tree
@@ -1092,7 +1124,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            6
+            7
         );
         assert!(
             names
@@ -1110,7 +1142,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            8
+            9
         );
         assert!(
             names

@@ -1933,6 +1933,18 @@ impl GraphDocument {
         asset_id
     }
 
+    pub fn create_asset_instance_from_graph(
+        &mut self,
+        display_name: impl Into<String>,
+        description: impl Into<String>,
+        help: impl Into<String>,
+    ) -> (String, usize) {
+        let draft = self.create_asset_draft_from_graph(display_name, description, help);
+        let asset_id = self.commit_asset_draft(draft);
+        let node_index = self.add_procedural_asset_node(asset_id.clone());
+        (asset_id, node_index)
+    }
+
     #[allow(dead_code)]
     pub fn refresh_asset_version_statuses(&mut self) {
         for node in &mut self.nodes {
@@ -12510,6 +12522,35 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .is_some_and(|snapshot| snapshot.node_count == 4)
         );
         assert!(!graph.to_sidecar_json().unwrap().contains("cached_output"));
+    }
+
+    #[test]
+    fn create_asset_instance_from_graph_places_visible_asset_node() {
+        let mut graph = GraphDocument::sample();
+        let initial_node_count = graph.nodes.len();
+
+        let (asset_id, node_index) = graph.create_asset_instance_from_graph(
+            "Shelf Cleanup Asset",
+            "Created from the built-in shelf.",
+            "Use from the shelf.",
+        );
+
+        assert_eq!(asset_id, "project.asset.shelf_cleanup_asset");
+        assert_eq!(graph.nodes.len(), initial_node_count + 1);
+        assert_eq!(graph.nodes[node_index].kind, NodeKind::ProceduralAsset);
+        assert_eq!(
+            graph.nodes[node_index]
+                .procedural_asset
+                .as_ref()
+                .map(|asset| asset.asset_id.as_str()),
+            Some("project.asset.shelf_cleanup_asset")
+        );
+        assert!(
+            graph
+                .procedural_asset_declarations
+                .iter()
+                .any(|declaration| declaration.asset_id == asset_id)
+        );
     }
 
     #[test]
