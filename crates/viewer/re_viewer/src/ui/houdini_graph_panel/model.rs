@@ -24,6 +24,7 @@ impl GraphPoint {
 pub(crate) struct GraphDocument {
     pub source: GraphSource,
     pub graph_registry: ProjectGraphRegistry,
+    pub data_flow_edges: Vec<GraphDataFlowEdge>,
     pub nodes: Vec<GraphNode>,
     pub annotations: Vec<GraphAnnotation>,
     pub network_view: NetworkViewDisplayOptions,
@@ -116,6 +117,15 @@ pub(crate) enum ProjectGraphRole {
     AssetInternal,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct GraphDataFlowEdge {
+    pub edge_id: String,
+    pub from_node_id: String,
+    pub from_output: String,
+    pub to_node_id: String,
+    pub to_input: String,
+}
+
 impl GraphDocument {
     pub fn current_graph_id(&self) -> &str {
         self.graph_registry
@@ -158,6 +168,38 @@ impl GraphDocument {
             self.current_graph_path().trim_end_matches('/'),
             node_name
         )
+    }
+
+    fn with_default_data_flow_edges(mut self) -> Self {
+        self.rebuild_default_data_flow_edges();
+        self
+    }
+
+    fn rebuild_default_data_flow_edges(&mut self) {
+        self.data_flow_edges = Self::default_data_flow_edges_for_nodes(&self.nodes);
+    }
+
+    fn default_data_flow_edges_for_nodes(nodes: &[GraphNode]) -> Vec<GraphDataFlowEdge> {
+        nodes
+            .iter()
+            .filter(|node| node.participates_in_output)
+            .collect::<Vec<_>>()
+            .windows(2)
+            .map(|nodes| {
+                let from_node = nodes[0];
+                let to_node = nodes[1];
+                GraphDataFlowEdge {
+                    edge_id: format!(
+                        "{}:{PRIMARY_GEOMETRY_OUTPUT}->{}:{PRIMARY_GEOMETRY_OUTPUT}",
+                        from_node.node_id, to_node.node_id
+                    ),
+                    from_node_id: from_node.node_id.clone(),
+                    from_output: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                    to_node_id: to_node.node_id.clone(),
+                    to_input: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                }
+            })
+            .collect()
     }
 
     pub fn sample() -> Self {
@@ -204,6 +246,7 @@ impl GraphDocument {
                 Vec::new(),
             )),
             graph_registry: ProjectGraphRegistry::default(),
+            data_flow_edges: Vec::new(),
             nodes: vec![
                 GraphNode {
                     node_id: "source.main".to_owned(),
@@ -381,6 +424,7 @@ impl GraphDocument {
             command_history: ProjectCommandHistory::default(),
             work_items: Vec::new(),
         }
+        .with_default_data_flow_edges()
     }
 
     pub fn malware_starter() -> Self {
@@ -446,6 +490,7 @@ impl GraphDocument {
         Self {
             source: GraphSource::malware_starter(metadata),
             graph_registry: ProjectGraphRegistry::default(),
+            data_flow_edges: Vec::new(),
             nodes: vec![
                 GraphNode {
                     node_id: "source.byteplot".to_owned(),
@@ -693,6 +738,7 @@ impl GraphDocument {
             command_history: ProjectCommandHistory::default(),
             work_items: Vec::new(),
         }
+        .with_default_data_flow_edges()
     }
 
     pub fn polygon_count(&self) -> usize {
@@ -1406,6 +1452,7 @@ impl GraphDocument {
             return false;
         };
         if self.apply_project_command(&command, ProjectCommandDirection::Undo) {
+            self.rebuild_default_data_flow_edges();
             self.command_history.redo_stack.push(command);
             true
         } else {
@@ -1419,6 +1466,7 @@ impl GraphDocument {
             return false;
         };
         if self.apply_project_command(&command, ProjectCommandDirection::Redo) {
+            self.rebuild_default_data_flow_edges();
             self.command_history.undo_stack.push(command);
             true
         } else {
@@ -2058,6 +2106,7 @@ impl GraphDocument {
         node.node_id = self.unique_node_id("null");
         node.layout_position = GraphPoint::new(0.82, 0.5);
         self.nodes.insert(insert_index, node);
+        self.rebuild_default_data_flow_edges();
         insert_index
     }
 
@@ -2155,9 +2204,12 @@ impl GraphDocument {
         }
         let old_participates = node.participates_in_output;
         node.participates_in_output = participates;
+        let node_id = node.node_id.clone();
+        let node_name = node.name.clone();
+        self.rebuild_default_data_flow_edges();
         Some(ProjectCommand::NodeOutputParticipationEdit {
-            node_id: node.node_id.clone(),
-            node_name: node.name.clone(),
+            node_id,
+            node_name,
             old_participates,
             new_participates: participates,
         })
@@ -2235,6 +2287,7 @@ impl GraphDocument {
         let insert_index = (node_index + 1).min(self.nodes.len());
         let duplicated_node = node.clone();
         self.nodes.insert(insert_index, node);
+        self.rebuild_default_data_flow_edges();
         self.record_project_command(ProjectCommand::NodeDuplicate {
             source_node_id,
             source_node_name: source_name,
@@ -2288,6 +2341,7 @@ impl GraphDocument {
         node.layout_position = GraphPoint::new(0.88, 0.5);
         let reference_node = node.clone();
         self.nodes.insert(insert_index, node);
+        self.rebuild_default_data_flow_edges();
         self.record_project_command(ProjectCommand::ReferenceInputCreate {
             reference_node: Box::new(reference_node),
             insert_index,
@@ -2790,6 +2844,7 @@ impl GraphDocument {
 
         let insert_index = reference_node_index.min(self.nodes.len());
         self.nodes.insert(insert_index, projection_node);
+        self.rebuild_default_data_flow_edges();
         let reference_node = self.nodes.get_mut(reference_node_index + 1)?;
         let reference_input = reference_node.reference_input.as_mut()?;
         let target_entry = reference_input
@@ -2843,6 +2898,7 @@ impl GraphDocument {
             return None;
         }
         let deleted_node = self.nodes.remove(index);
+        self.rebuild_default_data_flow_edges();
         self.record_project_command(ProjectCommand::NodeDelete {
             deleted_node: Box::new(deleted_node.clone()),
             remove_index: index,
@@ -2989,6 +3045,7 @@ impl GraphDocument {
             .unwrap_or(self.nodes.len());
         let node = GraphNode::python_operator(instance_id, declaration_id);
         self.nodes.insert(insert_index, node);
+        self.rebuild_default_data_flow_edges();
         insert_index
     }
 
@@ -3016,6 +3073,7 @@ impl GraphDocument {
             .unwrap_or(self.nodes.len());
         let node = GraphNode::procedural_asset(instance_id, asset_id, instance_version);
         self.nodes.insert(insert_index, node);
+        self.rebuild_default_data_flow_edges();
         insert_index
     }
 
@@ -3190,6 +3248,7 @@ impl GraphDocument {
             .unwrap_or(self.nodes.len());
         let node = GraphNode::native_operator(instance_id, operator_id);
         self.nodes.insert(insert_index, node);
+        self.rebuild_default_data_flow_edges();
         insert_index
     }
 
@@ -3948,17 +4007,20 @@ impl GraphDocument {
             })
             .collect();
 
-        let output_nodes = self
+        let node_indices_by_id = self
             .nodes
             .iter()
             .enumerate()
-            .filter_map(|(index, node)| node.participates_in_output.then_some(index))
-            .collect::<Vec<_>>();
-        let edges = output_nodes
-            .windows(2)
-            .map(|nodes| GraphEdge {
-                from_node: nodes[0],
-                to_node: nodes[1],
+            .map(|(index, node)| (node.node_id.as_str(), index))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let edges = self
+            .data_flow_edges
+            .iter()
+            .filter_map(|edge| {
+                Some(GraphEdge {
+                    from_node: *node_indices_by_id.get(edge.from_node_id.as_str())?,
+                    to_node: *node_indices_by_id.get(edge.to_node_id.as_str())?,
+                })
             })
             .collect();
 
@@ -5950,6 +6012,8 @@ struct HoudiniGraphSidecar {
     source: GraphSourceSidecar,
     #[serde(default)]
     graph_registry: ProjectGraphRegistry,
+    #[serde(default)]
+    data_flow_edges: Vec<GraphDataFlowEdge>,
     nodes: Vec<NodeSidecar>,
     #[serde(default)]
     annotations: Vec<GraphAnnotation>,
@@ -5991,6 +6055,7 @@ impl HoudiniGraphSidecar {
                 import_error: graph.source.import_error.clone(),
             },
             graph_registry: graph.graph_registry.clone(),
+            data_flow_edges: graph.data_flow_edges.clone(),
             nodes: graph
                 .nodes
                 .iter()
@@ -6058,6 +6123,7 @@ impl HoudiniGraphSidecar {
             import_error: self.source.import_error,
         };
         graph.graph_registry = self.graph_registry.normalize();
+        graph.data_flow_edges = self.data_flow_edges;
         graph.geometry = self.demo_geometry;
         graph.recording_geometry = self.recording_geometry;
         graph.annotations = self.annotations;
@@ -6122,6 +6188,10 @@ impl HoudiniGraphSidecar {
                     .insert(insert_index, node_snapshot.into_instance_node());
                 matched_node_indices.insert(insert_index, true);
             }
+        }
+
+        if graph.data_flow_edges.is_empty() {
+            graph.rebuild_default_data_flow_edges();
         }
 
         if !self.layers.is_empty() {
@@ -13374,6 +13444,7 @@ mod tests {
         let layout = graph.graph_layout();
 
         assert_eq!(layout.nodes.len(), graph.nodes.len());
+        assert_eq!(graph.data_flow_edges.len(), graph.nodes.len() - 1);
         assert_eq!(layout.edges.len(), graph.nodes.len() - 1);
         assert_eq!(layout.nodes[0].node_index, 0);
         assert_eq!(layout.nodes[0].name, "Source");
@@ -13385,6 +13456,60 @@ mod tests {
         assert_eq!(layout.edges[0].to_node, 1);
         assert_eq!(layout.edges[2].from_node, 2);
         assert_eq!(layout.edges[2].to_node, 3);
+    }
+
+    #[test]
+    fn graph_data_flow_edges_default_to_stable_node_id_endpoints() {
+        let graph = GraphDocument::sample();
+        let first_edge = graph
+            .data_flow_edges
+            .first()
+            .expect("sample graph should include data-flow edge metadata");
+
+        assert_eq!(first_edge.from_node_id, graph.nodes[0].node_id);
+        assert_eq!(first_edge.from_output, "geometry");
+        assert_eq!(first_edge.to_node_id, graph.nodes[1].node_id);
+        assert_eq!(first_edge.to_input, "geometry");
+        assert!(first_edge.edge_id.contains(&graph.nodes[0].node_id));
+        assert!(first_edge.edge_id.contains(&graph.nodes[1].node_id));
+    }
+
+    #[test]
+    fn graph_data_flow_edges_round_trip_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        graph.data_flow_edges[0].from_output = "primary_geometry".to_owned();
+        graph.data_flow_edges[0].to_input = "source_geometry".to_owned();
+
+        let json = graph.to_sidecar_json().unwrap();
+        assert!(json.contains("\"data_flow_edges\""));
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(restored.data_flow_edges, graph.data_flow_edges);
+        assert_eq!(
+            restored.graph_layout().edges.len(),
+            graph.graph_layout().edges.len()
+        );
+    }
+
+    #[test]
+    fn sidecar_without_data_flow_edges_rebuilds_default_edge_spine() {
+        let graph = GraphDocument::sample();
+        let mut value =
+            serde_json::from_str::<serde_json::Value>(&graph.to_sidecar_json().unwrap())
+                .expect("sidecar should be valid json");
+        value
+            .as_object_mut()
+            .expect("sidecar should be an object")
+            .remove("data_flow_edges");
+        let json = serde_json::to_string_pretty(&value).unwrap();
+
+        let mut restored = GraphDocument::sample();
+        restored.data_flow_edges.clear();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(restored.data_flow_edges, graph.data_flow_edges);
+        assert_eq!(restored.graph_layout().edges.len(), graph.nodes.len() - 1);
     }
 
     #[test]
