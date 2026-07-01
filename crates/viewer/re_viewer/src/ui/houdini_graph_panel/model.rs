@@ -1468,6 +1468,56 @@ impl GraphDocument {
                 };
                 true
             }
+            ProjectCommand::ReferenceTargetEnablementEdit {
+                reference_node_id,
+                target,
+                old_enabled,
+                new_enabled,
+                ..
+            } => self.apply_reference_target_enabled(
+                reference_node_id,
+                target,
+                match direction {
+                    ProjectCommandDirection::Undo => *old_enabled,
+                    ProjectCommandDirection::Redo => *new_enabled,
+                },
+            ),
+            ProjectCommand::ReferenceTargetRemove {
+                reference_node_id,
+                removed_entry,
+                target_index,
+                ..
+            } => match direction {
+                ProjectCommandDirection::Undo => {
+                    let Some(node) = self
+                        .nodes
+                        .iter_mut()
+                        .find(|node| node.node_id == *reference_node_id)
+                    else {
+                        return false;
+                    };
+                    let Some(reference_input) = node.reference_input.as_mut() else {
+                        return false;
+                    };
+                    if reference_input
+                        .targets
+                        .iter()
+                        .any(|entry| entry.target == removed_entry.target)
+                    {
+                        return false;
+                    }
+                    let insert_index = (*target_index).min(reference_input.targets.len());
+                    reference_input
+                        .targets
+                        .insert(insert_index, removed_entry.clone());
+                    node.evaluation.state = EvaluationState::Stale;
+                    node.evaluation.message = Some("Reference target restored.".to_owned());
+                    true
+                }
+                ProjectCommandDirection::Redo => {
+                    self.apply_reference_target_remove(reference_node_id, &removed_entry.target)
+                }
+            },
             ProjectCommand::AnnotationMoveEdit {
                 annotation_id,
                 old_position,
@@ -2046,27 +2096,47 @@ impl GraphDocument {
         target_node_id: &str,
         enabled: bool,
     ) -> bool {
-        let Some(node) = self.nodes.get_mut(reference_node_index) else {
+        let Some(command) = self.set_reference_target_enabled_without_history(
+            reference_node_index,
+            target_node_id,
+            enabled,
+        ) else {
             return false;
         };
-        let Some(reference_input) = node.reference_input.as_mut() else {
-            return false;
-        };
-        let Some(entry) = reference_input
+        self.record_project_command(command);
+        true
+    }
+
+    fn set_reference_target_enabled_without_history(
+        &mut self,
+        reference_node_index: usize,
+        target_node_id: &str,
+        enabled: bool,
+    ) -> Option<ProjectCommand> {
+        let node = self.nodes.get_mut(reference_node_index)?;
+        let reference_input = node.reference_input.as_mut()?;
+        let entry = reference_input
             .targets
             .iter_mut()
-            .find(|entry| entry.target.node_id == target_node_id)
-        else {
-            return false;
-        };
+            .find(|entry| entry.target.node_id == target_node_id)?;
         if entry.enabled == enabled {
-            return false;
+            return None;
         }
 
+        let old_enabled = entry.enabled;
+        let target = entry.target.clone();
+        let target_node_name = entry.provenance.source_node_name.clone();
         entry.enabled = enabled;
         node.evaluation.state = EvaluationState::Stale;
         node.evaluation.message = Some("Reference target enablement changed.".to_owned());
-        true
+        Some(ProjectCommand::ReferenceTargetEnablementEdit {
+            reference_node_id: node.node_id.clone(),
+            reference_node_name: node.name.clone(),
+            target,
+            target_node_name,
+            old_enabled,
+            new_enabled: enabled,
+        })
     }
 
     #[allow(dead_code)]
@@ -2075,20 +2145,90 @@ impl GraphDocument {
         reference_node_index: usize,
         target_node_id: &str,
     ) -> bool {
-        let Some(node) = self.nodes.get_mut(reference_node_index) else {
+        let Some(command) = self.remove_reference_target_from_node_without_history(
+            reference_node_index,
+            target_node_id,
+        ) else {
+            return false;
+        };
+        self.record_project_command(command);
+        true
+    }
+
+    fn remove_reference_target_from_node_without_history(
+        &mut self,
+        reference_node_index: usize,
+        target_node_id: &str,
+    ) -> Option<ProjectCommand> {
+        let node = self.nodes.get_mut(reference_node_index)?;
+        let reference_input = node.reference_input.as_mut()?;
+        let target_index = reference_input
+            .targets
+            .iter()
+            .position(|entry| entry.target.node_id == target_node_id)?;
+        let removed_entry = reference_input.targets.remove(target_index);
+        node.evaluation.state = EvaluationState::Stale;
+        node.evaluation.message = Some("Reference target removed.".to_owned());
+        Some(ProjectCommand::ReferenceTargetRemove {
+            reference_node_id: node.node_id.clone(),
+            reference_node_name: node.name.clone(),
+            removed_entry,
+            target_index,
+        })
+    }
+
+    fn apply_reference_target_enabled(
+        &mut self,
+        reference_node_id: &str,
+        target: &ReferenceTargetIdentity,
+        enabled: bool,
+    ) -> bool {
+        let Some(node) = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.node_id == reference_node_id)
+        else {
             return false;
         };
         let Some(reference_input) = node.reference_input.as_mut() else {
             return false;
         };
-        let original_len = reference_input.targets.len();
-        reference_input
+        let Some(entry) = reference_input
             .targets
-            .retain(|entry| entry.target.node_id != target_node_id);
-        if reference_input.targets.len() == original_len {
+            .iter_mut()
+            .find(|entry| entry.target == *target)
+        else {
             return false;
-        }
+        };
+        entry.enabled = enabled;
+        node.evaluation.state = EvaluationState::Stale;
+        node.evaluation.message = Some("Reference target enablement changed.".to_owned());
+        true
+    }
 
+    fn apply_reference_target_remove(
+        &mut self,
+        reference_node_id: &str,
+        target: &ReferenceTargetIdentity,
+    ) -> bool {
+        let Some(node) = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.node_id == reference_node_id)
+        else {
+            return false;
+        };
+        let Some(reference_input) = node.reference_input.as_mut() else {
+            return false;
+        };
+        let Some(target_index) = reference_input
+            .targets
+            .iter()
+            .position(|entry| entry.target == *target)
+        else {
+            return false;
+        };
+        reference_input.targets.remove(target_index);
         node.evaluation.state = EvaluationState::Stale;
         node.evaluation.message = Some("Reference target removed.".to_owned());
         true
@@ -7429,6 +7569,20 @@ pub(crate) enum ProjectCommand {
         old_position: GraphPoint,
         new_position: GraphPoint,
     },
+    ReferenceTargetEnablementEdit {
+        reference_node_id: String,
+        reference_node_name: String,
+        target: ReferenceTargetIdentity,
+        target_node_name: String,
+        old_enabled: bool,
+        new_enabled: bool,
+    },
+    ReferenceTargetRemove {
+        reference_node_id: String,
+        reference_node_name: String,
+        removed_entry: ReferenceTargetEntry,
+        target_index: usize,
+    },
     AnnotationMoveEdit {
         annotation_id: String,
         annotation_title: String,
@@ -7522,6 +7676,23 @@ impl ProjectCommand {
                 format!("Set {node_name} manual cook")
             }
             Self::NodeLayoutEdit { node_name, .. } => format!("Move {node_name}"),
+            Self::ReferenceTargetEnablementEdit {
+                reference_node_name,
+                target_node_name,
+                ..
+            } => {
+                format!("Set {reference_node_name} target {target_node_name}")
+            }
+            Self::ReferenceTargetRemove {
+                reference_node_name,
+                removed_entry,
+                ..
+            } => {
+                format!(
+                    "Remove {reference_node_name} target {}",
+                    removed_entry.provenance.source_node_name
+                )
+            }
             Self::AnnotationMoveEdit {
                 annotation_title, ..
             } => {
@@ -10854,6 +11025,165 @@ mod tests {
                 .expect("reference entries should exist")
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn reference_target_enablement_records_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        let second_target_node_id = graph.nodes[second_null_index].node_id.clone();
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+
+        assert!(
+            graph.set_reference_target_enabled(reference_index, &second_target_node_id, false,)
+        );
+
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::ReferenceTargetEnablementEdit {
+                reference_node_name,
+                target_node_name,
+                old_enabled: true,
+                new_enabled: false,
+                ..
+            }) if reference_node_name == "Reference Input" && target_node_name == "OUT_B"
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Set Reference Input target OUT_B")
+        );
+        assert!(
+            !graph.nodes[reference_index]
+                .reference_input
+                .as_ref()
+                .expect("reference input should exist")
+                .targets
+                .iter()
+                .find(|entry| entry.target.node_id == second_target_node_id)
+                .expect("target should exist")
+                .enabled
+        );
+
+        assert!(graph.undo_project_command());
+        assert!(
+            graph.nodes[reference_index]
+                .reference_input
+                .as_ref()
+                .expect("reference input should exist")
+                .targets
+                .iter()
+                .find(|entry| entry.target.node_id == second_target_node_id)
+                .expect("target should exist")
+                .enabled
+        );
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Set Reference Input target OUT_B")
+        );
+
+        assert!(graph.redo_project_command());
+        assert!(
+            !graph.nodes[reference_index]
+                .reference_input
+                .as_ref()
+                .expect("reference input should exist")
+                .targets
+                .iter()
+                .find(|entry| entry.target.node_id == second_target_node_id)
+                .expect("target should exist")
+                .enabled
+        );
+        assert!(!graph.set_reference_target_enabled(
+            reference_index,
+            &second_target_node_id,
+            false,
+        ));
+        assert!(!graph.set_reference_target_enabled(
+            graph.nodes.len(),
+            &second_target_node_id,
+            true,
+        ));
+    }
+
+    #[test]
+    fn reference_target_remove_records_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let first_null_index = graph.add_null_operator_node("OUT_A");
+        let second_null_index = graph.add_null_operator_node("OUT_B");
+        let second_target_node_id = graph.nodes[second_null_index].node_id.clone();
+        let reference_index = graph
+            .add_reference_input_node(first_null_index)
+            .expect("first null output should be referenceable");
+        assert!(graph.add_reference_target_to_node(reference_index, second_null_index));
+        assert!(
+            graph.set_reference_target_enabled(reference_index, &second_target_node_id, false,)
+        );
+        let removed_entry = graph.nodes[reference_index]
+            .reference_input
+            .as_ref()
+            .expect("reference input should exist")
+            .targets
+            .iter()
+            .find(|entry| entry.target.node_id == second_target_node_id)
+            .expect("target should exist")
+            .clone();
+
+        assert!(graph.remove_reference_target_from_node(reference_index, &second_target_node_id,));
+
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::ReferenceTargetRemove {
+                reference_node_name,
+                removed_entry: recorded_entry,
+                target_index: 1,
+                ..
+            }) if reference_node_name == "Reference Input" && recorded_entry == &removed_entry
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Remove Reference Input target OUT_B")
+        );
+        assert_eq!(
+            graph.nodes[reference_index]
+                .reference_input
+                .as_ref()
+                .expect("reference input should exist")
+                .targets
+                .len(),
+            1
+        );
+
+        assert!(graph.undo_project_command());
+        let restored_targets = &graph.nodes[reference_index]
+            .reference_input
+            .as_ref()
+            .expect("reference input should exist")
+            .targets;
+        assert_eq!(restored_targets.len(), 2);
+        assert_eq!(restored_targets[1], removed_entry);
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Remove Reference Input target OUT_B")
+        );
+
+        assert!(graph.redo_project_command());
+        assert_eq!(
+            graph.nodes[reference_index]
+                .reference_input
+                .as_ref()
+                .expect("reference input should exist")
+                .targets
+                .len(),
+            1
+        );
+        assert!(!graph.remove_reference_target_from_node(reference_index, &second_target_node_id,));
+        assert!(
+            !graph.remove_reference_target_from_node(graph.nodes.len(), &second_target_node_id,)
         );
     }
 
