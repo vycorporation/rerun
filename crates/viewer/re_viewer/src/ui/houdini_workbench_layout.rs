@@ -50,7 +50,7 @@ impl HoudiniWorkbenchPreset {
                 "Network editor beside Parameters, Display, Info, Ops, Find, and Layers tabs."
             }
             Self::HoudiniDefault => {
-                "Display viewport on the left, with Parameters and Network stacked on the right."
+                "Rendered graph viewport on the left, with Parameters and Network stacked on the right."
             }
             Self::GraphReview => {
                 "Output viewport beside inspection tabs, with project data and exports nearby."
@@ -253,7 +253,7 @@ fn build_preset_tree(
             )
         }
         HoudiniWorkbenchPreset::HoudiniDefault => {
-            let display = tiles.insert_pane(views.display);
+            let graph = tiles.insert_pane(views.graph);
             let parameters = tiles.insert_pane(views.parameters);
             let network = tiles.insert_pane(views.network);
             let right_side = insert_named_vertical(
@@ -266,7 +266,7 @@ fn build_preset_tree(
                 &mut tiles,
                 &mut container_display_names,
                 "Houdini Default Workbench",
-                vec![display, right_side],
+                vec![graph, right_side],
             )
         }
         HoudiniWorkbenchPreset::GraphReview => {
@@ -343,6 +343,7 @@ fn insert_named_vertical(
 
 #[cfg(test)]
 mod tests {
+    use egui_tiles::{ContainerKind, Tile};
     use re_viewer_context::ViewId;
 
     use super::{HoudiniWorkbenchPreset, PresetViews, build_preset_tree};
@@ -400,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn houdini_default_preset_places_display_beside_params_and_network() {
+    fn houdini_default_preset_places_graph_viewport_beside_params_and_network() {
         let (tree, names) =
             build_preset_tree(HoudiniWorkbenchPreset::HoudiniDefault, preset_views());
 
@@ -415,5 +416,19 @@ mod tests {
                 .any(|(_, name)| name == "Houdini Default Workbench")
         );
         assert!(names.iter().any(|(_, name)| name == "Parameters + Network"));
+
+        let root_id = tree.root().expect("preset should have a root tile");
+        let root_container = tree
+            .tiles
+            .get_container(root_id)
+            .expect("root tile should be a container");
+        assert_eq!(root_container.kind(), ContainerKind::Horizontal);
+
+        let root_children = root_container.children_vec();
+        assert_eq!(root_children.len(), 2);
+        assert_eq!(
+            tree.tiles.get(root_children[0]),
+            Some(&Tile::Pane(preset_views().graph))
+        );
     }
 }
