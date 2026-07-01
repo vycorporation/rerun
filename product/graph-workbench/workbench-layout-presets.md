@@ -67,3 +67,14 @@ Any Houdini-specific wrapper should store only metadata needed for naming, categ
 ## Implementation follow-up
 
 Track the implementation in #72.
+
+Initial implementation slice: bundled workbench layout loading is available from the viewport
+Workbench menu, using native Rerun blueprint views, splits, tab containers, and named containers.
+Bundled presets currently cover Network + Inspector, Houdini Default, Graph Review, Data
+Inspection, and Output / Debug workbenches.
+The Workbench toolbar also exposes `.rbl`-backed open/save-as actions so users can load a saved
+layout file or duplicate the current edited layout without leaving the graph workspace.
+
+Follow-up work remains for a dedicated personal/project workbench browser with named layout
+metadata, categories, default-selection controls, and a clearer distinction between "save current
+blueprint for this app" and "save this workbench as a reusable named layout."

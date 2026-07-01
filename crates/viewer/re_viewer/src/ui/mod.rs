@@ -1,5 +1,6 @@
 mod houdini_graph_panel;
 mod houdini_graph_view;
+mod houdini_workbench_layout;
 mod mobile_warning_ui;
 mod open_url_modal;
 mod rerun_menu;
@@ -28,6 +29,7 @@ pub(crate) use self::houdini_graph_view::{
     HoudiniLayersView, HoudiniNetworkView, HoudiniOperatorsView, HoudiniOutputsView,
     HoudiniParametersView, HoudiniProjectView,
 };
+pub(crate) use self::houdini_workbench_layout::houdini_workbench_toolbar_ui;
 pub(crate) use self::mobile_warning_ui::mobile_warning_ui;
 pub(crate) use self::top_panel::top_panel;
 pub(crate) use self::welcome_screen::WelcomeScreen;

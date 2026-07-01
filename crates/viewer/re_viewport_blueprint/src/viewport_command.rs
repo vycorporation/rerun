@@ -10,6 +10,12 @@ pub enum ViewportCommand {
     /// Set the whole viewport tree.
     SetTree(egui_tiles::Tree<ViewId>),
 
+    /// Set the whole viewport tree and assign display names to newly-created containers.
+    SetTreeWithContainerNames {
+        tree: egui_tiles::Tree<ViewId>,
+        container_display_names: Vec<(egui_tiles::TileId, String)>,
+    },
+
     /// Add a new view to the provided container (or the root if `None`).
     AddView {
         view: ViewBlueprint,

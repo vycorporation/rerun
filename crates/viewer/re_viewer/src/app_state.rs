@@ -28,12 +28,12 @@ use re_viewport_blueprint::ui::add_view_or_container_modal_ui;
 use crate::app_blueprint::AppBlueprint;
 use crate::navigation::Navigation;
 use crate::open_url_description::ViewerOpenUrlDescription;
-use crate::ui::settings_screen_ui;
 use crate::ui::{CloudState, LoginState};
 use crate::ui::{
     SharedHoudiniGraph, SharedHoudiniGraphPanel, install_shared_houdini_graph,
     install_shared_houdini_graph_panel, new_shared_houdini_graph, new_shared_houdini_graph_panel,
 };
+use crate::ui::{houdini_workbench_toolbar_ui, settings_screen_ui};
 use crate::{StartupOptions, history};
 
 const WATERMARK: bool = false; // Nice for recording media material
@@ -561,7 +561,12 @@ impl AppState {
                 egui::CentralPanel::default()
                     .frame(viewport_frame)
                     .show_inside(ui, |ui| {
-                        viewport_ui.viewport_ui(ui, &ctx, view_states);
+                        houdini_workbench_toolbar_ui(ui, &ctx, &viewport_ui.blueprint);
+
+                        let viewport_rect = ui.available_rect_before_wrap();
+                        let mut viewport_child =
+                            ui.new_child(egui::UiBuilder::new().max_rect(viewport_rect));
+                        viewport_ui.viewport_ui(&mut viewport_child, &ctx, view_states);
                     });
 
                 add_view_or_container_modal_ui(&ctx, &viewport_ui.blueprint, ui);

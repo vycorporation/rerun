@@ -90,6 +90,7 @@ examples = [
   "sam2_depthanything",
   "ocr",
   "live_camera_edge_detection",
+  "malware_byteplot",
   "segment_anything_model",
   "tapir",
   "ml_depth_pro",
