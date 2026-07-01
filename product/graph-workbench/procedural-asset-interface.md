@@ -101,3 +101,4 @@ Python-backed assets are deferred until the Python operator lane is implemented.
 3. #48 - Add a create-asset-from-graph flow for project-local assets.
 4. #47 - Add asset versioning and stale-instance warnings.
 5. #152 - Complete: add promoted parameter labels, current values, groups, and stable internal node parameter bindings.
+6. #156 - Complete: add explicit match-definition and upgrade-to-current-definition model actions for asset instances.
