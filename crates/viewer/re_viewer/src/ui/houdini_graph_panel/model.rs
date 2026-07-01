@@ -4142,6 +4142,34 @@ impl GraphDocument {
     }
 
     #[allow(dead_code)]
+    pub fn procedural_asset_bundle_preview(
+        &self,
+        asset_id: &str,
+        inclusion_choices: &[ProceduralAssetArtifactInclusionChoice],
+    ) -> Option<ProceduralAssetBundlePreview> {
+        let declaration = self
+            .procedural_asset_declarations
+            .iter()
+            .find(|declaration| declaration.asset_id == asset_id)?;
+
+        let artifacts = declaration
+            .external_artifacts
+            .iter()
+            .map(|artifact| {
+                let choice = inclusion_choices
+                    .iter()
+                    .find(|choice| choice.locator == artifact.locator);
+                ProceduralAssetArtifactBundlePreview::from_reference(
+                    &declaration.asset_id,
+                    artifact,
+                    choice,
+                )
+            })
+            .collect::<Vec<_>>();
+        Some(ProceduralAssetBundlePreview::new(declaration, artifacts))
+    }
+
+    #[allow(dead_code)]
     pub fn unlocked_asset_graph_id_for_node(&self, node_index: usize) -> Option<String> {
         self.nodes
             .get(node_index)?
@@ -8825,6 +8853,193 @@ pub(crate) enum ProceduralAssetArtifactStatus {
     Bundled,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProceduralAssetArtifactInclusionChoice {
+    pub locator: String,
+    pub include: bool,
+    pub bundled_path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProceduralAssetBundlePreview {
+    pub asset_id: String,
+    pub display_name: String,
+    pub version: String,
+    pub artifacts: Vec<ProceduralAssetArtifactBundlePreview>,
+    pub dependency_requirements: Vec<String>,
+    pub expected_included_size_bytes: u64,
+    pub unknown_included_size_count: usize,
+    pub included_file_count: usize,
+    pub remaining_external_reference_count: usize,
+    pub missing_artifact_count: usize,
+    pub reproducibility_warnings: Vec<String>,
+}
+
+impl ProceduralAssetBundlePreview {
+    fn new(
+        declaration: &ProceduralAssetDeclaration,
+        artifacts: Vec<ProceduralAssetArtifactBundlePreview>,
+    ) -> Self {
+        let expected_included_size_bytes = artifacts
+            .iter()
+            .filter(|artifact| artifact.inclusion.includes_file())
+            .filter_map(|artifact| artifact.size_bytes)
+            .sum();
+        let unknown_included_size_count = artifacts
+            .iter()
+            .filter(|artifact| artifact.inclusion.includes_file() && artifact.size_bytes.is_none())
+            .count();
+        let included_file_count = artifacts
+            .iter()
+            .filter(|artifact| artifact.inclusion.includes_file())
+            .count();
+        let remaining_external_reference_count = artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.inclusion == ProceduralAssetArtifactBundleInclusion::ReferenceOnly
+            })
+            .count();
+        let missing_artifact_count = artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.inclusion == ProceduralAssetArtifactBundleInclusion::Missing
+            })
+            .count();
+        let reproducibility_warnings = artifacts
+            .iter()
+            .flat_map(ProceduralAssetArtifactBundlePreview::reproducibility_warnings)
+            .collect();
+        let dependency_requirements = artifacts
+            .iter()
+            .map(ProceduralAssetArtifactBundlePreview::dependency_requirement)
+            .collect();
+
+        Self {
+            asset_id: declaration.asset_id.clone(),
+            display_name: declaration.display_name.clone(),
+            version: declaration.version.clone(),
+            artifacts,
+            dependency_requirements,
+            expected_included_size_bytes,
+            unknown_included_size_count,
+            included_file_count,
+            remaining_external_reference_count,
+            missing_artifact_count,
+            reproducibility_warnings,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProceduralAssetArtifactBundlePreview {
+    pub role: ProceduralAssetArtifactRole,
+    pub original_locator: String,
+    pub bundled_path: Option<String>,
+    pub source_node_id: Option<String>,
+    pub source_node_name: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub content_hash: Option<String>,
+    pub source_status: ProceduralAssetArtifactStatus,
+    pub inclusion: ProceduralAssetArtifactBundleInclusion,
+}
+
+impl ProceduralAssetArtifactBundlePreview {
+    fn from_reference(
+        asset_id: &str,
+        reference: &ProceduralAssetArtifactReference,
+        choice: Option<&ProceduralAssetArtifactInclusionChoice>,
+    ) -> Self {
+        let include_requested = choice.is_some_and(|choice| choice.include);
+        let bundled_path_choice = choice.and_then(|choice| choice.bundled_path.clone());
+        let (inclusion, bundled_path) = match reference.status {
+            ProceduralAssetArtifactStatus::Referenced if include_requested => (
+                ProceduralAssetArtifactBundleInclusion::Include,
+                Some(bundled_path_choice.unwrap_or_else(|| {
+                    default_bundled_artifact_path(asset_id, &reference.locator)
+                })),
+            ),
+            ProceduralAssetArtifactStatus::Referenced => {
+                (ProceduralAssetArtifactBundleInclusion::ReferenceOnly, None)
+            }
+            ProceduralAssetArtifactStatus::Missing => {
+                (ProceduralAssetArtifactBundleInclusion::Missing, None)
+            }
+            ProceduralAssetArtifactStatus::Bundled => (
+                ProceduralAssetArtifactBundleInclusion::AlreadyBundled,
+                Some(reference.locator.clone()),
+            ),
+        };
+
+        Self {
+            role: reference.role,
+            original_locator: reference.locator.clone(),
+            bundled_path,
+            source_node_id: reference.source_node_id.clone(),
+            source_node_name: reference.source_node_name.clone(),
+            size_bytes: reference.size_bytes,
+            content_hash: reference.content_hash.clone(),
+            source_status: reference.status,
+            inclusion,
+        }
+    }
+
+    fn reproducibility_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        match self.inclusion {
+            ProceduralAssetArtifactBundleInclusion::ReferenceOnly => warnings.push(format!(
+                "{} artifact `{}` remains an external reference.",
+                self.role.as_str(),
+                self.original_locator
+            )),
+            ProceduralAssetArtifactBundleInclusion::Missing => warnings.push(format!(
+                "{} artifact `{}` is missing and must be restored or rebound before packaging.",
+                self.role.as_str(),
+                self.original_locator
+            )),
+            ProceduralAssetArtifactBundleInclusion::Include => {
+                if self.size_bytes.is_none() {
+                    warnings.push(format!(
+                        "{} artifact `{}` has unknown size.",
+                        self.role.as_str(),
+                        self.original_locator
+                    ));
+                }
+                if self.content_hash.is_none() {
+                    warnings.push(format!(
+                        "{} artifact `{}` has no content hash for reproducibility.",
+                        self.role.as_str(),
+                        self.original_locator
+                    ));
+                }
+            }
+            ProceduralAssetArtifactBundleInclusion::AlreadyBundled => {}
+        }
+        warnings
+    }
+
+    fn dependency_requirement(&self) -> String {
+        format!(
+            "{} artifact `{}`",
+            self.role.as_str(),
+            self.original_locator
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProceduralAssetArtifactBundleInclusion {
+    Include,
+    ReferenceOnly,
+    Missing,
+    AlreadyBundled,
+}
+
+impl ProceduralAssetArtifactBundleInclusion {
+    fn includes_file(self) -> bool {
+        matches!(self, Self::Include | Self::AlreadyBundled)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct ProceduralAssetSubgraphReference {
     pub graph_id: String,
@@ -9005,6 +9220,16 @@ fn normalized_asset_boundary_port(mut port: HoudiniOperatorPort) -> Option<Houdi
     port.name = port.name.trim().to_owned();
     port.help = port.help.trim().to_owned();
     (!port.name.is_empty()).then_some(port)
+}
+
+fn default_bundled_artifact_path(asset_id: &str, locator: &str) -> String {
+    let asset_slug = sanitize_asset_id_part(asset_id);
+    let filename = Path::new(locator)
+        .file_name()
+        .and_then(|filename| filename.to_str())
+        .filter(|filename| !filename.is_empty())
+        .unwrap_or("artifact");
+    format!("bundles/assets/{asset_slug}/artifacts/{filename}")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -11483,7 +11708,8 @@ mod tests {
         NetworkBadgeVisibility, NetworkCommentDisplayMode, NetworkNodeRingVisibility,
         NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind, NodeStatus,
         OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode,
-        OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetArtifactReference,
+        OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetArtifactBundleInclusion,
+        ProceduralAssetArtifactInclusionChoice, ProceduralAssetArtifactReference,
         ProceduralAssetArtifactRole, ProceduralAssetArtifactStatus,
         ProceduralAssetBoundaryDirection, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
         ProceduralAssetSource, ProceduralAssetSubgraphReference, ProjectCommand,
@@ -18275,6 +18501,175 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(
             restored.procedural_asset_declarations[0].external_artifacts,
             graph.procedural_asset_declarations[0].external_artifacts
+        );
+    }
+
+    #[test]
+    fn procedural_asset_bundle_preview_reports_inclusion_metadata_without_copying() {
+        let mut graph = GraphDocument::sample();
+        let mut declaration = sample_procedural_asset_declaration();
+        declaration
+            .external_artifacts
+            .push(ProceduralAssetArtifactReference {
+                role: ProceduralAssetArtifactRole::Dataset,
+                locator: "data/training/curves.parquet".to_owned(),
+                source_node_id: Some("source.main".to_owned()),
+                source_node_name: Some("Source".to_owned()),
+                size_bytes: Some(42_000_000),
+                content_hash: Some("sha256:curves".to_owned()),
+                status: ProceduralAssetArtifactStatus::Referenced,
+            });
+        declaration
+            .external_artifacts
+            .push(ProceduralAssetArtifactReference {
+                role: ProceduralAssetArtifactRole::ModelWeights,
+                locator: "models/cleanup.safetensors".to_owned(),
+                source_node_id: Some("python.cleanup".to_owned()),
+                source_node_name: Some("Cleanup model".to_owned()),
+                size_bytes: None,
+                content_hash: None,
+                status: ProceduralAssetArtifactStatus::Referenced,
+            });
+        declaration
+            .external_artifacts
+            .push(ProceduralAssetArtifactReference {
+                role: ProceduralAssetArtifactRole::AnalysisFile,
+                locator: "analysis/missing.json".to_owned(),
+                source_node_id: None,
+                source_node_name: None,
+                size_bytes: None,
+                content_hash: None,
+                status: ProceduralAssetArtifactStatus::Missing,
+            });
+        declaration
+            .external_artifacts
+            .push(ProceduralAssetArtifactReference {
+                role: ProceduralAssetArtifactRole::Recording,
+                locator: "bundles/previews/cleanup.rrd".to_owned(),
+                source_node_id: None,
+                source_node_name: None,
+                size_bytes: Some(4096),
+                content_hash: Some("sha256:preview".to_owned()),
+                status: ProceduralAssetArtifactStatus::Bundled,
+            });
+        graph.procedural_asset_declarations.push(declaration);
+        let before_json = graph.to_sidecar_json().unwrap();
+
+        let preview = graph
+            .procedural_asset_bundle_preview(
+                "vy.asset.curve_cleanup",
+                &[
+                    ProceduralAssetArtifactInclusionChoice {
+                        locator: "data/training/curves.parquet".to_owned(),
+                        include: true,
+                        bundled_path: Some("bundle/data/curves.parquet".to_owned()),
+                    },
+                    ProceduralAssetArtifactInclusionChoice {
+                        locator: "models/cleanup.safetensors".to_owned(),
+                        include: false,
+                        bundled_path: None,
+                    },
+                ],
+            )
+            .expect("asset preview should exist");
+
+        assert_eq!(preview.asset_id, "vy.asset.curve_cleanup");
+        assert_eq!(preview.artifacts.len(), 4);
+        assert_eq!(preview.dependency_requirements.len(), 4);
+        assert!(preview.dependency_requirements.iter().any(
+            |requirement| requirement == "Model weights artifact `models/cleanup.safetensors`"
+        ));
+        assert_eq!(preview.included_file_count, 2);
+        assert_eq!(preview.expected_included_size_bytes, 42_004_096);
+        assert_eq!(preview.unknown_included_size_count, 0);
+        assert_eq!(preview.remaining_external_reference_count, 1);
+        assert_eq!(preview.missing_artifact_count, 1);
+        assert_eq!(
+            preview.artifacts[0].inclusion,
+            ProceduralAssetArtifactBundleInclusion::Include
+        );
+        assert_eq!(
+            preview.artifacts[0].bundled_path.as_deref(),
+            Some("bundle/data/curves.parquet")
+        );
+        assert_eq!(
+            preview.artifacts[1].inclusion,
+            ProceduralAssetArtifactBundleInclusion::ReferenceOnly
+        );
+        assert_eq!(
+            preview.artifacts[2].inclusion,
+            ProceduralAssetArtifactBundleInclusion::Missing
+        );
+        assert_eq!(
+            preview.artifacts[3].inclusion,
+            ProceduralAssetArtifactBundleInclusion::AlreadyBundled
+        );
+        assert!(
+            preview
+                .reproducibility_warnings
+                .iter()
+                .any(|warning| warning.contains("remains an external reference"))
+        );
+        assert!(
+            preview
+                .reproducibility_warnings
+                .iter()
+                .any(|warning| warning.contains("missing"))
+        );
+        assert_eq!(graph.to_sidecar_json().unwrap(), before_json);
+        assert!(
+            graph
+                .procedural_asset_bundle_preview("vy.asset.missing", &[])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn procedural_asset_bundle_preview_warns_on_included_unknowns() {
+        let mut graph = GraphDocument::sample();
+        let mut declaration = sample_procedural_asset_declaration();
+        declaration
+            .external_artifacts
+            .push(ProceduralAssetArtifactReference {
+                role: ProceduralAssetArtifactRole::ModelWeights,
+                locator: "models/cleanup.safetensors".to_owned(),
+                source_node_id: None,
+                source_node_name: None,
+                size_bytes: None,
+                content_hash: None,
+                status: ProceduralAssetArtifactStatus::Referenced,
+            });
+        graph.procedural_asset_declarations.push(declaration);
+
+        let preview = graph
+            .procedural_asset_bundle_preview(
+                "vy.asset.curve_cleanup",
+                &[ProceduralAssetArtifactInclusionChoice {
+                    locator: "models/cleanup.safetensors".to_owned(),
+                    include: true,
+                    bundled_path: None,
+                }],
+            )
+            .expect("asset preview should exist");
+
+        assert_eq!(preview.included_file_count, 1);
+        assert_eq!(preview.expected_included_size_bytes, 0);
+        assert_eq!(preview.unknown_included_size_count, 1);
+        assert_eq!(
+            preview.artifacts[0].bundled_path.as_deref(),
+            Some("bundles/assets/vy_asset_curve_cleanup/artifacts/cleanup.safetensors")
+        );
+        assert!(
+            preview
+                .reproducibility_warnings
+                .iter()
+                .any(|warning| warning.contains("unknown size"))
+        );
+        assert!(
+            preview
+                .reproducibility_warnings
+                .iter()
+                .any(|warning| warning.contains("no content hash"))
         );
     }
 
