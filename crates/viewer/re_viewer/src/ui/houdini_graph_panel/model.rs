@@ -23,6 +23,7 @@ impl GraphPoint {
 
 pub(crate) struct GraphDocument {
     pub source: GraphSource,
+    pub graph_registry: ProjectGraphRegistry,
     pub nodes: Vec<GraphNode>,
     pub annotations: Vec<GraphAnnotation>,
     pub network_view: NetworkViewDisplayOptions,
@@ -46,7 +47,91 @@ const NATIVE_OPERATOR_HOST_COMPATIBILITY_VERSION: &str = "re_viewer-houdini-grap
 const MAIN_GRAPH_ID: &str = "main";
 const PRIMARY_GEOMETRY_OUTPUT: &str = "geometry";
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ProjectGraphRegistry {
+    pub selected_graph_id: String,
+    pub graphs: Vec<ProjectGraphMetadata>,
+}
+
+impl ProjectGraphRegistry {
+    fn main_graph() -> ProjectGraphMetadata {
+        ProjectGraphMetadata {
+            graph_id: MAIN_GRAPH_ID.to_owned(),
+            name: "Main".to_owned(),
+            path: "/obj/main".to_owned(),
+            role: ProjectGraphRole::Main,
+        }
+    }
+
+    fn normalize(mut self) -> Self {
+        if self.graphs.is_empty() {
+            self.graphs.push(Self::main_graph());
+        }
+        if !self
+            .graphs
+            .iter()
+            .any(|graph| graph.graph_id == MAIN_GRAPH_ID)
+        {
+            self.graphs.insert(0, Self::main_graph());
+        }
+        if self.selected_graph_id.is_empty()
+            || !self
+                .graphs
+                .iter()
+                .any(|graph| graph.graph_id == self.selected_graph_id)
+        {
+            self.selected_graph_id = MAIN_GRAPH_ID.to_owned();
+        }
+        self
+    }
+
+    pub fn selected_graph(&self) -> Option<&ProjectGraphMetadata> {
+        self.graphs
+            .iter()
+            .find(|graph| graph.graph_id == self.selected_graph_id)
+    }
+}
+
+impl Default for ProjectGraphRegistry {
+    fn default() -> Self {
+        Self {
+            selected_graph_id: MAIN_GRAPH_ID.to_owned(),
+            graphs: vec![Self::main_graph()],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ProjectGraphMetadata {
+    pub graph_id: String,
+    pub name: String,
+    pub path: String,
+    pub role: ProjectGraphRole,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum ProjectGraphRole {
+    Main,
+    Subgraph,
+    AssetInternal,
+}
+
 impl GraphDocument {
+    pub fn current_graph_id(&self) -> &str {
+        self.graph_registry
+            .selected_graph()
+            .map(|graph| graph.graph_id.as_str())
+            .unwrap_or(MAIN_GRAPH_ID)
+    }
+
+    #[allow(dead_code)]
+    pub fn current_graph_path(&self) -> &str {
+        self.graph_registry
+            .selected_graph()
+            .map(|graph| graph.path.as_str())
+            .unwrap_or("/obj/main")
+    }
+
     pub fn sample() -> Self {
         let geometry = vec![
             Geometry::Polygon(Polygon {
@@ -90,6 +175,7 @@ impl GraphDocument {
                 &geometry,
                 Vec::new(),
             )),
+            graph_registry: ProjectGraphRegistry::default(),
             nodes: vec![
                 GraphNode {
                     node_id: "source.main".to_owned(),
@@ -331,6 +417,7 @@ impl GraphDocument {
 
         Self {
             source: GraphSource::malware_starter(metadata),
+            graph_registry: ProjectGraphRegistry::default(),
             nodes: vec![
                 GraphNode {
                     node_id: "source.byteplot".to_owned(),
@@ -2386,7 +2473,7 @@ impl GraphDocument {
         let node = self.nodes.get(target_node_index)?;
         self.node_primary_output_kind(node.kind)?;
         Some(ReferenceTargetIdentity {
-            graph_id: MAIN_GRAPH_ID.to_owned(),
+            graph_id: self.current_graph_id().to_owned(),
             node_id: node.node_id.clone(),
             output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
         })
@@ -2427,7 +2514,7 @@ impl GraphDocument {
         &self,
         target: &ReferenceTargetIdentity,
     ) -> ReferenceTargetResolution {
-        if target.graph_id != MAIN_GRAPH_ID {
+        if target.graph_id != self.current_graph_id() {
             if let Some(resolution) = self.resolve_unlocked_asset_internal_target(target) {
                 return resolution;
             }
@@ -2481,7 +2568,11 @@ impl GraphDocument {
         ReferenceTargetResolution {
             target: target.clone(),
             status: ReferenceDiagnosticStatus::Resolved,
-            readable_path: readable_reference_path(target_node, &target.output_name),
+            readable_path: readable_reference_path(
+                self.current_graph_id(),
+                target_node,
+                &target.output_name,
+            ),
             target_node_index: Some(target_node_index),
             output_kind: Some(output_kind),
             coordinate_contract: target_node.coordinate_contract.clone(),
@@ -2576,16 +2667,18 @@ impl GraphDocument {
         let Some(target_node) = self.nodes.get(target_node_index) else {
             return Vec::new();
         };
+        let current_graph_id = self.current_graph_id().to_owned();
         self.nodes
             .iter()
             .enumerate()
             .filter(|(_, node)| node.reference_input.is_some())
             .flat_map(|(reference_node_index, reference_node)| {
+                let current_graph_id = current_graph_id.clone();
                 self.reference_input_resolutions(reference_node_index)
                     .unwrap_or_default()
                     .into_iter()
                     .filter(move |entry| {
-                        entry.resolution.target.graph_id == MAIN_GRAPH_ID
+                        entry.resolution.target.graph_id == current_graph_id
                             && entry.resolution.target.node_id == target_node.node_id
                             && entry.resolution.target.output_name == PRIMARY_GEOMETRY_OUTPUT
                     })
@@ -2645,7 +2738,7 @@ impl GraphDocument {
         let source_node_index = repair.resolution.target_node_index?;
         let projection_node_id = self.unique_node_id("substrate_projection");
         let projection_target = ReferenceTargetIdentity {
-            graph_id: MAIN_GRAPH_ID.to_owned(),
+            graph_id: self.current_graph_id().to_owned(),
             node_id: projection_node_id.clone(),
             output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
         };
@@ -5816,6 +5909,8 @@ pub(crate) enum GraphSourceMode {
 struct HoudiniGraphSidecar {
     version: u32,
     source: GraphSourceSidecar,
+    #[serde(default)]
+    graph_registry: ProjectGraphRegistry,
     nodes: Vec<NodeSidecar>,
     #[serde(default)]
     annotations: Vec<GraphAnnotation>,
@@ -5856,6 +5951,7 @@ impl HoudiniGraphSidecar {
                 metadata: graph.source.metadata.clone(),
                 import_error: graph.source.import_error.clone(),
             },
+            graph_registry: graph.graph_registry.clone(),
             nodes: graph
                 .nodes
                 .iter()
@@ -5922,6 +6018,7 @@ impl HoudiniGraphSidecar {
             metadata: self.source.metadata,
             import_error: self.source.import_error,
         };
+        graph.graph_registry = self.graph_registry.normalize();
         graph.geometry = self.demo_geometry;
         graph.recording_geometry = self.recording_geometry;
         graph.annotations = self.annotations;
@@ -6172,8 +6269,8 @@ fn node_matches_snapshot_identity(node: &GraphNode, snapshot: &NodeSidecar) -> b
     }
 }
 
-fn readable_reference_path(node: &GraphNode, output_name: &str) -> String {
-    format!("{MAIN_GRAPH_ID}/{}:{output_name}", node.name)
+fn readable_reference_path(graph_id: &str, node: &GraphNode, output_name: &str) -> String {
+    format!("{graph_id}/{}:{output_name}", node.name)
 }
 
 fn unlocked_asset_graph_id(instance_id: &str) -> String {
@@ -9900,12 +9997,13 @@ mod tests {
         NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
         OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
         ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
-        ProjectCommand, PythonDependencyHealth, PythonEnvironmentDescriptor,
-        PythonEnvironmentPathMode, PythonEnvironmentPaths, PythonEnvironmentResolveState,
-        PythonEnvironmentResolveTrigger, PythonEnvironmentResolver, PythonEnvironmentStatus,
-        PythonOperatorCapability, PythonOperatorDataKind, PythonOperatorDeclaration,
-        PythonOperatorDependencies, PythonOperatorDependencyStatus, PythonOperatorEntryPoint,
-        PythonOperatorNumericRange, PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
+        ProjectCommand, ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole,
+        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
+        PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
+        PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
+        PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
+        PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
+        PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
         PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
         PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
         PythonRequirementsSource, ReferenceDiagnosticStatus, ReferenceTargetEntry,
@@ -14339,6 +14437,101 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         restored.apply_sidecar_json(&json).unwrap();
 
         assert_eq!(restored.network_view, graph.network_view);
+    }
+
+    #[test]
+    fn graph_registry_defaults_to_main_graph_metadata() {
+        let graph = GraphDocument::sample();
+        let source_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Source)
+            .expect("sample graph should include source node");
+        let target = graph
+            .reference_target_for_node(source_index)
+            .expect("source should be referenceable");
+
+        assert_eq!(graph.current_graph_id(), "main");
+        assert_eq!(graph.current_graph_path(), "/obj/main");
+        assert_eq!(graph.graph_registry.graphs.len(), 1);
+        assert_eq!(
+            graph.graph_registry.selected_graph(),
+            Some(&ProjectGraphMetadata {
+                graph_id: "main".to_owned(),
+                name: "Main".to_owned(),
+                path: "/obj/main".to_owned(),
+                role: ProjectGraphRole::Main,
+            })
+        );
+        assert_eq!(target.graph_id, "main");
+    }
+
+    #[test]
+    fn graph_registry_round_trips_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry = ProjectGraphRegistry {
+            selected_graph_id: "analysis".to_owned(),
+            graphs: vec![
+                ProjectGraphMetadata {
+                    graph_id: "main".to_owned(),
+                    name: "Main".to_owned(),
+                    path: "/obj/main".to_owned(),
+                    role: ProjectGraphRole::Main,
+                },
+                ProjectGraphMetadata {
+                    graph_id: "analysis".to_owned(),
+                    name: "Analysis".to_owned(),
+                    path: "/obj/analysis".to_owned(),
+                    role: ProjectGraphRole::Subgraph,
+                },
+            ],
+        };
+        let null_index = graph.add_null_operator_node("OUT_ANALYSIS");
+        let target = graph
+            .reference_target_for_node(null_index)
+            .expect("null should be referenceable");
+
+        assert_eq!(target.graph_id, "analysis");
+        assert_eq!(
+            graph.resolve_reference_target(&target).readable_path,
+            "analysis/OUT_ANALYSIS:geometry"
+        );
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(restored.graph_registry, graph.graph_registry);
+        assert_eq!(restored.current_graph_id(), "analysis");
+        assert_eq!(restored.current_graph_path(), "/obj/analysis");
+        assert_eq!(
+            restored.resolve_reference_target(&target).readable_path,
+            "analysis/OUT_ANALYSIS:geometry"
+        );
+    }
+
+    #[test]
+    fn sidecar_without_graph_registry_uses_main_graph_default() {
+        let graph = GraphDocument::sample();
+        let mut value =
+            serde_json::from_str::<serde_json::Value>(&graph.to_sidecar_json().unwrap())
+                .expect("sidecar should be valid json");
+        value
+            .as_object_mut()
+            .expect("sidecar should be an object")
+            .remove("graph_registry");
+        let json = serde_json::to_string_pretty(&value).unwrap();
+
+        let mut restored = GraphDocument::sample();
+        restored.graph_registry = ProjectGraphRegistry {
+            selected_graph_id: "stale".to_owned(),
+            graphs: Vec::new(),
+        };
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(restored.current_graph_id(), "main");
+        assert_eq!(restored.current_graph_path(), "/obj/main");
+        assert_eq!(restored.graph_registry, ProjectGraphRegistry::default());
     }
 
     #[test]
