@@ -124,12 +124,40 @@ impl GraphDocument {
             .unwrap_or(MAIN_GRAPH_ID)
     }
 
-    #[allow(dead_code)]
     pub fn current_graph_path(&self) -> &str {
         self.graph_registry
             .selected_graph()
             .map(|graph| graph.path.as_str())
             .unwrap_or("/obj/main")
+    }
+
+    pub fn readable_node_path(&self, node_index: usize) -> Option<String> {
+        self.nodes
+            .get(node_index)
+            .map(|node| self.readable_node_path_for_name(&node.name))
+    }
+
+    fn graph_location_for_node(&self, node: &GraphNode) -> GraphLocationInfo {
+        let name_collision_count = self
+            .nodes
+            .iter()
+            .filter(|candidate| candidate.name == node.name)
+            .count();
+        GraphLocationInfo {
+            graph_id: self.current_graph_id().to_owned(),
+            graph_path: self.current_graph_path().to_owned(),
+            node_name: node.name.clone(),
+            node_path: self.readable_node_path_for_name(&node.name),
+            name_collision_count,
+        }
+    }
+
+    fn readable_node_path_for_name(&self, node_name: &str) -> String {
+        format!(
+            "{}/{}",
+            self.current_graph_path().trim_end_matches('/'),
+            node_name
+        )
     }
 
     pub fn sample() -> Self {
@@ -4233,11 +4261,13 @@ impl GraphDocument {
         let reference_output_warning = self.reference_output_change_warning_for_node(index);
         let coordinate_warnings = self.coordinate_contract_warnings(node);
         let substrate_raster = self.substrate_raster_for_node(node);
+        let graph_location = self.graph_location_for_node(node);
 
         Some(match node.kind {
             NodeKind::Source => NodeInfo {
                 kind: node.kind,
                 role: node.kind.role(),
+                graph_location: graph_location.clone(),
                 input_count: stage.input_count,
                 output_count: stage.output_count,
                 status: if self.source.import_error.is_some() {
@@ -4272,6 +4302,7 @@ impl GraphDocument {
             NodeKind::Filter => NodeInfo {
                 kind: node.kind,
                 role: node.kind.role(),
+                graph_location: graph_location.clone(),
                 input_count: stage.input_count,
                 output_count: stage.output_count,
                 status: if filter_warnings.is_empty() {
@@ -4306,6 +4337,7 @@ impl GraphDocument {
             NodeKind::Style => NodeInfo {
                 kind: node.kind,
                 role: node.kind.role(),
+                graph_location: graph_location.clone(),
                 input_count: stage.input_count,
                 output_count: stage.output_count,
                 status: if style_warnings.is_empty() {
@@ -4342,6 +4374,7 @@ impl GraphDocument {
                 NodeInfo {
                     kind: node.kind,
                     role: node.kind.role(),
+                    graph_location: graph_location.clone(),
                     input_count: stage.input_count,
                     output_count: stage.output_count,
                     status: NodeStatus::Healthy,
@@ -4394,6 +4427,7 @@ impl GraphDocument {
                 NodeInfo {
                     kind: node.kind,
                     role: node.kind.role(),
+                    graph_location: graph_location.clone(),
                     input_count: target_entries.iter().filter(|entry| entry.enabled).count(),
                     output_count: stage.output_count,
                     status: if warnings.is_empty() {
@@ -4459,6 +4493,7 @@ impl GraphDocument {
                 NodeInfo {
                     kind: node.kind,
                     role: node.kind.role(),
+                    graph_location: graph_location.clone(),
                     input_count: 1,
                     output_count: stage.output_count,
                     status: NodeStatus::Healthy,
@@ -4509,6 +4544,7 @@ impl GraphDocument {
                 NodeInfo {
                     kind: node.kind,
                     role: node.kind.role(),
+                    graph_location: graph_location.clone(),
                     input_count: declaration.map_or(0, |declaration| declaration.inputs.len()),
                     output_count: declaration.map_or(0, |declaration| declaration.outputs.len()),
                     status: match dependency_status {
@@ -4580,6 +4616,7 @@ impl GraphDocument {
                 NodeInfo {
                     kind: node.kind,
                     role: node.kind.role(),
+                    graph_location: graph_location.clone(),
                     input_count: declaration.map_or(0, |declaration| declaration.inputs.len()),
                     output_count: declaration.map_or(0, |declaration| declaration.outputs.len()),
                     status: match version_status {
@@ -4668,6 +4705,7 @@ impl GraphDocument {
                 NodeInfo {
                     kind: node.kind,
                     role: node.kind.role(),
+                    graph_location: graph_location.clone(),
                     input_count: declaration.map_or(0, |declaration| declaration.inputs.len()),
                     output_count: declaration.map_or(0, |declaration| declaration.outputs.len()),
                     status: native_operator_node_status(version_status, load_status),
@@ -4755,6 +4793,7 @@ impl GraphDocument {
             NodeKind::Output => NodeInfo {
                 kind: node.kind,
                 role: node.kind.role(),
+                graph_location,
                 input_count: stage.input_count,
                 output_count: stage.output_count,
                 status: NodeStatus::Healthy,
@@ -9091,9 +9130,25 @@ impl NodeKind {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GraphLocationInfo {
+    pub graph_id: String,
+    pub graph_path: String,
+    pub node_name: String,
+    pub node_path: String,
+    pub name_collision_count: usize,
+}
+
+impl GraphLocationInfo {
+    pub fn name_is_unique_in_graph(&self) -> bool {
+        self.name_collision_count == 1
+    }
+}
+
 pub(crate) struct NodeInfo {
     pub kind: NodeKind,
     pub role: &'static str,
+    pub graph_location: GraphLocationInfo,
     pub input_count: usize,
     pub output_count: usize,
     pub status: NodeStatus,
@@ -14508,6 +14563,79 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             restored.resolve_reference_target(&target).readable_path,
             "analysis/OUT_ANALYSIS:geometry"
         );
+    }
+
+    #[test]
+    fn selected_node_info_reports_current_graph_readable_node_path() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry = ProjectGraphRegistry {
+            selected_graph_id: "analysis".to_owned(),
+            graphs: vec![
+                ProjectGraphMetadata {
+                    graph_id: "main".to_owned(),
+                    name: "Main".to_owned(),
+                    path: "/obj/main".to_owned(),
+                    role: ProjectGraphRole::Main,
+                },
+                ProjectGraphMetadata {
+                    graph_id: "analysis".to_owned(),
+                    name: "Analysis".to_owned(),
+                    path: "/obj/analysis".to_owned(),
+                    role: ProjectGraphRole::Subgraph,
+                },
+            ],
+        };
+        let source_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Source)
+            .expect("sample graph should include source node");
+        let info = graph
+            .selected_node_info(source_index)
+            .expect("selected node should report info");
+
+        assert_eq!(
+            graph.readable_node_path(source_index).as_deref(),
+            Some("/obj/analysis/Source")
+        );
+        assert_eq!(info.graph_location.graph_id, "analysis");
+        assert_eq!(info.graph_location.graph_path, "/obj/analysis");
+        assert_eq!(info.graph_location.node_name, "Source");
+        assert_eq!(info.graph_location.node_path, "/obj/analysis/Source");
+        assert!(info.graph_location.name_is_unique_in_graph());
+        assert_eq!(info.graph_location.name_collision_count, 1);
+    }
+
+    #[test]
+    fn selected_node_info_reports_graph_local_unique_generated_name() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry = ProjectGraphRegistry {
+            selected_graph_id: "analysis".to_owned(),
+            graphs: vec![
+                ProjectGraphMetadata {
+                    graph_id: "main".to_owned(),
+                    name: "Main".to_owned(),
+                    path: "/obj/main".to_owned(),
+                    role: ProjectGraphRole::Main,
+                },
+                ProjectGraphMetadata {
+                    graph_id: "analysis".to_owned(),
+                    name: "Analysis".to_owned(),
+                    path: "/obj/analysis".to_owned(),
+                    role: ProjectGraphRole::Subgraph,
+                },
+            ],
+        };
+
+        let duplicate_name_index = graph.add_null_operator_node("Source");
+        let info = graph
+            .selected_node_info(duplicate_name_index)
+            .expect("selected node should report info");
+
+        assert_eq!(info.graph_location.node_name, "Source_2");
+        assert_eq!(info.graph_location.node_path, "/obj/analysis/Source_2");
+        assert!(info.graph_location.name_is_unique_in_graph());
+        assert_eq!(info.graph_location.name_collision_count, 1);
     }
 
     #[test]
