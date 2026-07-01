@@ -37,7 +37,7 @@ for the graph hierarchy lane.
 | `#142` | complete | Graph container metadata | Adds serializable subnet-like graph container metadata keyed by stable node ID, pointing to an internal named graph without moving nodes yet. |
 | `#144` | complete | Typed graph container boundaries | Adds serializable typed input/output declarations to graph containers and exposes boundary outputs as stable reference targets. |
 | `#146` | complete | Graph container boundary anchor mappings | Adds serializable mappings from public boundary ports to internal graph anchors, with model diagnostics for unresolved metadata. |
-| `#148` | planned | Graph container collapse manifests | Record selected connected node sets and typed external edge crossings as graph container collapse metadata without moving nodes yet. |
+| `#148` | complete | Graph container collapse manifests | Records selected connected node sets and typed external edge crossings as graph container collapse metadata without moving nodes yet. |
 
 ## Next implementation candidates
 
