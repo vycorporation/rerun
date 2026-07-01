@@ -4,9 +4,9 @@ use re_viewer_context::{SystemCommand, SystemCommandSender as _, ViewId};
 use re_viewport_blueprint::{ViewBlueprint, ViewportBlueprint};
 
 use crate::ui::{
-    HoudiniDataView, HoudiniDisplayView, HoudiniFindView, HoudiniGraphView, HoudiniInfoView,
-    HoudiniLayersView, HoudiniNetworkView, HoudiniOperatorsView, HoudiniOutputsView,
-    HoudiniParametersView, HoudiniProjectView,
+    HoudiniDataView, HoudiniDisplayView, HoudiniExecutionView, HoudiniFindView, HoudiniGraphView,
+    HoudiniInfoView, HoudiniLayersView, HoudiniNetworkView, HoudiniOperatorsView,
+    HoudiniOutputsView, HoudiniParametersView, HoudiniProjectView,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -33,6 +33,7 @@ struct PresetViews {
     layers: ViewId,
     data: ViewId,
     outputs: ViewId,
+    execution: ViewId,
     project: ViewId,
     graph: ViewId,
 }
@@ -755,6 +756,11 @@ fn resolve_preset_views(
         view_spec::<HoudiniOutputsView>("Outputs"),
         &mut views_to_add,
     );
+    let execution = resolve_view(
+        viewport_blueprint,
+        view_spec::<HoudiniExecutionView>("Execution"),
+        &mut views_to_add,
+    );
     let project = resolve_view(
         viewport_blueprint,
         view_spec::<HoudiniProjectView>("Project"),
@@ -777,6 +783,7 @@ fn resolve_preset_views(
             layers,
             data,
             outputs,
+            execution,
             project,
             graph,
         },
@@ -829,6 +836,7 @@ fn build_preset_tree(
                     views.parameters,
                     views.display,
                     views.info,
+                    views.execution,
                     views.operators,
                     views.find,
                     views.layers,
@@ -864,7 +872,7 @@ fn build_preset_tree(
                 &mut tiles,
                 &mut container_display_names,
                 "Project Data",
-                vec![views.data, views.outputs, views.project],
+                vec![views.data, views.outputs, views.execution, views.project],
             );
             let review_tabs = insert_named_tabs(
                 &mut tiles,
@@ -891,7 +899,7 @@ fn build_preset_tree(
                 &mut tiles,
                 &mut container_display_names,
                 "Data + Attributes",
-                vec![views.data, views.project, views.info],
+                vec![views.data, views.execution, views.project, views.info],
             );
             let outputs = tiles.insert_pane(views.outputs);
             let side = insert_named_vertical(
@@ -913,7 +921,7 @@ fn build_preset_tree(
                 &mut tiles,
                 &mut container_display_names,
                 "Output",
-                vec![views.outputs, views.display, views.layers],
+                vec![views.outputs, views.execution, views.display, views.layers],
             );
             let debug_tabs = insert_named_tabs(
                 &mut tiles,
@@ -1006,8 +1014,9 @@ mod tests {
             layers: view_id(7),
             data: view_id(8),
             outputs: view_id(9),
-            project: view_id(10),
-            graph: view_id(11),
+            execution: view_id(10),
+            project: view_id(11),
+            graph: view_id(12),
         }
     }
 
@@ -1019,7 +1028,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            7
+            8
         );
         assert!(names.iter().any(|(_, name)| name == "Network Workbench"));
         assert!(names.iter().any(|(_, name)| name == "Inspector"));
@@ -1032,7 +1041,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            8
+            9
         );
         assert!(
             names
@@ -1083,7 +1092,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            5
+            6
         );
         assert!(
             names
@@ -1101,7 +1110,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            7
+            8
         );
         assert!(
             names

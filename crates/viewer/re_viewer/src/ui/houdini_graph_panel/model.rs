@@ -36,6 +36,7 @@ pub(crate) struct GraphDocument {
     pub native_operator_declarations: Vec<NativeOperatorDeclaration>,
     pub native_operator_trust: NativeOperatorTrustPolicy,
     pub python_environment: PythonEnvironmentDescriptor,
+    pub work_items: Vec<GraphWorkItem>,
 }
 
 const GENERATED_NODE_LANE_Y: f32 = 0.82;
@@ -260,6 +261,7 @@ impl GraphDocument {
             native_operator_declarations: Vec::new(),
             native_operator_trust: NativeOperatorTrustPolicy::default(),
             python_environment: PythonEnvironmentDescriptor::default(),
+            work_items: Vec::new(),
         }
     }
 
@@ -568,6 +570,7 @@ impl GraphDocument {
             native_operator_declarations: Vec::new(),
             native_operator_trust: NativeOperatorTrustPolicy::default(),
             python_environment: PythonEnvironmentDescriptor::default(),
+            work_items: Vec::new(),
         }
     }
 
@@ -2764,6 +2767,7 @@ impl GraphDocument {
             ) {
                 node.evaluation.state = EvaluationState::Cached;
                 node.evaluation.message = None;
+                self.record_work_item(index, GraphWorkItemStatus::Cached, "Cached output reused");
             }
         }
     }
@@ -2791,6 +2795,7 @@ impl GraphDocument {
         if let Some(node) = self.nodes.get_mut(index) {
             node.evaluation.state = EvaluationState::Running;
             node.evaluation.message = None;
+            self.record_work_item(index, GraphWorkItemStatus::Running, "Manual run requested");
         }
     }
 
@@ -2799,6 +2804,7 @@ impl GraphDocument {
             node.evaluation.state = EvaluationState::Clean;
             node.evaluation.manual = false;
             node.evaluation.message = None;
+            self.record_work_item(index, GraphWorkItemStatus::Complete, "Run complete");
         }
     }
 
@@ -2809,14 +2815,110 @@ impl GraphDocument {
             node.evaluation.state = EvaluationState::Manual;
             node.evaluation.manual = true;
             node.evaluation.message = Some("Run cancelled".to_owned());
+            self.record_work_item(index, GraphWorkItemStatus::Canceled, "Run canceled");
         }
     }
 
     #[allow(dead_code)]
     pub fn fail_node_run(&mut self, index: usize, message: impl Into<String>) {
+        let message = message.into();
         if let Some(node) = self.nodes.get_mut(index) {
             node.evaluation.state = EvaluationState::Failed;
-            node.evaluation.message = Some(message.into());
+            node.evaluation.message = Some(message.clone());
+            self.record_work_item(index, GraphWorkItemStatus::Failed, message);
+        }
+    }
+
+    pub fn queue_node_evaluation(&mut self, index: usize) {
+        self.supersede_running_work_items_for_node(
+            index,
+            "Queued evaluation superseded previous running work",
+        );
+        if let Some(node) = self.nodes.get_mut(index) {
+            node.evaluation.state = EvaluationState::Stale;
+            node.evaluation.message = Some("Evaluation queued".to_owned());
+            self.record_work_item(
+                index,
+                GraphWorkItemStatus::Waiting,
+                "Waiting for evaluation",
+            );
+        }
+    }
+
+    pub fn retry_work_item_for_node(&mut self, index: usize) {
+        self.request_node_run(index);
+        if let Some(item) = self.latest_work_item_for_node_mut(index) {
+            item.summary = "Retry requested for current graph request".to_owned();
+        }
+    }
+
+    fn record_work_item(
+        &mut self,
+        node_index: usize,
+        status: GraphWorkItemStatus,
+        summary: impl Into<String>,
+    ) {
+        let Some(node) = self.nodes.get(node_index) else {
+            return;
+        };
+        let fingerprint = self.evaluation_fingerprint_for_node(node_index);
+        let work_item = GraphWorkItem {
+            work_item_id: format!("work_item_{}", self.work_items.len() + 1),
+            node_index,
+            node_id: node.node_id.clone(),
+            node_name: node.name.clone(),
+            output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            status,
+            fingerprint,
+            summary: summary.into(),
+            diagnostic: node.evaluation.message.clone(),
+            progress: match status {
+                GraphWorkItemStatus::Waiting => 0.0,
+                GraphWorkItemStatus::Running => 0.5,
+                GraphWorkItemStatus::Cached | GraphWorkItemStatus::Complete => 1.0,
+                GraphWorkItemStatus::Canceled
+                | GraphWorkItemStatus::Superseded
+                | GraphWorkItemStatus::Failed => 0.0,
+            },
+            created_at_millis: current_timestamp_millis(),
+        };
+        self.work_items.push(work_item);
+    }
+
+    pub fn evaluation_fingerprint_for_node(&self, node_index: usize) -> String {
+        self.nodes.get(node_index).map_or_else(
+            || "missing-node".to_owned(),
+            |node| {
+                format!(
+                    "{}:{}:{:.6}:{}",
+                    node.node_id,
+                    PRIMARY_GEOMETRY_OUTPUT,
+                    node.parameter.value,
+                    node.kind.as_str()
+                )
+            },
+        )
+    }
+
+    fn latest_work_item_for_node_mut(&mut self, node_index: usize) -> Option<&mut GraphWorkItem> {
+        self.work_items
+            .iter_mut()
+            .rev()
+            .find(|item| item.node_index == node_index)
+    }
+
+    fn supersede_running_work_items_for_node(&mut self, node_index: usize, summary: &str) {
+        for item in &mut self.work_items {
+            if item.node_index == node_index
+                && matches!(
+                    item.status,
+                    GraphWorkItemStatus::Waiting | GraphWorkItemStatus::Running
+                )
+            {
+                item.status = GraphWorkItemStatus::Superseded;
+                item.summary = summary.to_owned();
+                item.progress = 0.0;
+            }
         }
     }
 
@@ -4623,6 +4725,7 @@ impl HoudiniGraphSidecar {
         graph.native_operator_declarations = self.native_operator_declarations;
         graph.native_operator_trust = self.native_operator_trust;
         graph.python_environment = self.python_environment;
+        graph.work_items.clear();
 
         let mut matched_node_indices = vec![false; graph.nodes.len()];
         for (snapshot_index, node_snapshot) in self.nodes.into_iter().enumerate() {
@@ -6316,6 +6419,46 @@ impl EvaluationState {
             Self::Running => "Running",
             Self::Failed => "Failed",
             Self::Manual => "Manual",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GraphWorkItem {
+    pub work_item_id: String,
+    pub node_index: usize,
+    pub node_id: String,
+    pub node_name: String,
+    pub output_name: String,
+    pub status: GraphWorkItemStatus,
+    pub fingerprint: String,
+    pub summary: String,
+    pub diagnostic: Option<String>,
+    pub progress: f32,
+    pub created_at_millis: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GraphWorkItemStatus {
+    Waiting,
+    Running,
+    Cached,
+    Canceled,
+    Superseded,
+    Failed,
+    Complete,
+}
+
+impl GraphWorkItemStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "Waiting",
+            Self::Running => "Running",
+            Self::Cached => "Cached",
+            Self::Canceled => "Canceled",
+            Self::Superseded => "Superseded",
+            Self::Failed => "Failed",
+            Self::Complete => "Complete",
         }
     }
 }
@@ -8111,15 +8254,15 @@ mod tests {
         AttributeTableQuery, AttributeTableSort, EvaluationState, ExportGeometry,
         GeneratedNodeBindingState, GeneratedNodeInfo, GeneratedNodeSource, Geometry,
         GeometryBounds, GeometryKind, GraphAnnotationKind, GraphColor, GraphDocument, GraphNode,
-        GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema, HoudiniDataKind,
-        HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
-        HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
-        NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
-        NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
-        NativeOperatorProvenance, NetworkBadgeVisibility, NetworkNodeRingVisibility,
-        NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind, NodeStatus,
-        OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode,
-        OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
+        GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniCubicBezierParquetSchema,
+        HoudiniDataKind, HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange,
+        HoudiniOperatorPort, HoudiniParameterDeclaration, HoudiniParameterKind,
+        HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
+        NativeOperatorFailureMode, NativeOperatorImplementation, NativeOperatorLoadStatus,
+        NativeOperatorOutputCounts, NativeOperatorProvenance, NetworkBadgeVisibility,
+        NetworkNodeRingVisibility, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
+        NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
+        OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
         ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
         PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
         PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
@@ -10009,6 +10152,116 @@ mod tests {
             EvaluationState::Stale
         );
         assert_eq!(graph.graph_layout().edges.len(), graph.nodes.len() - 2);
+    }
+
+    #[test]
+    fn work_items_record_manual_run_cancel_retry_and_completion() {
+        let mut graph = GraphDocument::sample();
+        let node_index = 1;
+
+        graph.queue_node_evaluation(node_index);
+        assert_eq!(graph.work_items.len(), 1);
+        assert_eq!(graph.work_items[0].status, GraphWorkItemStatus::Waiting);
+        assert_eq!(
+            graph.nodes[node_index].evaluation.state,
+            EvaluationState::Stale
+        );
+
+        graph.request_node_run(node_index);
+        assert_eq!(
+            graph.work_items.last().map(|item| item.status),
+            Some(GraphWorkItemStatus::Running)
+        );
+        assert_eq!(
+            graph.nodes[node_index].evaluation.state,
+            EvaluationState::Running
+        );
+
+        graph.cancel_node_run(node_index);
+        assert_eq!(
+            graph.work_items.last().map(|item| item.status),
+            Some(GraphWorkItemStatus::Canceled)
+        );
+        assert_eq!(
+            graph.nodes[node_index].evaluation.state,
+            EvaluationState::Manual
+        );
+
+        graph.retry_work_item_for_node(node_index);
+        let retry = graph
+            .work_items
+            .last()
+            .expect("retry should add a work item");
+        assert_eq!(retry.status, GraphWorkItemStatus::Running);
+        assert_eq!(retry.summary, "Retry requested for current graph request");
+        assert_eq!(retry.output_name, PRIMARY_GEOMETRY_OUTPUT);
+        assert_eq!(
+            retry.fingerprint,
+            graph.evaluation_fingerprint_for_node(node_index)
+        );
+
+        graph.complete_node_run(node_index);
+        assert_eq!(
+            graph.work_items.last().map(|item| item.status),
+            Some(GraphWorkItemStatus::Complete)
+        );
+        assert_eq!(
+            graph.nodes[node_index].evaluation.state,
+            EvaluationState::Clean
+        );
+    }
+
+    #[test]
+    fn demand_evaluation_records_cached_work_items() {
+        let mut graph = GraphDocument::sample();
+        graph.nodes[1].evaluation = NodeEvaluation {
+            state: EvaluationState::Stale,
+            manual: false,
+            message: None,
+        };
+
+        graph.demand_output_evaluation();
+
+        assert_eq!(graph.nodes[1].evaluation.state, EvaluationState::Cached);
+        assert!(graph.work_items.iter().any(|item| {
+            item.node_index == 1
+                && item.status == GraphWorkItemStatus::Cached
+                && item.summary == "Cached output reused"
+        }));
+    }
+
+    #[test]
+    fn queued_evaluation_supersedes_running_work_for_same_node() {
+        let mut graph = GraphDocument::sample();
+
+        graph.request_node_run(1);
+        graph.queue_node_evaluation(1);
+
+        assert_eq!(graph.work_items[0].status, GraphWorkItemStatus::Superseded);
+        assert_eq!(
+            graph.work_items[0].summary,
+            "Queued evaluation superseded previous running work"
+        );
+        assert_eq!(
+            graph.work_items.last().map(|item| item.status),
+            Some(GraphWorkItemStatus::Waiting)
+        );
+    }
+
+    #[test]
+    fn work_items_are_runtime_state_not_sidecar_state() {
+        let mut graph = GraphDocument::sample();
+        graph.request_node_run(1);
+        assert!(!graph.work_items.is_empty());
+
+        let json = graph.to_sidecar_json().unwrap();
+        assert!(!json.contains("work_items"));
+        assert!(!json.contains("work_item_"));
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert!(restored.work_items.is_empty());
     }
 
     #[test]
