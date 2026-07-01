@@ -1,0 +1,3 @@
+# Layer filter edits create or edit filter graph data
+
+Houdini Clone lets users filter directly through the layer stack, viewport, or attribute table, but durable filters create or edit filter graph data rather than storing layer-local, viewport-local, or table-local filter overrides. Temporary search, highlight, row selection, table filter, and isolate interactions can remain transient UI state until the user commits them into the graph. Selection-to-filter and mask-to-filter actions create visible filter operators wired to subset data and the source branch; filtered datasets are not materialized unless the user separately exports, packages, or records a materialized output.

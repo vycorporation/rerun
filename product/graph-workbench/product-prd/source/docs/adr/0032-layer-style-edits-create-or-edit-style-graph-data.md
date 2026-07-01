@@ -1,0 +1,3 @@
+# Layer style edits create or edit style graph data
+
+Houdini Clone lets users change styles directly through the layer stack, viewport, attribute table, or subset actions, but durable style changes create or edit style graph data rather than storing layer-local, viewport-local, or table-local overrides. A layer-specific style can be represented as an auto-created style operator connected through the layer view's style binding. Selection-to-style and mask-to-style actions create or edit visible style graph data or style bindings that consume subset data; selections and masks do not own appearance themselves.

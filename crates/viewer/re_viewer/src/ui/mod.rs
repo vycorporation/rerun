@@ -20,9 +20,14 @@ pub(crate) use share_modal::ShareModal;
 
 pub(crate) use self::houdini_graph_panel::HoudiniGraphPanel;
 pub(crate) use self::houdini_graph_panel::{
-    SharedHoudiniGraph, install_shared_houdini_graph, new_shared_houdini_graph,
+    SharedHoudiniGraph, SharedHoudiniGraphPanel, install_shared_houdini_graph,
+    install_shared_houdini_graph_panel, new_shared_houdini_graph, new_shared_houdini_graph_panel,
 };
-pub(crate) use self::houdini_graph_view::HoudiniGraphView;
+pub(crate) use self::houdini_graph_view::{
+    HoudiniDataView, HoudiniDisplayView, HoudiniFindView, HoudiniGraphView, HoudiniInfoView,
+    HoudiniLayersView, HoudiniNetworkView, HoudiniOperatorsView, HoudiniOutputsView,
+    HoudiniParametersView, HoudiniProjectView,
+};
 pub(crate) use self::mobile_warning_ui::mobile_warning_ui;
 pub(crate) use self::top_panel::top_panel;
 pub(crate) use self::welcome_screen::WelcomeScreen;

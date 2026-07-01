@@ -1,0 +1,3 @@
+# Run a Rerun-first validation spike
+
+Houdini Clone should validate Rerun as the foundation before continuing the custom SvelteKit/WebGPU implementation path. Rerun already provides a high-performance Rust viewer, 2D/3D spatial and computer-vision visualization, Python and notebook workflows, native and web viewing, and an active open-source codebase; the spike should test whether Houdini-like node graphs, layer-stack display control, graph-backed styling/filtering, procedural assets, and Python operators can be integrated without fighting Rerun's architecture. The preferred route is upstream-compatible extension or integration first, with a hard fork only if necessary, and the huge-point-cloud limitation must be treated as a gating risk rather than assumed solved.

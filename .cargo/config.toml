@@ -37,6 +37,12 @@ PYO3_CONFIG_FILE = { value = "rerun_py/pyo3-build.cfg", relative = true }
 [target.osx-arm64.activation.env]
 AR = "llvm-ar" # Various Wasm targets fail on mac without llvm-ar
 
+[target.aarch64-apple-darwin]
+linker = "/usr/bin/clang"
+
+[target.x86_64-apple-darwin]
+linker = "/usr/bin/clang"
+
 # `web_sys_unstable_apis` is required to enable the web_sys clipboard API which egui_web uses.
 # https://wasm-bindgen.github.io/wasm-bindgen/api/web_sys/struct.Clipboard.html
 # https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html

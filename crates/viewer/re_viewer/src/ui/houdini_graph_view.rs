@@ -1,25 +1,190 @@
+use std::time::Instant;
+
 use egui::epaint::CubicBezierShape;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind};
+use re_renderer::view_builder::{OrthographicCameraMode, Projection, TargetConfiguration};
+use re_renderer::{LineDrawableBuilder, Size, ViewBuilder};
 use re_sdk_types::ViewClassIdentifier;
 use re_ui::{Help, icons};
 use re_viewer_context::external::re_log_types::EntityPath;
+use re_viewer_context::gpu_bridge;
 use re_viewer_context::{
-    Item, SystemCommand, SystemCommandSender as _, SystemExecutionOutput, ViewClass,
-    ViewClassLayoutPriority, ViewClassRegistryError, ViewQuery, ViewSpawnHeuristics, ViewState,
-    ViewStateExt as _, ViewSystemExecutionError, ViewSystemRegistrator, ViewerContext,
+    IdentifiedViewSystem, IndicatedEntities, Item, PerVisualizerType, RecommendedVisualizers,
+    SystemCommand, SystemCommandSender as _, SystemExecutionOutput, ViewClass,
+    ViewClassLayoutPriority, ViewClassRegistryError, ViewContext, ViewContextCollection, ViewQuery,
+    ViewSpawnHeuristics, ViewState, ViewStateExt as _, ViewSystemExecutionError,
+    ViewSystemIdentifier, ViewSystemRegistrator, ViewerContext, VisualizableReason,
+    VisualizerExecutionOutput, VisualizerQueryInfo, VisualizerSystem,
 };
 
 use crate::ui::houdini_graph_panel::model::{
-    CubicBezier, GraphDocument, GraphPoint, LayerKind, RerunSceneDebugItem, RerunSceneItem,
-    RerunSceneOutput,
+    CubicBezier, GraphDocument, GraphPoint, GraphStyle, LayerKind, RerunQueryBridge,
+    RerunQueryBridgeMode, RerunSceneDebugItem, RerunSceneItem, RerunSceneOutput,
 };
-use crate::ui::houdini_graph_panel::{lock_houdini_graph, shared_houdini_graph_from_context};
+use crate::ui::houdini_graph_panel::{
+    lock_houdini_graph, lock_houdini_graph_panel, shared_houdini_graph_from_context,
+    shared_houdini_graph_panel_from_context,
+};
 
 #[derive(Default)]
 pub(crate) struct HoudiniGraphView;
 
 #[derive(Default)]
-struct HoudiniGraphViewState {}
+pub(crate) struct HoudiniNetworkView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniParametersView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniInfoView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniDisplayView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniOperatorsView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniFindView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniLayersView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniDataView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniOutputsView;
+
+#[derive(Default)]
+pub(crate) struct HoudiniProjectView;
+
+#[derive(Default)]
+struct HoudiniGraphViewState {
+    selected_item_index: Option<usize>,
+    last_frame_stats: Option<HoudiniFrameStats>,
+}
+
+#[derive(Default)]
+struct HoudiniPanelViewState;
+
+impl ViewState for HoudiniPanelViewState {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn heap_size_bytes(&self) -> u64 {
+        std::mem::size_of_val(self) as u64
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct HoudiniFrameStats {
+    scene_prepare_micros: u128,
+    draw_total_micros: u128,
+    boundary_expand_micros: u128,
+    draw_data_build_micros: u128,
+    renderer_callback_micros: u128,
+    preview_mode: HoudiniPreviewMode,
+    renderer_path: HoudiniRendererPath,
+    cubic_evaluation: HoudiniCubicEvaluationPlacement,
+    fallback_path: HoudiniRendererPath,
+    target_draw_data_shape: &'static str,
+    item_count: usize,
+    polygon_count: usize,
+    native_cubic_bezier_count: usize,
+    graph_owned_point_count: usize,
+    prepared_boundary_debug_point_count: usize,
+    enqueued_shape_count: usize,
+    preview_drawn_item_count: usize,
+    preview_segments_per_cubic: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum HoudiniPreviewMode {
+    #[default]
+    DetailedNativeCubic,
+    RendererNativeLines,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum HoudiniRendererPath {
+    #[default]
+    EguiPainterShapes,
+    RendererLineDrawData,
+}
+
+impl HoudiniRendererPath {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::EguiPainterShapes => "egui painter fallback",
+            Self::RendererLineDrawData => "renderer line draw data",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum HoudiniCubicEvaluationPlacement {
+    #[default]
+    NativeEguiCubicShape,
+    CpuBoundaryLineStrips,
+    #[allow(dead_code)]
+    ShaderSideDeferred,
+}
+
+impl HoudiniCubicEvaluationPlacement {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeEguiCubicShape => "egui native cubic shape",
+            Self::CpuBoundaryLineStrips => "CPU boundary line strips",
+            Self::ShaderSideDeferred => "shader-side cubic evaluation deferred",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HoudiniRendererPlan {
+    preview_mode: HoudiniPreviewMode,
+    renderer_path: HoudiniRendererPath,
+    cubic_evaluation: HoudiniCubicEvaluationPlacement,
+    fallback_path: HoudiniRendererPath,
+    target_draw_data_shape: &'static str,
+}
+
+impl HoudiniRendererPlan {
+    fn for_scene(scene: &RerunSceneOutput) -> Self {
+        let preview_mode = preview_mode_for_scene(scene);
+        match preview_mode {
+            HoudiniPreviewMode::DetailedNativeCubic => Self {
+                preview_mode,
+                renderer_path: HoudiniRendererPath::EguiPainterShapes,
+                cubic_evaluation: HoudiniCubicEvaluationPlacement::NativeEguiCubicShape,
+                fallback_path: HoudiniRendererPath::EguiPainterShapes,
+                target_draw_data_shape: "egui convex polygon and native cubic shapes",
+            },
+            HoudiniPreviewMode::RendererNativeLines => Self {
+                preview_mode,
+                renderer_path: HoudiniRendererPath::RendererLineDrawData,
+                cubic_evaluation: HoudiniCubicEvaluationPlacement::CpuBoundaryLineStrips,
+                fallback_path: HoudiniRendererPath::EguiPainterShapes,
+                target_draw_data_shape: "batched 2D line strips: closed polygon rings plus CPU-sampled cubic previews",
+            },
+        }
+    }
+}
+
+impl HoudiniPreviewMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DetailedNativeCubic => "detailed native cubic",
+            Self::RendererNativeLines => "renderer-native line preview",
+        }
+    }
+}
 
 impl ViewState for HoudiniGraphViewState {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -31,7 +196,472 @@ impl ViewState for HoudiniGraphViewState {
     }
 
     fn heap_size_bytes(&self) -> u64 {
-        0
+        std::mem::size_of_val(self) as u64
+    }
+}
+
+#[derive(Default)]
+struct HoudiniGraphSourceVisualizer;
+
+impl IdentifiedViewSystem for HoudiniGraphSourceVisualizer {
+    fn identifier() -> ViewSystemIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewSystemIdentifier,
+            "HoudiniGraphSource"
+        )
+    }
+}
+
+impl VisualizerSystem for HoudiniGraphSourceVisualizer {
+    fn visualizer_query_info(
+        &self,
+        _app_options: &re_viewer_context::AppOptions,
+    ) -> VisualizerQueryInfo {
+        VisualizerQueryInfo::empty()
+    }
+
+    fn execute(
+        &self,
+        _ctx: &ViewContext<'_>,
+        _query: &ViewQuery<'_>,
+        _context_systems: &ViewContextCollection,
+    ) -> Result<VisualizerExecutionOutput, ViewSystemExecutionError> {
+        Ok(VisualizerExecutionOutput::default())
+    }
+}
+
+impl ViewClass for HoudiniNetworkView {
+    fn identifier() -> ViewClassIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewClassIdentifier,
+            "HoudiniNetwork"
+        )
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Network"
+    }
+
+    fn default_spawned_display_name(&self) -> Option<&'static str> {
+        Some("Network")
+    }
+
+    fn is_experimental(&self) -> bool {
+        true
+    }
+
+    fn icon(&self) -> &'static re_ui::Icon {
+        &icons::VIEW_GRAPH
+    }
+
+    fn help(&self, _os: egui::os::OperatingSystem) -> Help {
+        Help::new("Houdini network")
+            .markdown("Node network editor for the product-fork Houdini graph.")
+    }
+
+    fn on_register(
+        &self,
+        _system_registry: &mut ViewSystemRegistrator<'_>,
+    ) -> Result<(), ViewClassRegistryError> {
+        Ok(())
+    }
+
+    fn new_state(&self) -> Box<dyn ViewState> {
+        Box::<HoudiniPanelViewState>::default()
+    }
+
+    fn preferred_tile_aspect_ratio(&self, _state: &dyn ViewState) -> Option<f32> {
+        Some(16.0 / 10.0)
+    }
+
+    fn layout_priority(&self) -> ViewClassLayoutPriority {
+        ViewClassLayoutPriority::Medium
+    }
+
+    fn spawn_heuristics(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _include_entity: &dyn Fn(&EntityPath) -> bool,
+    ) -> ViewSpawnHeuristics {
+        ViewSpawnHeuristics::root().with_max_views_spawned(1)
+    }
+
+    fn selection_ui(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _space_origin: &EntityPath,
+        _view_id: re_viewer_context::ViewId,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        ui.label("Blueprint view for the shared Houdini node network.");
+        Ok(())
+    }
+
+    fn ui(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _query: &ViewQuery<'_>,
+        _system_output: SystemExecutionOutput,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        show_houdini_panel_view(ui, |panel, ui, graph| {
+            panel.show_network_view(ui, graph);
+        });
+        Ok(())
+    }
+}
+
+macro_rules! houdini_workbench_view_class {
+    ($type:ty, $identifier:literal, $display_name:literal, $help:literal, $render_method:ident) => {
+        impl ViewClass for $type {
+            fn identifier() -> ViewClassIdentifier {
+                re_viewer_context::external::re_string_interner::intern_static!(
+                    ViewClassIdentifier,
+                    $identifier
+                )
+            }
+
+            fn display_name(&self) -> &'static str {
+                $display_name
+            }
+
+            fn default_spawned_display_name(&self) -> Option<&'static str> {
+                Some($display_name)
+            }
+
+            fn default_spawned_tab_group(&self) -> Option<&'static str> {
+                Some("Inspector")
+            }
+
+            fn is_experimental(&self) -> bool {
+                true
+            }
+
+            fn icon(&self) -> &'static re_ui::Icon {
+                &icons::VIEW_GENERIC
+            }
+
+            fn help(&self, _os: egui::os::OperatingSystem) -> Help {
+                Help::new($display_name).markdown($help)
+            }
+
+            fn on_register(
+                &self,
+                _system_registry: &mut ViewSystemRegistrator<'_>,
+            ) -> Result<(), ViewClassRegistryError> {
+                Ok(())
+            }
+
+            fn new_state(&self) -> Box<dyn ViewState> {
+                Box::<HoudiniPanelViewState>::default()
+            }
+
+            fn preferred_tile_aspect_ratio(&self, _state: &dyn ViewState) -> Option<f32> {
+                Some(4.0 / 5.0)
+            }
+
+            fn layout_priority(&self) -> ViewClassLayoutPriority {
+                ViewClassLayoutPriority::Medium
+            }
+
+            fn spawn_heuristics(
+                &self,
+                _ctx: &ViewerContext<'_>,
+                _include_entity: &dyn Fn(&EntityPath) -> bool,
+            ) -> ViewSpawnHeuristics {
+                ViewSpawnHeuristics::root().with_max_views_spawned(1)
+            }
+
+            fn ui(
+                &self,
+                _ctx: &ViewerContext<'_>,
+                _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
+                ui: &mut egui::Ui,
+                state: &mut dyn ViewState,
+                _query: &ViewQuery<'_>,
+                _system_output: SystemExecutionOutput,
+            ) -> Result<(), ViewSystemExecutionError> {
+                state.downcast_ref::<HoudiniPanelViewState>()?;
+                show_houdini_panel_view(ui, |panel, ui, graph| {
+                    panel.$render_method(ui, graph);
+                });
+                Ok(())
+            }
+        }
+    };
+}
+
+houdini_workbench_view_class!(
+    HoudiniParametersView,
+    "HoudiniParameters",
+    "Parameters",
+    "Parameters for the selected Houdini graph node.",
+    show_parameters_view
+);
+houdini_workbench_view_class!(
+    HoudiniInfoView,
+    "HoudiniInfo",
+    "Info",
+    "Node information and pipeline trace for the shared Houdini graph.",
+    show_info_view
+);
+houdini_workbench_view_class!(
+    HoudiniDisplayView,
+    "HoudiniDisplay",
+    "Display",
+    "Network display controls for the shared Houdini graph.",
+    show_display_view
+);
+houdini_workbench_view_class!(
+    HoudiniOperatorsView,
+    "HoudiniOperators",
+    "Operators",
+    "Operator palette and organization tools for the shared Houdini graph.",
+    show_operators_view
+);
+houdini_workbench_view_class!(
+    HoudiniFindView,
+    "HoudiniFind",
+    "Find",
+    "Search controls for the shared Houdini graph.",
+    show_find_view
+);
+houdini_workbench_view_class!(
+    HoudiniLayersView,
+    "HoudiniLayers",
+    "Layers",
+    "Layer visibility and output ordering for the shared Houdini graph.",
+    show_layers_view
+);
+
+impl ViewClass for HoudiniDataView {
+    fn identifier() -> ViewClassIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewClassIdentifier,
+            "HoudiniData"
+        )
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Data"
+    }
+
+    fn default_spawned_display_name(&self) -> Option<&'static str> {
+        Some("Data")
+    }
+
+    fn is_experimental(&self) -> bool {
+        true
+    }
+
+    fn help(&self, _os: egui::os::OperatingSystem) -> Help {
+        Help::new("Houdini data")
+            .markdown("Attribute table and source summary for the shared Houdini graph.")
+    }
+
+    fn on_register(
+        &self,
+        _system_registry: &mut ViewSystemRegistrator<'_>,
+    ) -> Result<(), ViewClassRegistryError> {
+        Ok(())
+    }
+
+    fn new_state(&self) -> Box<dyn ViewState> {
+        Box::<HoudiniPanelViewState>::default()
+    }
+
+    fn layout_priority(&self) -> ViewClassLayoutPriority {
+        ViewClassLayoutPriority::Low
+    }
+
+    fn spawn_heuristics(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _include_entity: &dyn Fn(&EntityPath) -> bool,
+    ) -> ViewSpawnHeuristics {
+        ViewSpawnHeuristics::empty().with_max_views_spawned(1)
+    }
+
+    fn ui(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _query: &ViewQuery<'_>,
+        _system_output: SystemExecutionOutput,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        show_houdini_panel_view(ui, |panel, ui, graph| {
+            panel.show_data_view(ui, graph);
+        });
+        Ok(())
+    }
+}
+
+impl ViewClass for HoudiniOutputsView {
+    fn identifier() -> ViewClassIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewClassIdentifier,
+            "HoudiniOutputs"
+        )
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Outputs"
+    }
+
+    fn default_spawned_display_name(&self) -> Option<&'static str> {
+        Some("Outputs")
+    }
+
+    fn is_experimental(&self) -> bool {
+        true
+    }
+
+    fn help(&self, _os: egui::os::OperatingSystem) -> Help {
+        Help::new("Houdini outputs")
+            .markdown("Output summary, recording export, and render benchmark controls for the shared Houdini graph.")
+    }
+
+    fn on_register(
+        &self,
+        _system_registry: &mut ViewSystemRegistrator<'_>,
+    ) -> Result<(), ViewClassRegistryError> {
+        Ok(())
+    }
+
+    fn new_state(&self) -> Box<dyn ViewState> {
+        Box::<HoudiniPanelViewState>::default()
+    }
+
+    fn layout_priority(&self) -> ViewClassLayoutPriority {
+        ViewClassLayoutPriority::Low
+    }
+
+    fn spawn_heuristics(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _include_entity: &dyn Fn(&EntityPath) -> bool,
+    ) -> ViewSpawnHeuristics {
+        ViewSpawnHeuristics::empty().with_max_views_spawned(1)
+    }
+
+    fn ui(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _query: &ViewQuery<'_>,
+        _system_output: SystemExecutionOutput,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        show_houdini_panel_view(ui, |panel, ui, graph| {
+            panel.show_outputs_view(ui, graph);
+        });
+        Ok(())
+    }
+}
+
+impl ViewClass for HoudiniProjectView {
+    fn identifier() -> ViewClassIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewClassIdentifier,
+            "HoudiniProject"
+        )
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Project"
+    }
+
+    fn default_spawned_display_name(&self) -> Option<&'static str> {
+        Some("Project")
+    }
+
+    fn is_experimental(&self) -> bool {
+        true
+    }
+
+    fn help(&self, _os: egui::os::OperatingSystem) -> Help {
+        Help::new("Houdini project")
+            .markdown("Project-local graph document, Python environment, and asset controls.")
+    }
+
+    fn on_register(
+        &self,
+        _system_registry: &mut ViewSystemRegistrator<'_>,
+    ) -> Result<(), ViewClassRegistryError> {
+        Ok(())
+    }
+
+    fn new_state(&self) -> Box<dyn ViewState> {
+        Box::<HoudiniPanelViewState>::default()
+    }
+
+    fn layout_priority(&self) -> ViewClassLayoutPriority {
+        ViewClassLayoutPriority::Low
+    }
+
+    fn spawn_heuristics(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _include_entity: &dyn Fn(&EntityPath) -> bool,
+    ) -> ViewSpawnHeuristics {
+        ViewSpawnHeuristics::empty().with_max_views_spawned(1)
+    }
+
+    fn ui(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _query: &ViewQuery<'_>,
+        _system_output: SystemExecutionOutput,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        show_houdini_panel_view(ui, |panel, ui, graph| {
+            panel.show_project_view(ui, graph);
+        });
+        Ok(())
+    }
+}
+
+fn show_houdini_panel_view(
+    ui: &mut egui::Ui,
+    render: impl FnOnce(
+        &mut crate::ui::HoudiniGraphPanel,
+        &mut egui::Ui,
+        &crate::ui::SharedHoudiniGraph,
+    ),
+) {
+    match (
+        shared_houdini_graph_from_context(ui.ctx()),
+        shared_houdini_graph_panel_from_context(ui.ctx()),
+    ) {
+        (Some(shared_graph), Some(shared_panel)) => {
+            let mut panel = lock_houdini_graph_panel(&shared_panel);
+            render(&mut panel, ui, &shared_graph);
+        }
+        _ => {
+            let rect = ui.max_rect();
+            ui.painter()
+                .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "Houdini graph state is not installed for this frame.",
+                FontId::proportional(13.0),
+                ui.visuals().weak_text_color(),
+            );
+        }
     }
 }
 
@@ -45,6 +675,10 @@ impl ViewClass for HoudiniGraphView {
 
     fn display_name(&self) -> &'static str {
         "Houdini Graph"
+    }
+
+    fn default_spawned_display_name(&self) -> Option<&'static str> {
+        Some("Houdini Graph")
     }
 
     fn is_experimental(&self) -> bool {
@@ -62,9 +696,9 @@ impl ViewClass for HoudiniGraphView {
 
     fn on_register(
         &self,
-        _system_registry: &mut ViewSystemRegistrator<'_>,
+        system_registry: &mut ViewSystemRegistrator<'_>,
     ) -> Result<(), ViewClassRegistryError> {
-        Ok(())
+        system_registry.register_visualizer::<HoudiniGraphSourceVisualizer>()
     }
 
     fn new_state(&self) -> Box<dyn ViewState> {
@@ -85,6 +719,22 @@ impl ViewClass for HoudiniGraphView {
         _include_entity: &dyn Fn(&EntityPath) -> bool,
     ) -> ViewSpawnHeuristics {
         ViewSpawnHeuristics::root().with_max_views_spawned(1)
+    }
+
+    fn recommended_visualizers_for_entity(
+        &self,
+        _entity_path: &EntityPath,
+        visualizers_with_reason: &[(ViewSystemIdentifier, &VisualizableReason)],
+        _indicated_entities_per_visualizer: &PerVisualizerType<&IndicatedEntities>,
+    ) -> RecommendedVisualizers {
+        if visualizers_with_reason
+            .iter()
+            .any(|(visualizer, _reason)| *visualizer == HoudiniGraphSourceVisualizer::identifier())
+        {
+            RecommendedVisualizers::default(HoudiniGraphSourceVisualizer::identifier())
+        } else {
+            RecommendedVisualizers::empty()
+        }
     }
 
     fn selection_ui(
@@ -108,6 +758,47 @@ impl ViewClass for HoudiniGraphView {
                 "{} adaptive export segments at the current output boundary",
                 graph.export_segments()
             ));
+            if let Some(stats) = state
+                .downcast_ref::<HoudiniGraphViewState>()?
+                .last_frame_stats
+            {
+                ui.label(format!(
+                    "Last frame: {} items ({} polygons, {} native cubics), prepare {:.2} ms, draw total {:.2} ms",
+                    stats.item_count,
+                    stats.polygon_count,
+                    stats.native_cubic_bezier_count,
+                    stats.scene_prepare_micros as f32 / 1_000.0,
+                    stats.draw_total_micros as f32 / 1_000.0
+                ));
+                ui.label(format!(
+                    "{} via {}, cubic eval: {}, fallback {}, {} egui/strip items, {} drawn items, {} preview segments",
+                    stats.preview_mode.as_str(),
+                    stats.renderer_path.as_str(),
+                    stats.cubic_evaluation.as_str(),
+                    stats.fallback_path.as_str(),
+                    stats.enqueued_shape_count,
+                    stats.preview_drawn_item_count,
+                    stats.preview_segments_per_cubic
+                ));
+                ui.label(format!("Draw data: {}", stats.target_draw_data_shape));
+                ui.label(format!(
+                    "Cost split: boundary expand {:.2} ms, draw-data build {:.2} ms, renderer callback {:.2} ms; {} graph-owned points, {} boundary/debug points",
+                    stats.boundary_expand_micros as f32 / 1_000.0,
+                    stats.draw_data_build_micros as f32 / 1_000.0,
+                    stats.renderer_callback_micros as f32 / 1_000.0,
+                    stats.graph_owned_point_count,
+                    stats.prepared_boundary_debug_point_count
+                ));
+            }
+            if let Some(item_index) = state
+                .downcast_ref::<HoudiniGraphViewState>()?
+                .selected_item_index
+            {
+                let scene = graph.rerun_scene_output_for_view(None, false);
+                if let Some(item) = scene.items.get(item_index) {
+                    ui.label(selected_item_summary(item));
+                }
+            }
         } else {
             ui.weak("Houdini graph state is not installed for this frame.");
         }
@@ -123,7 +814,7 @@ impl ViewClass for HoudiniGraphView {
         query: &ViewQuery<'_>,
         _system_output: SystemExecutionOutput,
     ) -> Result<(), ViewSystemExecutionError> {
-        state.downcast_mut::<HoudiniGraphViewState>()?;
+        let state = state.downcast_mut::<HoudiniGraphViewState>()?;
         let rect = ui.max_rect();
         let response = ui.allocate_rect(rect, Sense::click());
 
@@ -131,15 +822,40 @@ impl ViewClass for HoudiniGraphView {
             ctx.selection_state().set_hovered(Item::View(query.view_id));
         }
 
-        if response.clicked() {
-            ctx.command_sender()
-                .send_system(SystemCommand::set_selection(Item::View(query.view_id)));
-        }
-
         if let Some(shared_graph) = shared_houdini_graph_from_context(ui.ctx()) {
-            let graph = lock_houdini_graph(&shared_graph);
-            draw_houdini_output_view(ui, rect, &graph);
+            let query_bridge = query_bridge_from_view_query(ctx, query);
+            let mut graph = lock_houdini_graph(&shared_graph);
+            let scene_prepare_start = Instant::now();
+            graph.update_source_from_query_bridge(&query_bridge);
+            let include_debug_items = graph.layer_visible(LayerKind::Debug);
+            let scene = graph.rerun_scene_output_for_view(Some(query_bridge), include_debug_items);
+            let scene_prepare_micros = scene_prepare_start.elapsed().as_micros();
+            let view_transform =
+                HoudiniViewTransform::from_scene(&scene, rect.shrink2(egui::vec2(24.0, 22.0)));
+
+            if response.clicked() {
+                state.selected_item_index = response
+                    .interact_pointer_pos()
+                    .and_then(|pointer_pos| hit_test_scene(&scene, view_transform, pointer_pos));
+                ctx.command_sender()
+                    .send_system(SystemCommand::set_selection(Item::View(query.view_id)));
+            }
+
+            state.last_frame_stats = Some(draw_houdini_output_view(
+                ctx,
+                ui,
+                rect,
+                &graph,
+                scene,
+                view_transform,
+                state.selected_item_index,
+                scene_prepare_micros,
+            ));
         } else {
+            if response.clicked() {
+                ctx.command_sender()
+                    .send_system(SystemCommand::set_selection(Item::View(query.view_id)));
+            }
             ui.painter()
                 .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
             ui.painter().text(
@@ -154,12 +870,52 @@ impl ViewClass for HoudiniGraphView {
     }
 }
 
-fn draw_houdini_output_view(ui: &mut egui::Ui, rect: Rect, graph: &GraphDocument) {
-    let scene = graph.rerun_scene_output();
+fn query_bridge_from_view_query(
+    ctx: &ViewerContext<'_>,
+    query: &ViewQuery<'_>,
+) -> RerunQueryBridge {
+    let query_result = ctx.lookup_query_result(query.view_id);
+    let visible_data_result_count = query_result
+        .tree
+        .iter_data_results()
+        .filter(|data_result| data_result.visible && !data_result.tree_prefix_only)
+        .count();
+
+    RerunQueryBridge {
+        mode: RerunQueryBridgeMode::ProductForkViewOwned,
+        view_id: query.view_id.to_string(),
+        space_origin: query.space_origin.to_string(),
+        timeline: query.timeline.to_string(),
+        latest_at: query.latest_at.as_i64(),
+        matching_entity_count: query_result.num_matching_entities,
+        visualized_entity_count: query_result.num_visualized_entities,
+        visible_data_result_count,
+    }
+}
+
+fn draw_houdini_output_view(
+    ctx: &ViewerContext<'_>,
+    ui: &mut egui::Ui,
+    rect: Rect,
+    graph: &GraphDocument,
+    scene: RerunSceneOutput,
+    view_transform: HoudiniViewTransform,
+    selected_item_index: Option<usize>,
+    scene_prepare_micros: u128,
+) -> HoudiniFrameStats {
+    let draw_start = Instant::now();
+    let item_count = scene.items.len();
+    let polygon_count = scene.polygon_count();
+    let native_cubic_bezier_count = scene.native_cubic_bezier_count();
+    let graph_owned_point_count = scene.graph_owned_point_count();
+    let prepared_boundary_debug_point_count = scene.prepared_boundary_debug_point_count();
+    let renderer_plan = HoudiniRendererPlan::for_scene(&scene);
+    let preview_mode = renderer_plan.preview_mode;
+
     ui.painter()
         .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
 
-    let viewport = rect.shrink2(egui::vec2(24.0, 22.0));
+    let viewport = view_transform.viewport;
     ui.painter().rect_stroke(
         viewport,
         4.0,
@@ -168,34 +924,17 @@ fn draw_houdini_output_view(ui: &mut egui::Ui, rect: Rect, graph: &GraphDocument
     );
 
     if graph.layer_visible(LayerKind::Debug) {
-        draw_debug_boundary(ui, viewport, &scene);
+        draw_debug_boundary(ui, view_transform, &scene);
     }
 
-    for geometry in &scene.items {
-        match geometry {
-            RerunSceneItem::Polygon { points } => {
-                let points = points
-                    .iter()
-                    .map(|point| map_view_point(viewport, *point))
-                    .collect::<Vec<_>>();
-                ui.painter().add(egui::Shape::convex_polygon(
-                    points.clone(),
-                    Color32::from_rgba_unmultiplied(38, 125, 255, 50),
-                    Stroke::new(
-                        1.0 + 3.0 * scene.stroke_scale,
-                        Color32::from_rgb(91, 169, 255),
-                    ),
-                ));
-                for point in points {
-                    ui.painter()
-                        .circle_filled(point, 3.5, Color32::from_rgb(131, 192, 255));
-                }
-            }
-            RerunSceneItem::NativeCubicBezier(curve) => {
-                draw_native_cubic(ui, viewport, *curve, scene.stroke_scale);
-            }
-        }
-    }
+    let draw_summary = draw_scene_items(
+        ctx,
+        ui,
+        &scene,
+        view_transform,
+        selected_item_index,
+        preview_mode,
+    );
 
     ui.painter().text(
         rect.left_top() + egui::vec2(14.0, 12.0),
@@ -208,33 +947,589 @@ fn draw_houdini_output_view(ui: &mut egui::Ui, rect: Rect, graph: &GraphDocument
         rect.left_top() + egui::vec2(14.0, 32.0),
         Align2::LEFT_TOP,
         format!(
-            "{} emitted, {} export segments per cubic",
-            scene.items.len(),
-            scene.export_segments
+            "{} emitted, {} export segments per cubic, stroke {:.2}, opacity {:.2}",
+            item_count, scene.export_segments, scene.stroke_scale, scene.style.opacity
         ),
         FontId::monospace(11.0),
         ui.visuals().weak_text_color(),
     );
+    if let Some(query_bridge) = &scene.query_bridge {
+        ui.painter().text(
+            rect.left_top() + egui::vec2(14.0, 50.0),
+            Align2::LEFT_TOP,
+            format!(
+                "{}: {} visible query results at {}={}",
+                query_bridge.mode.as_str(),
+                query_bridge.visible_data_result_count,
+                query_bridge.timeline,
+                query_bridge.latest_at
+            ),
+            FontId::monospace(11.0),
+            ui.visuals().weak_text_color(),
+        );
+    }
+    if let Some(item) = selected_item_index.and_then(|item_index| scene.items.get(item_index)) {
+        ui.painter().text(
+            rect.left_top() + egui::vec2(14.0, 68.0),
+            Align2::LEFT_TOP,
+            selected_item_summary(item),
+            FontId::monospace(11.0),
+            ui.visuals().text_color(),
+        );
+    }
+    let stats_line_y = if selected_item_index.is_some() {
+        86.0
+    } else {
+        68.0
+    };
+    ui.painter().text(
+        rect.left_top() + egui::vec2(14.0, stats_line_y),
+        Align2::LEFT_TOP,
+        format!(
+            "native benchmark: {} graph points, {} boundary/debug points, prepare {:.2} ms, draw {:.2} ms",
+            graph_owned_point_count,
+            prepared_boundary_debug_point_count,
+            scene_prepare_micros as f32 / 1_000.0,
+            draw_start.elapsed().as_micros() as f32 / 1_000.0
+        ),
+        FontId::monospace(11.0),
+        ui.visuals().weak_text_color(),
+    );
+    ui.painter().text(
+        rect.left_top() + egui::vec2(14.0, stats_line_y + 18.0),
+        Align2::LEFT_TOP,
+        format!(
+            "{} via {}: {} egui/strip items, {} drawn items, {} preview segments per cubic",
+            preview_mode.as_str(),
+            renderer_plan.renderer_path.as_str(),
+            draw_summary.enqueued_shape_count,
+            draw_summary.preview_drawn_item_count,
+            draw_summary.preview_segments_per_cubic
+        ),
+        FontId::monospace(11.0),
+        ui.visuals().weak_text_color(),
+    );
+
+    HoudiniFrameStats {
+        scene_prepare_micros,
+        draw_total_micros: draw_start.elapsed().as_micros(),
+        boundary_expand_micros: draw_summary.boundary_expand_micros,
+        draw_data_build_micros: draw_summary.draw_data_build_micros,
+        renderer_callback_micros: draw_summary.renderer_callback_micros,
+        preview_mode,
+        renderer_path: renderer_plan.renderer_path,
+        cubic_evaluation: renderer_plan.cubic_evaluation,
+        fallback_path: renderer_plan.fallback_path,
+        target_draw_data_shape: renderer_plan.target_draw_data_shape,
+        item_count,
+        polygon_count,
+        native_cubic_bezier_count,
+        graph_owned_point_count,
+        prepared_boundary_debug_point_count,
+        enqueued_shape_count: draw_summary.enqueued_shape_count,
+        preview_drawn_item_count: draw_summary.preview_drawn_item_count,
+        preview_segments_per_cubic: draw_summary.preview_segments_per_cubic,
+    }
 }
 
-fn draw_native_cubic(ui: &mut egui::Ui, viewport: Rect, curve: CubicBezier, stroke_scale: f32) {
+struct HoudiniDrawSummary {
+    enqueued_shape_count: usize,
+    preview_drawn_item_count: usize,
+    preview_segments_per_cubic: usize,
+    boundary_expand_micros: u128,
+    draw_data_build_micros: u128,
+    renderer_callback_micros: u128,
+}
+
+fn draw_scene_items(
+    ctx: &ViewerContext<'_>,
+    ui: &mut egui::Ui,
+    scene: &RerunSceneOutput,
+    view_transform: HoudiniViewTransform,
+    selected_item_index: Option<usize>,
+    preview_mode: HoudiniPreviewMode,
+) -> HoudiniDrawSummary {
+    match preview_mode {
+        HoudiniPreviewMode::DetailedNativeCubic => {
+            draw_detailed_scene_items(ui, scene, view_transform, selected_item_index)
+        }
+        HoudiniPreviewMode::RendererNativeLines => {
+            draw_renderer_native_scene_items(ctx, ui, scene, view_transform, selected_item_index)
+                .unwrap_or_else(|err| {
+                    re_log::warn_once!("Failed to draw Houdini renderer-native preview: {err}");
+                    draw_fast_scene_items(ui, scene, view_transform, selected_item_index)
+                })
+        }
+    }
+}
+
+fn draw_detailed_scene_items(
+    ui: &mut egui::Ui,
+    scene: &RerunSceneOutput,
+    view_transform: HoudiniViewTransform,
+    selected_item_index: Option<usize>,
+) -> HoudiniDrawSummary {
+    let draw_start = Instant::now();
+    let mut enqueued_shape_count = 0;
+
+    for (item_index, geometry) in scene.items.iter().enumerate() {
+        let selected = selected_item_index == Some(item_index);
+        match geometry {
+            RerunSceneItem::Polygon { points, style, .. } => {
+                let points = points
+                    .iter()
+                    .map(|point| view_transform.map_point(*point))
+                    .collect::<Vec<_>>();
+                ui.painter().add(egui::Shape::convex_polygon(
+                    points.clone(),
+                    style_color(*style, 0.45),
+                    Stroke::new(
+                        1.0 + 3.0 * style.stroke_scale + selected_stroke_boost(selected),
+                        style_color(*style, 1.0),
+                    ),
+                ));
+                enqueued_shape_count += 1;
+                for point in points {
+                    ui.painter()
+                        .circle_filled(point, 3.5, style_color(*style, 1.0));
+                    enqueued_shape_count += 1;
+                }
+            }
+            RerunSceneItem::NativeCubicBezier { curve, style, .. } => {
+                draw_native_cubic(ui, view_transform, *curve, *style, selected);
+                enqueued_shape_count += 1 + curve.control_points().len();
+            }
+        }
+    }
+
+    HoudiniDrawSummary {
+        enqueued_shape_count,
+        preview_drawn_item_count: scene.items.len(),
+        preview_segments_per_cubic: 0,
+        boundary_expand_micros: 0,
+        draw_data_build_micros: draw_start.elapsed().as_micros(),
+        renderer_callback_micros: 0,
+    }
+}
+
+fn draw_fast_scene_items(
+    ui: &mut egui::Ui,
+    scene: &RerunSceneOutput,
+    view_transform: HoudiniViewTransform,
+    selected_item_index: Option<usize>,
+) -> HoudiniDrawSummary {
+    let boundary_expand_start = Instant::now();
+    let preview_segments_per_cubic = fast_preview_segments_per_cubic(scene);
+    let preview_stride = fast_preview_item_stride(scene);
+    let selected_item = selected_item_index.unwrap_or(usize::MAX);
+    let mut shapes = Vec::with_capacity(scene.items.len().div_ceil(preview_stride));
+
+    for (item_index, geometry) in scene.items.iter().enumerate() {
+        if item_index != selected_item && item_index % preview_stride != 0 {
+            continue;
+        }
+
+        let selected = selected_item_index == Some(item_index);
+        match geometry {
+            RerunSceneItem::Polygon { points, style, .. } => {
+                let points = points
+                    .iter()
+                    .map(|point| view_transform.map_point(*point))
+                    .collect::<Vec<_>>();
+                shapes.push(egui::Shape::convex_polygon(
+                    points,
+                    style_color(*style, 0.38),
+                    Stroke::new(
+                        1.0 + 2.0 * style.stroke_scale + selected_stroke_boost(selected),
+                        style_color(*style, 0.9),
+                    ),
+                ));
+            }
+            RerunSceneItem::NativeCubicBezier { curve, style, .. } => {
+                shapes.push(egui::Shape::line(
+                    sampled_cubic_view_points(*curve, view_transform, preview_segments_per_cubic),
+                    Stroke::new(
+                        1.0 + 2.0 * style.stroke_scale + selected_stroke_boost(selected),
+                        style_color(*style, 0.9),
+                    ),
+                ));
+            }
+        }
+    }
+
+    let enqueued_shape_count = shapes.len();
+    let boundary_expand_micros = boundary_expand_start.elapsed().as_micros();
+    let draw_data_start = Instant::now();
+    ui.painter().extend(shapes);
+    let draw_data_build_micros = draw_data_start.elapsed().as_micros();
+
+    HoudiniDrawSummary {
+        enqueued_shape_count,
+        preview_drawn_item_count: enqueued_shape_count,
+        preview_segments_per_cubic,
+        boundary_expand_micros,
+        draw_data_build_micros,
+        renderer_callback_micros: 0,
+    }
+}
+
+fn draw_renderer_native_scene_items(
+    ctx: &ViewerContext<'_>,
+    ui: &mut egui::Ui,
+    scene: &RerunSceneOutput,
+    view_transform: HoudiniViewTransform,
+    selected_item_index: Option<usize>,
+) -> anyhow::Result<HoudiniDrawSummary> {
+    let preview_segments_per_cubic = renderer_preview_segments_per_cubic(scene);
+    let preview_stride = renderer_preview_item_stride(scene);
+    let selected_item = selected_item_index.unwrap_or(usize::MAX);
+    let resolution_in_pixel = viewport_resolution_in_pixels(view_transform.viewport, ui);
+    if resolution_in_pixel[0] == 0 || resolution_in_pixel[1] == 0 {
+        return Ok(HoudiniDrawSummary {
+            enqueued_shape_count: 0,
+            preview_drawn_item_count: 0,
+            preview_segments_per_cubic,
+            boundary_expand_micros: 0,
+            draw_data_build_micros: 0,
+            renderer_callback_micros: 0,
+        });
+    }
+
+    let boundary_expand_start = Instant::now();
+    let mut line_builder = LineDrawableBuilder::new(ctx.render_ctx());
+    line_builder.enable_alpha_blending();
+    line_builder.reserve_strips(scene.items.len().div_ceil(preview_stride))?;
+
+    let mut preview_drawn_item_count = 0;
+    {
+        let mut batch = line_builder.batch("houdini_graph_renderer_preview");
+        for (item_index, geometry) in scene.items.iter().enumerate() {
+            if item_index != selected_item && item_index % preview_stride != 0 {
+                continue;
+            }
+
+            let selected = selected_item_index == Some(item_index);
+            match geometry {
+                RerunSceneItem::Polygon { points, style, .. } => {
+                    let closed_points = renderer_polygon_points(points, view_transform);
+                    batch
+                        .add_strip_2d(closed_points.into_iter())
+                        .color(style_color(*style, 0.9))
+                        .radius(renderer_line_radius(*style, selected));
+                    preview_drawn_item_count += 1;
+                }
+                RerunSceneItem::NativeCubicBezier { curve, style, .. } => {
+                    let points =
+                        renderer_cubic_points(*curve, view_transform, preview_segments_per_cubic);
+                    batch
+                        .add_strip_2d(points.into_iter())
+                        .color(style_color(*style, 0.9))
+                        .radius(renderer_line_radius(*style, selected));
+                    preview_drawn_item_count += 1;
+                }
+            }
+        }
+    }
+    let boundary_expand_micros = boundary_expand_start.elapsed().as_micros();
+
+    let enqueued_shape_count = preview_drawn_item_count;
+    let draw_data_start = Instant::now();
+    let target_config = TargetConfiguration {
+        name: "Houdini Graph renderer preview".into(),
+        render_mode: ctx.render_mode(),
+        resolution_in_pixel,
+        view_from_world: Default::default(),
+        projection_from_view: Projection::Orthographic {
+            camera_mode: OrthographicCameraMode::TopLeftCornerAndExtendZ,
+            vertical_world_size: view_transform.viewport.height(),
+            far_plane_distance: 1000.0,
+        },
+        viewport_transformation: re_renderer::RectTransform::IDENTITY,
+        pixels_per_point: ui.pixels_per_point(),
+        blend_with_background: re_renderer::BlendWithBackground::Premultiplied,
+        picking_config: None,
+        outline_config: None,
+    };
+    let mut view_builder = ViewBuilder::new(ctx.render_ctx(), target_config)?;
+    view_builder.queue_draw(ctx.render_ctx(), line_builder.into_draw_data()?);
+    let draw_data_build_micros = draw_data_start.elapsed().as_micros();
+    let renderer_callback_start = Instant::now();
+    ui.painter().add(gpu_bridge::new_renderer_callback(
+        view_builder,
+        view_transform.viewport,
+        re_renderer::Rgba::TRANSPARENT,
+    ));
+    let renderer_callback_micros = renderer_callback_start.elapsed().as_micros();
+
+    Ok(HoudiniDrawSummary {
+        enqueued_shape_count,
+        preview_drawn_item_count,
+        preview_segments_per_cubic,
+        boundary_expand_micros,
+        draw_data_build_micros,
+        renderer_callback_micros,
+    })
+}
+
+fn preview_mode_for_scene(scene: &RerunSceneOutput) -> HoudiniPreviewMode {
+    const RENDERER_NATIVE_NATIVE_CUBIC_THRESHOLD: usize = 5_000;
+    const RENDERER_NATIVE_POLYGON_THRESHOLD: usize = 10_000;
+    const RENDERER_NATIVE_TOTAL_ITEM_THRESHOLD: usize = 50_000;
+
+    if scene.native_cubic_bezier_count() >= RENDERER_NATIVE_NATIVE_CUBIC_THRESHOLD
+        || scene.polygon_count() >= RENDERER_NATIVE_POLYGON_THRESHOLD
+        || scene.items.len() >= RENDERER_NATIVE_TOTAL_ITEM_THRESHOLD
+    {
+        HoudiniPreviewMode::RendererNativeLines
+    } else {
+        HoudiniPreviewMode::DetailedNativeCubic
+    }
+}
+
+fn fast_preview_segments_per_cubic(scene: &RerunSceneOutput) -> usize {
+    match scene.native_cubic_bezier_count() {
+        0..=9_999 => 6,
+        10_000..=49_999 => 4,
+        _ => 2,
+    }
+}
+
+fn fast_preview_item_stride(scene: &RerunSceneOutput) -> usize {
+    const TARGET_FAST_PREVIEW_SHAPES: usize = 2_500;
+
+    scene
+        .items
+        .len()
+        .div_ceil(TARGET_FAST_PREVIEW_SHAPES)
+        .max(1)
+}
+
+fn renderer_preview_segments_per_cubic(scene: &RerunSceneOutput) -> usize {
+    match scene.native_cubic_bezier_count() {
+        0..=9_999 => 8,
+        10_000..=49_999 => 6,
+        _ => 4,
+    }
+}
+
+fn renderer_preview_item_stride(scene: &RerunSceneOutput) -> usize {
+    const TARGET_RENDERER_PREVIEW_STRIPS: usize = 50_000;
+
+    scene
+        .items
+        .len()
+        .div_ceil(TARGET_RENDERER_PREVIEW_STRIPS)
+        .max(1)
+}
+
+fn viewport_resolution_in_pixels(viewport: Rect, ui: &egui::Ui) -> [u32; 2] {
+    let pixels_per_point = ui.pixels_per_point();
+    [
+        (viewport.width() * pixels_per_point).round().max(0.0) as u32,
+        (viewport.height() * pixels_per_point).round().max(0.0) as u32,
+    ]
+}
+
+fn renderer_line_radius(style: GraphStyle, selected: bool) -> Size {
+    Size::new_ui_points(1.0 + 2.0 * style.stroke_scale + selected_stroke_boost(selected))
+}
+
+fn renderer_polygon_points(
+    points: &[GraphPoint],
+    view_transform: HoudiniViewTransform,
+) -> Vec<glam::Vec2> {
+    let mut renderer_points = points
+        .iter()
+        .map(|point| renderer_point(view_transform.map_point(*point), view_transform))
+        .collect::<Vec<_>>();
+    if let Some(first) = renderer_points.first().copied() {
+        renderer_points.push(first);
+    }
+    renderer_points
+}
+
+fn renderer_cubic_points(
+    curve: CubicBezier,
+    view_transform: HoudiniViewTransform,
+    segments: usize,
+) -> Vec<glam::Vec2> {
+    sampled_cubic_view_points(curve, view_transform, segments)
+        .into_iter()
+        .map(|point| renderer_point(point, view_transform))
+        .collect()
+}
+
+fn renderer_point(point: Pos2, view_transform: HoudiniViewTransform) -> glam::Vec2 {
+    glam::vec2(
+        point.x - view_transform.viewport.left(),
+        point.y - view_transform.viewport.top(),
+    )
+}
+
+fn draw_native_cubic(
+    ui: &mut egui::Ui,
+    view_transform: HoudiniViewTransform,
+    curve: CubicBezier,
+    style: GraphStyle,
+    selected: bool,
+) {
     let painter = ui.painter();
     let points = curve
         .control_points()
-        .map(|point| map_view_point(viewport, point));
+        .map(|point| view_transform.map_point(point));
     painter.add(CubicBezierShape {
         points,
         closed: false,
         fill: Color32::TRANSPARENT,
-        stroke: Stroke::new(1.0 + 4.0 * stroke_scale, Color32::from_rgb(239, 188, 84)).into(),
+        stroke: Stroke::new(
+            1.0 + 4.0 * style.stroke_scale + selected_stroke_boost(selected),
+            style_color(style, 1.0),
+        )
+        .into(),
     });
 
     for point in points {
-        painter.circle_filled(point, 3.0, Color32::from_rgb(250, 212, 124));
+        painter.circle_filled(point, 3.0, style_color(style, 1.0));
     }
 }
 
-fn draw_debug_boundary(ui: &mut egui::Ui, viewport: Rect, scene: &RerunSceneOutput) {
+fn style_color(style: GraphStyle, opacity_multiplier: f32) -> Color32 {
+    let alpha = (255.0 * style.opacity * opacity_multiplier)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    Color32::from_rgba_unmultiplied(style.color.r, style.color.g, style.color.b, alpha)
+}
+
+fn selected_stroke_boost(selected: bool) -> f32 {
+    if selected { 3.0 } else { 0.0 }
+}
+
+fn selected_item_summary(item: &RerunSceneItem) -> String {
+    let style = item.style();
+    format!(
+        "Selected: {} in {} view for {} (order {}), score {:.2}, opacity {:.2}, {} {}",
+        item.kind_name(),
+        item.layer_name(),
+        item.layer().as_str(),
+        item.layer_order(),
+        item.score(),
+        style.opacity,
+        item.control_or_vertex_count(),
+        match item {
+            RerunSceneItem::Polygon { .. } => "vertices",
+            RerunSceneItem::NativeCubicBezier { .. } => "control points",
+        }
+    )
+}
+
+fn hit_test_scene(
+    scene: &RerunSceneOutput,
+    view_transform: HoudiniViewTransform,
+    pointer_pos: Pos2,
+) -> Option<usize> {
+    scene
+        .items
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(item_index, item)| {
+            if scene_item_contains_pointer(item, view_transform, pointer_pos) {
+                Some(item_index)
+            } else {
+                None
+            }
+        })
+}
+
+fn scene_item_contains_pointer(
+    item: &RerunSceneItem,
+    view_transform: HoudiniViewTransform,
+    pointer_pos: Pos2,
+) -> bool {
+    const CURVE_HIT_RADIUS: f32 = 8.0;
+
+    match item {
+        RerunSceneItem::Polygon { points, .. } => polygon_contains_pointer(
+            &points
+                .iter()
+                .map(|point| view_transform.map_point(*point))
+                .collect::<Vec<_>>(),
+            pointer_pos,
+        ),
+        RerunSceneItem::NativeCubicBezier { curve, .. } => {
+            let points = sampled_cubic_view_points(*curve, view_transform, 32);
+            points
+                .windows(2)
+                .any(|pair| distance_to_segment(pointer_pos, pair[0], pair[1]) <= CURVE_HIT_RADIUS)
+        }
+    }
+}
+
+fn polygon_contains_pointer(points: &[Pos2], pointer_pos: Pos2) -> bool {
+    if points.len() < 3 {
+        return false;
+    }
+
+    let mut inside = false;
+    let mut previous = points[points.len() - 1];
+    for current in points {
+        let crosses_y = (current.y > pointer_pos.y) != (previous.y > pointer_pos.y);
+        if crosses_y {
+            let intersection_x = (previous.x - current.x) * (pointer_pos.y - current.y)
+                / (previous.y - current.y)
+                + current.x;
+            if pointer_pos.x < intersection_x {
+                inside = !inside;
+            }
+        }
+        previous = *current;
+    }
+    inside
+}
+
+fn sampled_cubic_view_points(
+    curve: CubicBezier,
+    view_transform: HoudiniViewTransform,
+    segments: usize,
+) -> Vec<Pos2> {
+    let segments = segments.max(1);
+    (0..=segments)
+        .map(|index| {
+            let t = index as f32 / segments as f32;
+            view_transform.map_point(cubic_point_at(curve, t))
+        })
+        .collect()
+}
+
+fn cubic_point_at(curve: CubicBezier, t: f32) -> GraphPoint {
+    let inv_t = 1.0 - t;
+    let b0 = inv_t * inv_t * inv_t;
+    let b1 = 3.0 * inv_t * inv_t * t;
+    let b2 = 3.0 * inv_t * t * t;
+    let b3 = t * t * t;
+
+    GraphPoint {
+        x: curve.start.x * b0 + curve.control_1.x * b1 + curve.control_2.x * b2 + curve.end.x * b3,
+        y: curve.start.y * b0 + curve.control_1.y * b1 + curve.control_2.y * b2 + curve.end.y * b3,
+    }
+}
+
+fn distance_to_segment(point: Pos2, start: Pos2, end: Pos2) -> f32 {
+    let segment = end - start;
+    let length_squared = segment.length_sq();
+    if length_squared <= f32::EPSILON {
+        return point.distance(start);
+    }
+
+    let t = ((point - start).dot(segment) / length_squared).clamp(0.0, 1.0);
+    point.distance(start + segment * t)
+}
+
+fn draw_debug_boundary(
+    ui: &mut egui::Ui,
+    view_transform: HoudiniViewTransform,
+    scene: &RerunSceneOutput,
+) {
     let painter = ui.painter();
     let control_stroke = Stroke::new(1.0, Color32::from_rgb(150, 150, 150));
     let export_stroke = Stroke::new(1.0, Color32::from_rgb(115, 210, 155));
@@ -245,8 +1540,8 @@ fn draw_debug_boundary(ui: &mut egui::Ui, viewport: Rect, scene: &RerunSceneOutp
                 for pair in points.windows(2) {
                     painter.line_segment(
                         [
-                            map_view_point(viewport, pair[0]),
-                            map_view_point(viewport, pair[1]),
+                            view_transform.map_point(pair[0]),
+                            view_transform.map_point(pair[1]),
                         ],
                         export_stroke,
                     );
@@ -256,8 +1551,8 @@ fn draw_debug_boundary(ui: &mut egui::Ui, viewport: Rect, scene: &RerunSceneOutp
                 for pair in control_points.windows(2) {
                     painter.line_segment(
                         [
-                            map_view_point(viewport, pair[0]),
-                            map_view_point(viewport, pair[1]),
+                            view_transform.map_point(pair[0]),
+                            view_transform.map_point(pair[1]),
                         ],
                         control_stroke,
                     );
@@ -267,8 +1562,458 @@ fn draw_debug_boundary(ui: &mut egui::Ui, viewport: Rect, scene: &RerunSceneOutp
     }
 }
 
-fn map_view_point(rect: Rect, point: GraphPoint) -> Pos2 {
-    let x = rect.left() + point.x * rect.width();
-    let y = rect.bottom() - point.y * rect.height();
-    Pos2::new(x, y)
+#[derive(Clone, Copy)]
+struct HoudiniViewTransform {
+    viewport: Rect,
+    content_rect: Rect,
+    bounds: GraphBounds,
+}
+
+impl HoudiniViewTransform {
+    fn from_scene(scene: &RerunSceneOutput, viewport: Rect) -> Self {
+        let bounds = GraphBounds::from_scene(scene).unwrap_or_else(GraphBounds::unit);
+        Self {
+            viewport,
+            content_rect: fitted_content_rect(viewport, bounds),
+            bounds,
+        }
+    }
+
+    fn map_point(self, point: GraphPoint) -> Pos2 {
+        let width = self.bounds.width();
+        let height = self.bounds.height();
+        let x = self.content_rect.left()
+            + ((point.x - self.bounds.min.x) / width) * self.content_rect.width();
+        let y = self.content_rect.bottom()
+            - ((point.y - self.bounds.min.y) / height) * self.content_rect.height();
+        Pos2::new(x, y)
+    }
+}
+
+fn fitted_content_rect(viewport: Rect, bounds: GraphBounds) -> Rect {
+    let data_aspect = bounds.width() / bounds.height();
+    let viewport_aspect = viewport.width() / viewport.height();
+
+    if data_aspect > viewport_aspect {
+        let height = viewport.width() / data_aspect;
+        Rect::from_center_size(viewport.center(), egui::vec2(viewport.width(), height))
+    } else {
+        let width = viewport.height() * data_aspect;
+        Rect::from_center_size(viewport.center(), egui::vec2(width, viewport.height()))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GraphBounds {
+    min: GraphPoint,
+    max: GraphPoint,
+}
+
+impl GraphBounds {
+    const MIN_SPAN: f32 = 1.0e-3;
+    const PADDING_FRACTION: f32 = 0.08;
+
+    fn unit() -> Self {
+        Self {
+            min: GraphPoint { x: 0.0, y: 0.0 },
+            max: GraphPoint { x: 1.0, y: 1.0 },
+        }
+    }
+
+    fn from_scene(scene: &RerunSceneOutput) -> Option<Self> {
+        let mut bounds = None;
+        for item in &scene.items {
+            match item {
+                RerunSceneItem::Polygon { points, .. } => {
+                    for point in points {
+                        Self::include_point(&mut bounds, *point);
+                    }
+                }
+                RerunSceneItem::NativeCubicBezier { curve, .. } => {
+                    for point in curve.control_points() {
+                        Self::include_point(&mut bounds, point);
+                    }
+                }
+            }
+        }
+        bounds.map(Self::expanded_for_view)
+    }
+
+    fn include_point(bounds: &mut Option<Self>, point: GraphPoint) {
+        if let Some(bounds) = bounds {
+            bounds.min.x = bounds.min.x.min(point.x);
+            bounds.min.y = bounds.min.y.min(point.y);
+            bounds.max.x = bounds.max.x.max(point.x);
+            bounds.max.y = bounds.max.y.max(point.y);
+        } else {
+            *bounds = Some(Self {
+                min: point,
+                max: point,
+            });
+        }
+    }
+
+    fn expanded_for_view(self) -> Self {
+        let center = GraphPoint {
+            x: (self.min.x + self.max.x) * 0.5,
+            y: (self.min.y + self.max.y) * 0.5,
+        };
+        let fallback_span = self.width().max(self.height()).max(1.0);
+        let width = self
+            .width()
+            .max(Self::MIN_SPAN)
+            .max(if self.width() <= Self::MIN_SPAN {
+                fallback_span
+            } else {
+                0.0
+            });
+        let height = self
+            .height()
+            .max(Self::MIN_SPAN)
+            .max(if self.height() <= Self::MIN_SPAN {
+                fallback_span
+            } else {
+                0.0
+            });
+        let x_padding = width * Self::PADDING_FRACTION;
+        let y_padding = height * Self::PADDING_FRACTION;
+
+        Self {
+            min: GraphPoint {
+                x: center.x - width * 0.5 - x_padding,
+                y: center.y - height * 0.5 - y_padding,
+            },
+            max: GraphPoint {
+                x: center.x + width * 0.5 + x_padding,
+                y: center.y + height * 0.5 + y_padding,
+            },
+        }
+    }
+
+    fn width(self) -> f32 {
+        self.max.x - self.min.x
+    }
+
+    fn height(self) -> f32 {
+        self.max.y - self.min.y
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GraphBounds, HoudiniCubicEvaluationPlacement, HoudiniPreviewMode, HoudiniRendererPath,
+        HoudiniRendererPlan, HoudiniViewTransform, hit_test_scene, preview_mode_for_scene,
+        renderer_preview_item_stride, renderer_preview_segments_per_cubic,
+    };
+    use crate::ui::houdini_graph_panel::model::{
+        CubicBezier, GraphPoint, GraphStyle, LayerKind, RerunSceneItem, RerunSceneOutput,
+    };
+
+    fn test_viewport() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0))
+    }
+
+    fn point(x: f32, y: f32) -> GraphPoint {
+        GraphPoint { x, y }
+    }
+
+    fn cubic(index: usize) -> CubicBezier {
+        let offset = index as f32 * 0.001;
+        CubicBezier {
+            start: point(offset, 0.0),
+            control_1: point(offset + 0.25, 0.35),
+            control_2: point(offset + 0.75, 0.65),
+            end: point(offset + 1.0, 1.0),
+            score: 0.9,
+        }
+    }
+
+    fn native_cubic_scene(count: usize) -> RerunSceneOutput {
+        RerunSceneOutput {
+            items: (0..count)
+                .map(|index| {
+                    let curve = cubic(index);
+                    RerunSceneItem::NativeCubicBezier {
+                        curve,
+                        layer: LayerKind::Curves,
+                        layer_name: "Curves".to_owned(),
+                        layer_order: 0,
+                        score: curve.score,
+                        style: GraphStyle::default(),
+                    }
+                })
+                .collect(),
+            debug_items: vec![],
+            stroke_scale: 1.0,
+            style: GraphStyle::default(),
+            export_segments: 8,
+            query_bridge: None,
+        }
+    }
+
+    fn polygon_scene(count: usize) -> RerunSceneOutput {
+        RerunSceneOutput {
+            items: (0..count)
+                .map(|index| {
+                    let offset = index as f32 * 0.001;
+                    RerunSceneItem::Polygon {
+                        points: vec![
+                            point(offset, 0.0),
+                            point(offset + 1.0, 0.0),
+                            point(offset + 1.0, 1.0),
+                            point(offset, 1.0),
+                        ],
+                        layer: LayerKind::Polygons,
+                        layer_name: "Polygons".to_owned(),
+                        layer_order: 0,
+                        score: 0.9,
+                        style: GraphStyle::default(),
+                    }
+                })
+                .collect(),
+            debug_items: vec![],
+            stroke_scale: 1.0,
+            style: GraphStyle::default(),
+            export_segments: 8,
+            query_bridge: None,
+        }
+    }
+
+    #[test]
+    fn view_transform_fits_arbitrary_cubic_coordinates_without_mutating_them() {
+        let curve = CubicBezier {
+            start: point(100.0, -50.0),
+            control_1: point(125.0, 150.0),
+            control_2: point(200.0, -25.0),
+            end: point(250.0, 100.0),
+            score: 1.0,
+        };
+        let scene = RerunSceneOutput {
+            items: vec![RerunSceneItem::NativeCubicBezier {
+                curve,
+                layer: LayerKind::Curves,
+                layer_name: "Curves".to_owned(),
+                layer_order: 0,
+                score: curve.score,
+                style: GraphStyle::default(),
+            }],
+            debug_items: vec![],
+            stroke_scale: 1.0,
+            style: GraphStyle::default(),
+            export_segments: 8,
+            query_bridge: None,
+        };
+
+        let transform = HoudiniViewTransform::from_scene(&scene, test_viewport());
+
+        for point in curve.control_points() {
+            assert!(test_viewport().contains(transform.map_point(point)));
+        }
+        assert_eq!(curve.start, point(100.0, -50.0));
+    }
+
+    #[test]
+    fn view_bounds_expand_flat_geometry() {
+        let scene = RerunSceneOutput {
+            items: vec![RerunSceneItem::Polygon {
+                points: vec![point(2.0, 5.0), point(4.0, 5.0)],
+                layer: LayerKind::Polygons,
+                layer_name: "Polygons".to_owned(),
+                layer_order: 0,
+                score: 1.0,
+                style: GraphStyle::default(),
+            }],
+            debug_items: vec![],
+            stroke_scale: 1.0,
+            style: GraphStyle::default(),
+            export_segments: 8,
+            query_bridge: None,
+        };
+
+        let bounds = GraphBounds::from_scene(&scene).expect("flat geometry still has bounds");
+
+        assert!(bounds.width() > 2.0);
+        assert!(bounds.height() > 0.0);
+    }
+
+    #[test]
+    fn view_transform_preserves_geometry_aspect_ratio() {
+        let scene = RerunSceneOutput {
+            items: vec![RerunSceneItem::Polygon {
+                points: vec![point(0.0, 0.0), point(10.0, 10.0)],
+                layer: LayerKind::Polygons,
+                layer_name: "Polygons".to_owned(),
+                layer_order: 0,
+                score: 1.0,
+                style: GraphStyle::default(),
+            }],
+            debug_items: vec![],
+            stroke_scale: 1.0,
+            style: GraphStyle::default(),
+            export_segments: 8,
+            query_bridge: None,
+        };
+
+        let transform = HoudiniViewTransform::from_scene(&scene, test_viewport());
+        let min = transform.map_point(point(0.0, 0.0));
+        let max = transform.map_point(point(10.0, 10.0));
+
+        assert!(((max.x - min.x).abs() - (max.y - min.y).abs()).abs() < 0.01);
+    }
+
+    #[test]
+    fn hit_testing_selects_polygon_containing_pointer() {
+        let scene = RerunSceneOutput {
+            items: vec![RerunSceneItem::Polygon {
+                points: vec![
+                    point(0.0, 0.0),
+                    point(1.0, 0.0),
+                    point(1.0, 1.0),
+                    point(0.0, 1.0),
+                ],
+                layer: LayerKind::Polygons,
+                layer_name: "Polygons".to_owned(),
+                layer_order: 0,
+                score: 0.75,
+                style: GraphStyle::default(),
+            }],
+            debug_items: vec![],
+            stroke_scale: 1.0,
+            style: GraphStyle::default(),
+            export_segments: 8,
+            query_bridge: None,
+        };
+        let transform = HoudiniViewTransform::from_scene(&scene, test_viewport());
+
+        assert_eq!(
+            hit_test_scene(&scene, transform, test_viewport().center()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn hit_testing_selects_native_cubic_without_storing_polyline_geometry() {
+        let curve = CubicBezier {
+            start: point(0.0, 0.0),
+            control_1: point(0.25, 0.35),
+            control_2: point(0.75, 0.65),
+            end: point(1.0, 1.0),
+            score: 0.9,
+        };
+        let scene = RerunSceneOutput {
+            items: vec![RerunSceneItem::NativeCubicBezier {
+                curve,
+                layer: LayerKind::Curves,
+                layer_name: "Curves".to_owned(),
+                layer_order: 0,
+                score: curve.score,
+                style: GraphStyle::default(),
+            }],
+            debug_items: vec![],
+            stroke_scale: 1.0,
+            style: GraphStyle::default(),
+            export_segments: 8,
+            query_bridge: None,
+        };
+        let transform = HoudiniViewTransform::from_scene(&scene, test_viewport());
+        let midpoint = transform.map_point(point(0.5, 0.5));
+
+        assert_eq!(hit_test_scene(&scene, transform, midpoint), Some(0));
+        assert!(matches!(
+            scene.items.first(),
+            Some(RerunSceneItem::NativeCubicBezier { .. })
+        ));
+    }
+
+    #[test]
+    fn preview_mode_switches_to_renderer_native_path_for_large_native_curve_scenes() {
+        assert_eq!(
+            preview_mode_for_scene(&native_cubic_scene(4_999)),
+            HoudiniPreviewMode::DetailedNativeCubic
+        );
+        assert_eq!(
+            preview_mode_for_scene(&native_cubic_scene(5_000)),
+            HoudiniPreviewMode::RendererNativeLines
+        );
+    }
+
+    #[test]
+    fn preview_mode_switches_to_renderer_native_path_for_large_polygon_scenes() {
+        assert_eq!(
+            preview_mode_for_scene(&polygon_scene(9_999)),
+            HoudiniPreviewMode::DetailedNativeCubic
+        );
+        assert_eq!(
+            preview_mode_for_scene(&polygon_scene(10_000)),
+            HoudiniPreviewMode::RendererNativeLines
+        );
+    }
+
+    #[test]
+    fn renderer_preview_lod_reduces_viewer_segments_as_curve_counts_grow() {
+        assert_eq!(
+            renderer_preview_segments_per_cubic(&native_cubic_scene(5_000)),
+            8
+        );
+        assert_eq!(
+            renderer_preview_segments_per_cubic(&native_cubic_scene(10_000)),
+            6
+        );
+        assert_eq!(
+            renderer_preview_segments_per_cubic(&native_cubic_scene(50_000)),
+            4
+        );
+
+        let scene = native_cubic_scene(10_000);
+        assert!(matches!(
+            scene.items.first(),
+            Some(RerunSceneItem::NativeCubicBezier { .. })
+        ));
+    }
+
+    #[test]
+    fn renderer_preview_stride_allows_larger_renderer_native_batches() {
+        assert_eq!(renderer_preview_item_stride(&native_cubic_scene(2_500)), 1);
+        assert_eq!(renderer_preview_item_stride(&native_cubic_scene(10_000)), 1);
+        assert_eq!(renderer_preview_item_stride(&native_cubic_scene(50_000)), 1);
+        assert_eq!(
+            renderer_preview_item_stride(&native_cubic_scene(100_000)),
+            2
+        );
+    }
+
+    #[test]
+    fn renderer_plan_keeps_small_scenes_on_native_egui_fallback() {
+        let plan = HoudiniRendererPlan::for_scene(&native_cubic_scene(64));
+
+        assert_eq!(plan.preview_mode, HoudiniPreviewMode::DetailedNativeCubic);
+        assert_eq!(plan.renderer_path, HoudiniRendererPath::EguiPainterShapes);
+        assert_eq!(
+            plan.cubic_evaluation,
+            HoudiniCubicEvaluationPlacement::NativeEguiCubicShape
+        );
+        assert_eq!(plan.fallback_path, HoudiniRendererPath::EguiPainterShapes);
+        assert!(plan.target_draw_data_shape.contains("native cubic"));
+    }
+
+    #[test]
+    fn renderer_plan_uses_batched_line_draw_data_for_large_scenes() {
+        let plan = HoudiniRendererPlan::for_scene(&native_cubic_scene(50_000));
+
+        assert_eq!(plan.preview_mode, HoudiniPreviewMode::RendererNativeLines);
+        assert_eq!(
+            plan.renderer_path,
+            HoudiniRendererPath::RendererLineDrawData
+        );
+        assert_eq!(
+            plan.cubic_evaluation,
+            HoudiniCubicEvaluationPlacement::CpuBoundaryLineStrips
+        );
+        assert_eq!(plan.fallback_path, HoudiniRendererPath::EguiPainterShapes);
+        assert!(
+            plan.target_draw_data_shape
+                .contains("batched 2D line strips")
+        );
+    }
 }

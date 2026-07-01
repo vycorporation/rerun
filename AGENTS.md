@@ -1,10 +1,28 @@
-# CLAUDE.md
+# AGENTS.md
 
 Guidance for LLMs working in this repo.
 
 ## Project overview
 
 Rerun: time-aware multimodal data stack + visualization for robotics, spatial AI, computer vision. SDKs (Python, Rust, C++) log rich data (images, point clouds, tensors, etc.). Viewer for visualization.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues on `vycorporation/rerun`; external PRs are not a triage request surface by default.
+See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default Matt Pocock triage label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`.
+See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a multi-context repo.
+Read `CONTEXT-MAP.md`; graph workbench product-fork context lives under `product/graph-workbench/product-prd/source/`.
+See `docs/agents/domain.md`.
 
 ## Build system
 
