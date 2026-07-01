@@ -38,39 +38,35 @@ for the graph hierarchy lane.
 | `#144` | complete | Typed graph container boundaries | Adds serializable typed input/output declarations to graph containers and exposes boundary outputs as stable reference targets. |
 | `#146` | complete | Graph container boundary anchor mappings | Adds serializable mappings from public boundary ports to internal graph anchors, with model diagnostics for unresolved metadata. |
 | `#148` | complete | Graph container collapse manifests | Records selected connected node sets and typed external edge crossings as graph container collapse metadata without moving nodes yet. |
+| `#164` | complete | Graph-local node name policy | Adds durable parent graph metadata to nodes and scopes create, rename, duplicate, readable paths, and name collision inspection to the parent graph while preserving stable node IDs. |
 
 ## Next implementation candidates
 
-1. Graph-local node name policy.
-   - Enforce uniqueness within the parent graph or subgraph for create, rename,
-     duplicate, and paste paths.
-   - Keep the operator type visible separately from the editable node name.
-
-2. Graph path inspection and navigation.
+1. Graph path inspection and navigation.
    - Current graph path and readable node path inspection are covered by
      `#131`.
    - Later navigation work should add selected graph switching without turning
      path display into a second durable identity.
 
-3. Graph container storage.
+2. Graph container storage.
    - `#142` adds graph container metadata that can point to an internal named
      graph.
    - `#148` records collapse manifests for selected connected node sets without
      moving nodes before graph-local node storage lands.
    - Keep selected-node collapse separate from network box organization.
 
-4. Typed graph boundary inputs and outputs.
+3. Typed graph boundary inputs and outputs.
    - `#144` models typed public graph container inputs and outputs.
    - `#146` maps typed public ports to internal input/output anchors.
    - Preserve ordinary editable graph references while preventing private asset
      internals from becoming external reference targets.
 
-5. Acyclic connection diagnostics.
+4. Acyclic connection diagnostics.
    - Block obvious cyclic connection attempts once explicit editable edges are
      implemented.
    - Preserve loaded invalid topology as visible diagnostics.
 
-6. Cross-graph readable paths.
+5. Cross-graph readable paths.
    - Use readable graph/node paths for navigation, search, node info, and delete
      warnings.
    - Keep durable references backed by stable graph IDs and node IDs.

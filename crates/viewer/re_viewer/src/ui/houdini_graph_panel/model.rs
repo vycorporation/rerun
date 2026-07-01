@@ -395,22 +395,53 @@ impl GraphDocument {
     pub fn readable_node_path(&self, node_index: usize) -> Option<String> {
         self.nodes
             .get(node_index)
-            .map(|node| self.readable_node_path_for_name(&node.name))
+            .map(|node| self.readable_node_path_for_node(node))
     }
 
     fn graph_location_for_node(&self, node: &GraphNode) -> GraphLocationInfo {
+        let parent_graph_id = self.node_parent_graph_id(node);
         let name_collision_count = self
             .nodes
             .iter()
-            .filter(|candidate| candidate.name == node.name)
+            .filter(|candidate| {
+                self.node_parent_graph_id(candidate) == parent_graph_id
+                    && candidate.name == node.name
+            })
             .count();
         GraphLocationInfo {
-            graph_id: self.current_graph_id().to_owned(),
-            graph_path: self.current_graph_path().to_owned(),
+            graph_id: parent_graph_id.to_owned(),
+            graph_path: self.graph_path_for_id(parent_graph_id).to_owned(),
             node_name: node.name.clone(),
-            node_path: self.readable_node_path_for_name(&node.name),
+            node_path: self.readable_node_path_for_node(node),
             name_collision_count,
         }
+    }
+
+    fn node_parent_graph_id<'a>(&'a self, node: &'a GraphNode) -> &'a str {
+        if node.parent_graph_id.is_empty() {
+            MAIN_GRAPH_ID
+        } else {
+            node.parent_graph_id.as_str()
+        }
+    }
+
+    fn graph_path_for_id(&self, graph_id: &str) -> &str {
+        self.graph_registry
+            .graph(graph_id)
+            .map(|graph| graph.path.as_str())
+            .unwrap_or("/obj/main")
+    }
+
+    fn readable_node_path_for_node(&self, node: &GraphNode) -> String {
+        self.readable_node_path_for_graph_and_name(self.node_parent_graph_id(node), &node.name)
+    }
+
+    fn readable_node_path_for_graph_and_name(&self, graph_id: &str, node_name: &str) -> String {
+        format!(
+            "{}/{}",
+            self.graph_path_for_id(graph_id).trim_end_matches('/'),
+            node_name
+        )
     }
 
     fn readable_node_path_for_name(&self, node_name: &str) -> String {
@@ -698,6 +729,7 @@ impl GraphDocument {
             nodes: vec![
                 GraphNode {
                     node_id: "source.main".to_owned(),
+                    parent_graph_id: MAIN_GRAPH_ID.to_owned(),
                     name: "Source".to_owned(),
                     kind: NodeKind::Source,
                     layout_position: GraphPoint::new(0.0, 0.5),
@@ -724,6 +756,7 @@ impl GraphDocument {
                 },
                 GraphNode {
                     node_id: "filter.main".to_owned(),
+                    parent_graph_id: MAIN_GRAPH_ID.to_owned(),
                     name: "Filter".to_owned(),
                     kind: NodeKind::Filter,
                     layout_position: GraphPoint::new(0.33, 0.5),
@@ -752,6 +785,7 @@ impl GraphDocument {
                 },
                 GraphNode {
                     node_id: "style.main".to_owned(),
+                    parent_graph_id: MAIN_GRAPH_ID.to_owned(),
                     name: "Style".to_owned(),
                     kind: NodeKind::Style,
                     layout_position: GraphPoint::new(0.66, 0.5),
@@ -778,6 +812,7 @@ impl GraphDocument {
                 },
                 GraphNode {
                     node_id: "output.rerun".to_owned(),
+                    parent_graph_id: MAIN_GRAPH_ID.to_owned(),
                     name: "Rerun Output".to_owned(),
                     kind: NodeKind::Output,
                     layout_position: GraphPoint::new(1.0, 0.5),
@@ -943,6 +978,7 @@ impl GraphDocument {
             nodes: vec![
                 GraphNode {
                     node_id: "source.byteplot".to_owned(),
+                    parent_graph_id: MAIN_GRAPH_ID.to_owned(),
                     name: "Byteplot Substrate".to_owned(),
                     kind: NodeKind::Source,
                     layout_position: GraphPoint::new(0.0, 0.28),
@@ -969,6 +1005,7 @@ impl GraphDocument {
                 },
                 GraphNode {
                     node_id: "source.convex_regions".to_owned(),
+                    parent_graph_id: MAIN_GRAPH_ID.to_owned(),
                     name: "Convex Hull Regions".to_owned(),
                     kind: NodeKind::Source,
                     layout_position: GraphPoint::new(0.0, 0.56),
@@ -995,6 +1032,7 @@ impl GraphDocument {
                 },
                 GraphNode {
                     node_id: "source.concave_regions".to_owned(),
+                    parent_graph_id: MAIN_GRAPH_ID.to_owned(),
                     name: "Concave Hull Regions".to_owned(),
                     kind: NodeKind::Source,
                     layout_position: GraphPoint::new(0.0, 0.84),
@@ -1021,6 +1059,7 @@ impl GraphDocument {
                 },
                 GraphNode {
                     node_id: "filter.high_confidence".to_owned(),
+                    parent_graph_id: MAIN_GRAPH_ID.to_owned(),
                     name: "High Confidence Filter".to_owned(),
                     kind: NodeKind::Filter,
                     layout_position: GraphPoint::new(0.36, 0.56),
@@ -1051,6 +1090,7 @@ impl GraphDocument {
                 },
                 GraphNode {
                     node_id: "style.region_overlay".to_owned(),
+                    parent_graph_id: MAIN_GRAPH_ID.to_owned(),
                     name: "Region Overlay Style".to_owned(),
                     kind: NodeKind::Style,
                     layout_position: GraphPoint::new(0.64, 0.56),
@@ -1077,6 +1117,7 @@ impl GraphDocument {
                 },
                 GraphNode {
                     node_id: "output.rerun_malware".to_owned(),
+                    parent_graph_id: MAIN_GRAPH_ID.to_owned(),
                     name: "Rerun Malware Output".to_owned(),
                     kind: NodeKind::Output,
                     layout_position: GraphPoint::new(1.0, 0.56),
@@ -2544,7 +2585,7 @@ impl GraphDocument {
         } else {
             name = name.trim().to_owned();
         }
-        name = self.unique_node_name(&name);
+        name = self.unique_node_name_in_graph(&name, self.current_graph_id(), None);
 
         let insert_index = self
             .nodes
@@ -2553,25 +2594,49 @@ impl GraphDocument {
             .unwrap_or(self.nodes.len());
         let mut node = GraphNode::null_operator(name);
         node.node_id = self.unique_node_id("null");
+        node.parent_graph_id = self.current_graph_id().to_owned();
         node.layout_position = GraphPoint::new(0.82, 0.5);
         self.nodes.insert(insert_index, node);
         self.rebuild_default_data_flow_edges();
         insert_index
     }
 
+    #[allow(dead_code)]
     fn unique_node_name(&self, candidate: &str) -> String {
-        if !self.nodes.iter().any(|node| node.name == candidate) {
+        self.unique_node_name_in_graph(candidate, self.current_graph_id(), None)
+    }
+
+    fn unique_node_name_in_graph(
+        &self,
+        candidate: &str,
+        parent_graph_id: &str,
+        ignored_node_index: Option<usize>,
+    ) -> String {
+        if !self.node_name_exists_in_graph(candidate, parent_graph_id, ignored_node_index) {
             return candidate.to_owned();
         }
 
         let mut suffix = 2;
         loop {
             let name = format!("{candidate}_{suffix}");
-            if !self.nodes.iter().any(|node| node.name == name) {
+            if !self.node_name_exists_in_graph(&name, parent_graph_id, ignored_node_index) {
                 return name;
             }
             suffix += 1;
         }
+    }
+
+    fn node_name_exists_in_graph(
+        &self,
+        name: &str,
+        parent_graph_id: &str,
+        ignored_node_index: Option<usize>,
+    ) -> bool {
+        self.nodes.iter().enumerate().any(|(index, node)| {
+            Some(index) != ignored_node_index
+                && self.node_parent_graph_id(node) == parent_graph_id
+                && node.name == name
+        })
     }
 
     pub fn set_node_name(&mut self, node_index: usize, candidate: impl Into<String>) -> bool {
@@ -2598,27 +2663,11 @@ impl GraphDocument {
             return None;
         }
 
-        let mut name = candidate.clone();
-        if self
+        let parent_graph_id = self
             .nodes
-            .iter()
-            .enumerate()
-            .any(|(index, node)| index != node_index && node.name == name)
-        {
-            let mut suffix = 2;
-            loop {
-                name = format!("{candidate}_{suffix}");
-                if !self
-                    .nodes
-                    .iter()
-                    .enumerate()
-                    .any(|(index, node)| index != node_index && node.name == name)
-                {
-                    break;
-                }
-                suffix += 1;
-            }
-        }
+            .get(node_index)
+            .map(|node| self.node_parent_graph_id(node).to_owned())?;
+        let name = self.unique_node_name_in_graph(&candidate, &parent_graph_id, Some(node_index));
 
         if let Some(node) = self.nodes.get_mut(node_index) {
             node.name = name.clone();
@@ -2700,7 +2749,9 @@ impl GraphDocument {
         let mut node = source.clone();
 
         node.node_id = self.unique_node_id(node.kind.duplicate_node_id_prefix());
-        node.name = self.unique_node_name(&source_name);
+        let parent_graph_id = self.node_parent_graph_id(source).to_owned();
+        node.name = self.unique_node_name_in_graph(&source_name, &parent_graph_id, None);
+        node.parent_graph_id = parent_graph_id;
         node.layout_position = GraphPoint::new(
             source.layout_position.x + 0.12,
             source.layout_position.y + 0.08,
@@ -2787,6 +2838,7 @@ impl GraphDocument {
                 provenance,
             },
         );
+        node.parent_graph_id = self.current_graph_id().to_owned();
         node.layout_position = GraphPoint::new(0.88, 0.5);
         let reference_node = node.clone();
         self.nodes.insert(insert_index, node);
@@ -3004,7 +3056,7 @@ impl GraphDocument {
         let node = self.nodes.get(target_node_index)?;
         let output_name = self.node_primary_output_name(node)?;
         Some(ReferenceTargetIdentity {
-            graph_id: self.current_graph_id().to_owned(),
+            graph_id: self.node_parent_graph_id(node).to_owned(),
             node_id: node.node_id.clone(),
             output_name,
         })
@@ -3090,34 +3142,35 @@ impl GraphDocument {
         &self,
         target: &ReferenceTargetIdentity,
     ) -> ReferenceTargetResolution {
-        if target.graph_id != self.current_graph_id() {
-            if let Some(resolution) = self.resolve_unlocked_asset_internal_target(target) {
-                return resolution;
-            }
-            if self
-                .procedural_asset_declarations
-                .iter()
-                .any(|declaration| declaration.wrapped_subgraph.graph_id == target.graph_id)
-            {
-                return ReferenceTargetResolution::diagnostic(
-                    target,
-                    ReferenceDiagnosticStatus::AssetPrivateInternal,
-                    "Matched procedural asset internals are private; reference the asset boundary output or unlock the instance for local editing.",
-                );
-            }
+        if let Some(resolution) = self.resolve_unlocked_asset_internal_target(target) {
+            return resolution;
+        }
+        if self
+            .procedural_asset_declarations
+            .iter()
+            .any(|declaration| declaration.wrapped_subgraph.graph_id == target.graph_id)
+        {
             return ReferenceTargetResolution::diagnostic(
                 target,
-                ReferenceDiagnosticStatus::DisallowedBoundary,
-                "Reference target is outside the current project graph.",
+                ReferenceDiagnosticStatus::AssetPrivateInternal,
+                "Matched procedural asset internals are private; reference the asset boundary output or unlock the instance for local editing.",
             );
         }
 
-        let Some((target_node_index, target_node)) = self
-            .nodes
-            .iter()
-            .enumerate()
-            .find(|(_, node)| node.node_id == target.node_id)
+        let Some((target_node_index, target_node)) =
+            self.nodes.iter().enumerate().find(|(_, node)| {
+                node.node_id == target.node_id && self.node_parent_graph_id(node) == target.graph_id
+            })
         else {
+            if self.graph_registry.graph(&target.graph_id).is_none()
+                && target.graph_id != MAIN_GRAPH_ID
+            {
+                return ReferenceTargetResolution::diagnostic(
+                    target,
+                    ReferenceDiagnosticStatus::DisallowedBoundary,
+                    "Reference target is outside the current project graph.",
+                );
+            }
             return ReferenceTargetResolution::diagnostic(
                 target,
                 ReferenceDiagnosticStatus::MissingNode,
@@ -3138,7 +3191,7 @@ impl GraphDocument {
             target: target.clone(),
             status: ReferenceDiagnosticStatus::Resolved,
             readable_path: readable_reference_path(
-                self.current_graph_id(),
+                &target.graph_id,
                 target_node,
                 &target.output_name,
             ),
@@ -3236,18 +3289,18 @@ impl GraphDocument {
         let Some(target_node) = self.nodes.get(target_node_index) else {
             return Vec::new();
         };
-        let current_graph_id = self.current_graph_id().to_owned();
+        let target_parent_graph_id = self.node_parent_graph_id(target_node).to_owned();
         self.nodes
             .iter()
             .enumerate()
             .filter(|(_, node)| node.reference_input.is_some())
             .flat_map(|(reference_node_index, reference_node)| {
-                let current_graph_id = current_graph_id.clone();
+                let target_parent_graph_id = target_parent_graph_id.clone();
                 self.reference_input_resolutions(reference_node_index)
                     .unwrap_or_default()
                     .into_iter()
                     .filter(move |entry| {
-                        entry.resolution.target.graph_id == current_graph_id
+                        entry.resolution.target.graph_id == target_parent_graph_id
                             && entry.resolution.target.node_id == target_node.node_id
                             && entry.resolution.target.output_name == PRIMARY_GEOMETRY_OUTPUT
                     })
@@ -3321,6 +3374,7 @@ impl GraphDocument {
                 repair_summary,
             },
         );
+        projection_node.parent_graph_id = self.current_graph_id().to_owned();
         let source_position = self
             .nodes
             .get(source_node_index)
@@ -3530,7 +3584,8 @@ impl GraphDocument {
             .iter()
             .position(|node| node.kind == NodeKind::Output)
             .unwrap_or(self.nodes.len());
-        let node = GraphNode::python_operator(instance_id, declaration_id);
+        let mut node = GraphNode::python_operator(instance_id, declaration_id);
+        node.parent_graph_id = self.current_graph_id().to_owned();
         self.nodes.insert(insert_index, node);
         self.rebuild_default_data_flow_edges();
         insert_index
@@ -3553,8 +3608,12 @@ impl GraphDocument {
             .iter()
             .position(|node| node.kind == NodeKind::Output)
             .unwrap_or(self.nodes.len());
-        let mut node =
-            GraphNode::graph_container(instance_id.clone(), self.unique_node_name(&name.into()));
+        let parent_graph_id = self.current_graph_id().to_owned();
+        let mut node = GraphNode::graph_container(
+            instance_id.clone(),
+            self.unique_node_name_in_graph(&name.into(), &parent_graph_id, None),
+        );
+        node.parent_graph_id = parent_graph_id;
         node.layout_position = GraphPoint::new(0.74, 0.24);
         self.nodes.insert(insert_index, node);
         self.graph_containers.push(GraphContainerMetadata {
@@ -3839,7 +3898,8 @@ impl GraphDocument {
             .iter()
             .position(|node| node.kind == NodeKind::Output)
             .unwrap_or(self.nodes.len());
-        let node = GraphNode::procedural_asset(instance_id, asset_id, instance_version);
+        let mut node = GraphNode::procedural_asset(instance_id, asset_id, instance_version);
+        node.parent_graph_id = self.current_graph_id().to_owned();
         self.nodes.insert(insert_index, node);
         self.rebuild_default_data_flow_edges();
         insert_index
@@ -4233,7 +4293,8 @@ impl GraphDocument {
             .iter()
             .position(|node| node.kind == NodeKind::Output)
             .unwrap_or(self.nodes.len());
-        let node = GraphNode::native_operator(instance_id, operator_id);
+        let mut node = GraphNode::native_operator(instance_id, operator_id);
+        node.parent_graph_id = self.current_graph_id().to_owned();
         self.nodes.insert(insert_index, node);
         self.rebuild_default_data_flow_edges();
         insert_index
@@ -7146,6 +7207,7 @@ impl HoudiniGraphSidecar {
                 .map(|node| NodeSidecar {
                     node_id: node.node_id.clone(),
                     name: node.name.clone(),
+                    parent_graph_id: graph.node_parent_graph_id(node).to_owned(),
                     kind: node.kind,
                     layout_position: node.layout_position,
                     parameter_value: node.parameter.value,
@@ -7229,6 +7291,7 @@ impl HoudiniGraphSidecar {
 
         let mut matched_node_indices = vec![false; graph.nodes.len()];
         for (snapshot_index, node_snapshot) in self.nodes.into_iter().enumerate() {
+            let parent_graph_id = node_snapshot.parent_graph_id_or_main();
             let matching_node_index = graph.nodes.iter().enumerate().position(|(index, node)| {
                 !matched_node_indices[index]
                     && node.kind == node_snapshot.kind
@@ -7252,6 +7315,7 @@ impl HoudiniGraphSidecar {
                 if !node_snapshot.node_id.is_empty() {
                     node.node_id = node_snapshot.node_id;
                 }
+                node.parent_graph_id = parent_graph_id;
                 node.generated = node_snapshot.generated;
                 node.coordinate_contract = node_snapshot.coordinate_contract.unwrap_or_else(|| {
                     GraphDocument::default_coordinate_contract_for_kind(node.kind)
@@ -7313,6 +7377,8 @@ struct NodeSidecar {
     node_id: String,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    parent_graph_id: String,
     kind: NodeKind,
     layout_position: GraphPoint,
     parameter_value: f32,
@@ -7343,6 +7409,14 @@ struct NodeSidecar {
 }
 
 impl NodeSidecar {
+    fn parent_graph_id_or_main(&self) -> String {
+        if self.parent_graph_id.is_empty() {
+            MAIN_GRAPH_ID.to_owned()
+        } else {
+            self.parent_graph_id.clone()
+        }
+    }
+
     fn is_instance_node(&self) -> bool {
         matches!(
             self.kind,
@@ -7358,6 +7432,7 @@ impl NodeSidecar {
     }
 
     fn into_instance_node(self) -> GraphNode {
+        let parent_graph_id = self.parent_graph_id_or_main();
         let (name, info) = match self.kind {
             NodeKind::PythonOperator => (
                 "Python Operator",
@@ -7399,6 +7474,7 @@ impl NodeSidecar {
             } else {
                 self.node_id
             },
+            parent_graph_id,
             name: if self.name.is_empty() {
                 name.to_owned()
             } else {
@@ -7533,6 +7609,7 @@ impl LayerSidecar {
 #[derive(Clone)]
 pub(crate) struct GraphNode {
     pub node_id: String,
+    pub parent_graph_id: String,
     pub name: String,
     pub kind: NodeKind,
     pub layout_position: GraphPoint,
@@ -7823,6 +7900,7 @@ impl GraphNode {
     fn null_operator(name: String) -> Self {
         Self {
             node_id: String::new(),
+            parent_graph_id: MAIN_GRAPH_ID.to_owned(),
             name,
             kind: NodeKind::Null,
             layout_position: GraphPoint::new(0.5, 0.5),
@@ -7855,6 +7933,7 @@ impl GraphNode {
     fn reference_input(node_id: String, target: ReferenceTargetEntry) -> Self {
         Self {
             node_id,
+            parent_graph_id: MAIN_GRAPH_ID.to_owned(),
             name: "Reference Input".to_owned(),
             kind: NodeKind::ReferenceInput,
             layout_position: GraphPoint::new(0.5, 0.5),
@@ -7886,6 +7965,7 @@ impl GraphNode {
     fn substrate_projection(instance_id: String, projection: SubstrateProjectionNode) -> Self {
         Self {
             node_id: instance_id,
+            parent_graph_id: MAIN_GRAPH_ID.to_owned(),
             name: "Substrate Projection".to_owned(),
             kind: NodeKind::SubstrateProjection,
             layout_position: GraphPoint::new(0.5, 0.5),
@@ -7915,6 +7995,7 @@ impl GraphNode {
     fn graph_container(node_id: String, name: String) -> Self {
         Self {
             node_id,
+            parent_graph_id: MAIN_GRAPH_ID.to_owned(),
             name,
             kind: NodeKind::GraphContainer,
             layout_position: GraphPoint::new(0.5, 0.5),
@@ -7944,6 +8025,7 @@ impl GraphNode {
     fn python_operator(instance_id: String, declaration_id: String) -> Self {
         Self {
             node_id: instance_id.clone(),
+            parent_graph_id: MAIN_GRAPH_ID.to_owned(),
             name: "Python Operator".to_owned(),
             kind: NodeKind::PythonOperator,
             layout_position: GraphPoint::new(0.5, 0.5),
@@ -7984,6 +8066,7 @@ impl GraphNode {
     fn procedural_asset(instance_id: String, asset_id: String, instance_version: String) -> Self {
         Self {
             node_id: instance_id.clone(),
+            parent_graph_id: MAIN_GRAPH_ID.to_owned(),
             name: "Asset".to_owned(),
             kind: NodeKind::ProceduralAsset,
             layout_position: GraphPoint::new(0.5, 0.5),
@@ -8024,6 +8107,7 @@ impl GraphNode {
     fn native_operator(instance_id: String, operator_id: String) -> Self {
         Self {
             node_id: instance_id.clone(),
+            parent_graph_id: MAIN_GRAPH_ID.to_owned(),
             name: "Native Operator".to_owned(),
             kind: NodeKind::NativeOperator,
             layout_position: GraphPoint::new(0.5, 0.5),
@@ -11763,6 +11847,7 @@ mod tests {
                 provenance,
             },
         );
+        node.parent_graph_id = graph.current_graph_id().to_owned();
         node.layout_position = GraphPoint::new(0.88, 0.62);
         let insert_index = graph
             .nodes
@@ -15303,6 +15388,7 @@ mod tests {
         let mut graph = GraphDocument::sample();
         graph.nodes.push(GraphNode {
             node_id: "scratch.filter".to_owned(),
+            parent_graph_id: "main".to_owned(),
             name: "Scratch Filter".to_owned(),
             kind: NodeKind::Filter,
             layout_position: GraphPoint::new(0.5, 0.1),
@@ -17024,6 +17110,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             .iter()
             .position(|node| node.kind == NodeKind::Source)
             .expect("sample graph should include source node");
+        graph.nodes[source_index].parent_graph_id = "analysis".to_owned();
         let info = graph
             .selected_node_info(source_index)
             .expect("selected node should report info");
@@ -17061,7 +17148,13 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             ],
         };
 
+        let first_analysis_source_index = graph.add_null_operator_node("Source");
         let duplicate_name_index = graph.add_null_operator_node("Source");
+        assert_eq!(graph.nodes[first_analysis_source_index].name, "Source");
+        assert_eq!(
+            graph.nodes[first_analysis_source_index].parent_graph_id,
+            "analysis"
+        );
         let info = graph
             .selected_node_info(duplicate_name_index)
             .expect("selected node should report info");
@@ -17070,6 +17163,105 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(info.graph_location.node_path, "/obj/analysis/Source_2");
         assert!(info.graph_location.name_is_unique_in_graph());
         assert_eq!(info.graph_location.name_collision_count, 1);
+    }
+
+    #[test]
+    fn graph_local_node_names_allow_same_name_across_parent_graphs() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry = ProjectGraphRegistry {
+            selected_graph_id: "analysis".to_owned(),
+            graphs: vec![
+                ProjectGraphMetadata {
+                    graph_id: "main".to_owned(),
+                    name: "Main".to_owned(),
+                    path: "/obj/main".to_owned(),
+                    role: ProjectGraphRole::Main,
+                },
+                ProjectGraphMetadata {
+                    graph_id: "analysis".to_owned(),
+                    name: "Analysis".to_owned(),
+                    path: "/obj/analysis".to_owned(),
+                    role: ProjectGraphRole::Subgraph,
+                },
+            ],
+        };
+        let analysis_source_index = graph.add_null_operator_node("Source");
+        assert_eq!(graph.nodes[analysis_source_index].name, "Source");
+        assert_eq!(
+            graph.nodes[analysis_source_index].parent_graph_id,
+            "analysis"
+        );
+
+        assert!(graph.set_node_name(analysis_source_index, "Filter"));
+        assert_eq!(graph.nodes[analysis_source_index].name, "Filter");
+        assert_eq!(
+            graph.readable_node_path(analysis_source_index).as_deref(),
+            Some("/obj/analysis/Filter")
+        );
+
+        let duplicate_index = graph
+            .duplicate_node(analysis_source_index)
+            .expect("analysis node should duplicate");
+        assert_eq!(graph.nodes[duplicate_index].name, "Filter_2");
+        assert_eq!(graph.nodes[duplicate_index].parent_graph_id, "analysis");
+
+        let target = graph
+            .reference_target_for_node(analysis_source_index)
+            .expect("analysis node should expose a reference target");
+        assert_eq!(target.graph_id, "analysis");
+        graph.graph_registry.selected_graph_id = "main".to_owned();
+        let resolution = graph.resolve_reference_target(&target);
+        assert_eq!(resolution.status, ReferenceDiagnosticStatus::Resolved);
+        assert_eq!(resolution.readable_path, "analysis/Filter:geometry");
+
+        let main_filter_count = graph
+            .nodes
+            .iter()
+            .filter(|node| node.parent_graph_id == "main" && node.name == "Filter")
+            .count();
+        assert_eq!(main_filter_count, 1);
+    }
+
+    #[test]
+    fn graph_local_node_parent_round_trips_and_legacy_defaults_to_main() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry.graphs.push(ProjectGraphMetadata {
+            graph_id: "analysis".to_owned(),
+            name: "Analysis".to_owned(),
+            path: "/obj/analysis".to_owned(),
+            role: ProjectGraphRole::Subgraph,
+        });
+        graph.nodes[0].parent_graph_id = "analysis".to_owned();
+
+        let json = graph.to_sidecar_json().unwrap();
+        assert!(json.contains("parent_graph_id"));
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        assert_eq!(restored.nodes[0].parent_graph_id, "analysis");
+        assert_eq!(
+            restored.readable_node_path(0).as_deref(),
+            Some("/obj/analysis/Source")
+        );
+
+        let mut legacy_value =
+            serde_json::from_str::<serde_json::Value>(&json).expect("sidecar should be valid json");
+        for node in legacy_value["nodes"]
+            .as_array_mut()
+            .expect("nodes should be an array")
+        {
+            node.as_object_mut()
+                .expect("node sidecar should be an object")
+                .remove("parent_graph_id");
+        }
+        let legacy_json = serde_json::to_string_pretty(&legacy_value).unwrap();
+        let mut legacy_restored = GraphDocument::sample();
+        legacy_restored.apply_sidecar_json(&legacy_json).unwrap();
+        assert!(
+            legacy_restored
+                .nodes
+                .iter()
+                .all(|node| node.parent_graph_id == "main")
+        );
     }
 
     #[test]
