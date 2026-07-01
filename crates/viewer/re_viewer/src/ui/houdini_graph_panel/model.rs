@@ -828,6 +828,96 @@ impl GraphDocument {
         true
     }
 
+    pub fn set_annotation_size(&mut self, annotation_index: usize, size: GraphPoint) -> bool {
+        let Some(annotation) = self.annotations.get_mut(annotation_index) else {
+            return false;
+        };
+        annotation.size = size;
+        true
+    }
+
+    pub fn annotation_member_layout_positions(
+        &self,
+        annotation_index: usize,
+    ) -> Vec<(String, GraphPoint)> {
+        let Some(annotation) = self.annotations.get(annotation_index) else {
+            return Vec::new();
+        };
+        if annotation.kind != GraphAnnotationKind::NetworkBox {
+            return Vec::new();
+        }
+
+        self.nodes
+            .iter()
+            .filter(|node| {
+                annotation
+                    .member_node_ids
+                    .iter()
+                    .any(|member_node_id| member_node_id == &node.node_id)
+            })
+            .map(|node| (node.node_id.clone(), node.layout_position))
+            .collect()
+    }
+
+    pub fn finish_annotation_drag(
+        &mut self,
+        annotation_index: usize,
+        old_position: GraphPoint,
+        old_member_positions: &[(String, GraphPoint)],
+    ) -> bool {
+        let Some(annotation) = self.annotations.get(annotation_index) else {
+            return false;
+        };
+        let new_position = annotation.position;
+        let moved_nodes = old_member_positions
+            .iter()
+            .filter_map(|(node_id, old_node_position)| {
+                let node = self.nodes.iter().find(|node| node.node_id == *node_id)?;
+                (node.layout_position != *old_node_position).then(|| NodeLayoutCommandSnapshot {
+                    node_id: node.node_id.clone(),
+                    old_position: *old_node_position,
+                    new_position: node.layout_position,
+                })
+            })
+            .collect::<Vec<_>>();
+        if old_position == new_position && moved_nodes.is_empty() {
+            return false;
+        }
+        let annotation_id = annotation.annotation_id.clone();
+        let annotation_title = annotation.title.clone();
+        self.record_project_command(ProjectCommand::AnnotationMoveEdit {
+            annotation_id,
+            annotation_title,
+            old_position,
+            new_position,
+            moved_nodes,
+        });
+        true
+    }
+
+    pub fn finish_annotation_resize(
+        &mut self,
+        annotation_index: usize,
+        old_size: GraphPoint,
+    ) -> bool {
+        let Some(annotation) = self.annotations.get(annotation_index) else {
+            return false;
+        };
+        let new_size = annotation.size;
+        if old_size == new_size {
+            return false;
+        }
+        let annotation_id = annotation.annotation_id.clone();
+        let annotation_title = annotation.title.clone();
+        self.record_project_command(ProjectCommand::AnnotationResizeEdit {
+            annotation_id,
+            annotation_title,
+            old_size,
+            new_size,
+        });
+        true
+    }
+
     pub fn resize_network_box_to_contents(&mut self, annotation_index: usize) -> bool {
         let Some(annotation) = self.annotations.get(annotation_index) else {
             return false;
@@ -1182,6 +1272,57 @@ impl GraphDocument {
                 node.layout_position = match direction {
                     ProjectCommandDirection::Undo => *old_position,
                     ProjectCommandDirection::Redo => *new_position,
+                };
+                true
+            }
+            ProjectCommand::AnnotationMoveEdit {
+                annotation_id,
+                old_position,
+                new_position,
+                moved_nodes,
+                ..
+            } => {
+                let Some(annotation) = self
+                    .annotations
+                    .iter_mut()
+                    .find(|annotation| annotation.annotation_id == *annotation_id)
+                else {
+                    return false;
+                };
+                annotation.position = match direction {
+                    ProjectCommandDirection::Undo => *old_position,
+                    ProjectCommandDirection::Redo => *new_position,
+                };
+                for moved_node in moved_nodes {
+                    if let Some(node) = self
+                        .nodes
+                        .iter_mut()
+                        .find(|node| node.node_id == moved_node.node_id)
+                    {
+                        node.layout_position = match direction {
+                            ProjectCommandDirection::Undo => moved_node.old_position,
+                            ProjectCommandDirection::Redo => moved_node.new_position,
+                        };
+                    }
+                }
+                true
+            }
+            ProjectCommand::AnnotationResizeEdit {
+                annotation_id,
+                old_size,
+                new_size,
+                ..
+            } => {
+                let Some(annotation) = self
+                    .annotations
+                    .iter_mut()
+                    .find(|annotation| annotation.annotation_id == *annotation_id)
+                else {
+                    return false;
+                };
+                annotation.size = match direction {
+                    ProjectCommandDirection::Undo => *old_size,
+                    ProjectCommandDirection::Redo => *new_size,
                 };
                 true
             }
@@ -6925,6 +7066,19 @@ pub(crate) enum ProjectCommand {
         old_position: GraphPoint,
         new_position: GraphPoint,
     },
+    AnnotationMoveEdit {
+        annotation_id: String,
+        annotation_title: String,
+        old_position: GraphPoint,
+        new_position: GraphPoint,
+        moved_nodes: Vec<NodeLayoutCommandSnapshot>,
+    },
+    AnnotationResizeEdit {
+        annotation_id: String,
+        annotation_title: String,
+        old_size: GraphPoint,
+        new_size: GraphPoint,
+    },
     LayerVisibilityEdit {
         layer_index: usize,
         layer_name: String,
@@ -6957,6 +7111,16 @@ impl ProjectCommand {
                 format!("Set {node_name} comment visibility")
             }
             Self::NodeLayoutEdit { node_name, .. } => format!("Move {node_name}"),
+            Self::AnnotationMoveEdit {
+                annotation_title, ..
+            } => {
+                format!("Move {annotation_title}")
+            }
+            Self::AnnotationResizeEdit {
+                annotation_title, ..
+            } => {
+                format!("Resize {annotation_title}")
+            }
             Self::LayerVisibilityEdit { layer_name, .. } => {
                 format!("Set {layer_name} visibility")
             }
@@ -6965,6 +7129,13 @@ impl ProjectCommand {
             }
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NodeLayoutCommandSnapshot {
+    node_id: String,
+    old_position: GraphPoint,
+    new_position: GraphPoint,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10833,9 +11004,133 @@ mod tests {
     }
 
     #[test]
+    fn annotation_drag_records_one_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let box_index = graph
+            .annotations
+            .iter()
+            .position(|annotation| annotation.kind == GraphAnnotationKind::NetworkBox)
+            .expect("sample graph should include a network box");
+        let annotation_title = graph.annotations[box_index].title.clone();
+        let original_position = graph.annotations[box_index].position;
+        let original_member_positions = graph.annotation_member_layout_positions(box_index);
+        assert!(!original_member_positions.is_empty());
+
+        graph.translate_annotation(box_index, GraphPoint::new(0.12, 0.08));
+        graph.translate_annotation(box_index, GraphPoint::new(-0.02, 0.04));
+        assert!(graph.command_history.undo_stack.is_empty());
+        let final_position = graph.annotations[box_index].position;
+        let final_member_positions = original_member_positions
+            .iter()
+            .filter_map(|(node_id, _)| {
+                graph
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_id == *node_id)
+                    .map(|node| (node_id.clone(), node.layout_position))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(graph.finish_annotation_drag(
+            box_index,
+            original_position,
+            &original_member_positions,
+        ));
+
+        assert_eq!(graph.annotations[box_index].position, final_position);
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::AnnotationMoveEdit {
+                annotation_title: recorded_title,
+                old_position,
+                new_position,
+                moved_nodes,
+                ..
+            }) if recorded_title == &annotation_title
+                && *old_position == original_position
+                && *new_position == final_position
+                && moved_nodes.len() == original_member_positions.len()
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some(format!("Move {annotation_title}").as_str())
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.annotations[box_index].position, original_position);
+        for (node_id, original_node_position) in &original_member_positions {
+            let node = graph
+                .nodes
+                .iter()
+                .find(|node| node.node_id == *node_id)
+                .expect("moved member node should still exist");
+            assert_eq!(node.layout_position, *original_node_position);
+        }
+
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.annotations[box_index].position, final_position);
+        for (node_id, final_node_position) in &final_member_positions {
+            let node = graph
+                .nodes
+                .iter()
+                .find(|node| node.node_id == *node_id)
+                .expect("moved member node should still exist");
+            assert_eq!(node.layout_position, *final_node_position);
+        }
+        assert!(!graph.finish_annotation_drag(box_index, final_position, &final_member_positions,));
+        assert!(!graph.finish_annotation_drag(graph.annotations.len(), original_position, &[],));
+    }
+
+    #[test]
+    fn annotation_resize_records_one_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let box_index = graph
+            .annotations
+            .iter()
+            .position(|annotation| annotation.kind == GraphAnnotationKind::NetworkBox)
+            .expect("sample graph should include a network box");
+        let annotation_title = graph.annotations[box_index].title.clone();
+        let original_size = graph.annotations[box_index].size;
+        let final_size = GraphPoint::new(0.42, 0.36);
+
+        assert!(graph.set_annotation_size(box_index, GraphPoint::new(0.32, 0.28)));
+        assert!(graph.set_annotation_size(box_index, final_size));
+        assert!(graph.command_history.undo_stack.is_empty());
+
+        assert!(graph.finish_annotation_resize(box_index, original_size));
+
+        assert_eq!(graph.annotations[box_index].size, final_size);
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::AnnotationResizeEdit {
+                annotation_title: recorded_title,
+                old_size,
+                new_size,
+                ..
+            }) if recorded_title == &annotation_title
+                && *old_size == original_size
+                && *new_size == final_size
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some(format!("Resize {annotation_title}").as_str())
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.annotations[box_index].size, original_size);
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.annotations[box_index].size, final_size);
+        assert!(!graph.finish_annotation_resize(box_index, final_size));
+        assert!(!graph.finish_annotation_resize(graph.annotations.len(), original_size));
+    }
+
+    #[test]
     fn command_history_is_runtime_state_not_sidecar_state() {
         let mut graph = GraphDocument::sample();
         let original_position = graph.nodes[1].layout_position;
+        let original_annotation_position = graph.annotations[0].position;
+        let original_annotation_members = graph.annotation_member_layout_positions(0);
+        let original_annotation_size = graph.annotations[0].size;
         assert!(graph.set_node_name(1, "FILTER_LOW"));
         assert!(graph.set_node_parameter_value(1, 0.72));
         assert!(graph.set_layer_visibility(0, false));
@@ -10844,6 +11139,14 @@ mod tests {
         assert!(graph.set_node_comment_visibility(1, true));
         graph.set_node_layout_position(1, GraphPoint::new(0.25, 0.75));
         assert!(graph.finish_node_layout_drag(1, original_position));
+        assert!(graph.translate_annotation(0, GraphPoint::new(0.04, 0.04)));
+        assert!(graph.finish_annotation_drag(
+            0,
+            original_annotation_position,
+            &original_annotation_members,
+        ));
+        assert!(graph.set_annotation_size(0, GraphPoint::new(0.42, 0.36)));
+        assert!(graph.finish_annotation_resize(0, original_annotation_size));
         assert!(!graph.command_history.undo_stack.is_empty());
 
         let json = graph.to_sidecar_json().unwrap();

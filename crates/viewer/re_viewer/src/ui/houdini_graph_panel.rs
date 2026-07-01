@@ -88,7 +88,10 @@ pub(crate) struct HoudiniGraphPanel {
     node_drag_start_position: Option<GraphPoint>,
     node_drag_peak_delta_pixels: f32,
     dragging_annotation: Option<usize>,
+    annotation_drag_start_position: Option<GraphPoint>,
+    annotation_drag_start_member_positions: Vec<(String, GraphPoint)>,
     resizing_annotation: Option<usize>,
+    annotation_resize_start_size: Option<GraphPoint>,
     graph_view_zoom: f32,
     graph_view_pan: Vec2,
     pending_frame_selected: bool,
@@ -138,7 +141,10 @@ impl Default for HoudiniGraphPanel {
             node_drag_start_position: None,
             node_drag_peak_delta_pixels: 0.0,
             dragging_annotation: None,
+            annotation_drag_start_position: None,
+            annotation_drag_start_member_positions: Vec::new(),
             resizing_annotation: None,
+            annotation_resize_start_size: None,
             graph_view_zoom: 1.0,
             graph_view_pan: Vec2::ZERO,
             pending_frame_selected: false,
@@ -3138,12 +3144,22 @@ impl HoudiniGraphPanel {
                         if annotation_resize_handle_rect(*annotation_rect).contains(pointer_pos) {
                             self.selected_annotation = Some(index);
                             self.resizing_annotation = Some(index);
+                            self.annotation_resize_start_size = graph
+                                .annotations
+                                .get(index)
+                                .map(|annotation| annotation.size);
                             hit_annotation = true;
                             break;
                         }
                         if annotation_rect.contains(pointer_pos) {
                             self.selected_annotation = Some(index);
                             self.dragging_annotation = Some(index);
+                            self.annotation_drag_start_position = graph
+                                .annotations
+                                .get(index)
+                                .map(|annotation| annotation.position);
+                            self.annotation_drag_start_member_positions =
+                                graph.annotation_member_layout_positions(index);
                             hit_annotation = true;
                             break;
                         }
@@ -3204,14 +3220,20 @@ impl HoudiniGraphPanel {
                         self.graph_view_pan,
                     );
                 } else if let Some(resizing_annotation) = self.resizing_annotation {
-                    if let Some(annotation) = graph.annotations.get_mut(resizing_annotation) {
-                        let pointer_delta = ui.input(|input| input.pointer.delta());
-                        annotation.size.x = (annotation.size.x
-                            + pointer_delta.x / (layout_rect.width() * self.graph_view_zoom))
-                            .clamp(0.08, 0.95);
-                        annotation.size.y = (annotation.size.y
-                            + pointer_delta.y / (layout_rect.height() * self.graph_view_zoom))
-                            .clamp(0.08, 0.95);
+                    let pointer_delta = ui.input(|input| input.pointer.delta());
+                    let size = graph
+                        .annotations
+                        .get(resizing_annotation)
+                        .map(|annotation| GraphPoint {
+                            x: (annotation.size.x
+                                + pointer_delta.x / (layout_rect.width() * self.graph_view_zoom))
+                                .clamp(0.08, 0.95),
+                            y: (annotation.size.y
+                                + pointer_delta.y / (layout_rect.height() * self.graph_view_zoom))
+                                .clamp(0.08, 0.95),
+                        });
+                    if let Some(size) = size {
+                        graph.set_annotation_size(resizing_annotation, size);
                     }
                 } else if let Some(dragging_annotation) = self.dragging_annotation {
                     let pointer_delta = ui.input(|input| input.pointer.delta());
@@ -3236,11 +3258,28 @@ impl HoudiniGraphPanel {
                     graph.finish_node_layout_drag(dragging_node, start_position);
                 }
             }
+            if let Some(dragging_annotation) = self.dragging_annotation
+                && let Some(start_position) = self.annotation_drag_start_position
+            {
+                graph.finish_annotation_drag(
+                    dragging_annotation,
+                    start_position,
+                    &self.annotation_drag_start_member_positions,
+                );
+            }
+            if let Some(resizing_annotation) = self.resizing_annotation
+                && let Some(start_size) = self.annotation_resize_start_size
+            {
+                graph.finish_annotation_resize(resizing_annotation, start_size);
+            }
             self.dragging_node = None;
             self.node_drag_start_position = None;
             self.node_drag_peak_delta_pixels = 0.0;
             self.dragging_annotation = None;
+            self.annotation_drag_start_position = None;
+            self.annotation_drag_start_member_positions.clear();
             self.resizing_annotation = None;
+            self.annotation_resize_start_size = None;
         }
 
         let hovered_ring_action = if response.hovered() {
