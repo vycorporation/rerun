@@ -103,3 +103,4 @@ Python-backed assets are deferred until the Python operator lane is implemented.
 5. #152 - Complete: add promoted parameter labels, current values, groups, and stable internal node parameter bindings.
 6. #156 - Complete: add explicit match-definition and upgrade-to-current-definition model actions for asset instances.
 7. #158 - Complete: add external artifact reference metadata and asset inspection warnings without embedding heavy artifacts.
+8. #160 - Complete: add typed asset input/output boundary editing model actions with duplicate guards and stale-instance marking.
