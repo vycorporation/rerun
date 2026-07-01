@@ -136,6 +136,8 @@ pub(crate) struct GraphContainerMetadata {
 pub(crate) struct GraphBoundaryDeclaration {
     pub inputs: Vec<HoudiniOperatorPort>,
     pub outputs: Vec<HoudiniOperatorPort>,
+    #[serde(default)]
+    pub mappings: Vec<GraphBoundaryMapping>,
 }
 
 impl GraphBoundaryDeclaration {
@@ -149,6 +151,7 @@ impl GraphBoundaryDeclaration {
                 PRIMARY_GEOMETRY_OUTPUT,
                 "Geometry table exposed by the graph container boundary.",
             )],
+            mappings: Vec::new(),
         }
     }
 
@@ -161,6 +164,29 @@ impl GraphBoundaryDeclaration {
 
     fn primary_output(&self) -> Option<&HoudiniOperatorPort> {
         self.outputs.first()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct GraphBoundaryMapping {
+    pub direction: GraphBoundaryMappingDirection,
+    pub public_port_name: String,
+    pub internal_node_id: String,
+    pub internal_port_name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum GraphBoundaryMappingDirection {
+    Input,
+    Output,
+}
+
+impl GraphBoundaryMappingDirection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+        }
     }
 }
 
@@ -248,11 +274,13 @@ impl GraphDocument {
                 internal_graph_path: None,
                 inputs: Vec::new(),
                 outputs: Vec::new(),
+                mappings: Vec::new(),
                 navigable: false,
                 status: GraphContainerStatus::MissingContainerMetadata,
             };
         };
         let graph = self.graph_registry.graph(&container.internal_graph_id);
+        let internal_graph_exists = graph.is_some();
         GraphContainerNodeInfo {
             kind: container.kind,
             internal_graph_id: container.internal_graph_id.clone(),
@@ -260,13 +288,58 @@ impl GraphDocument {
             internal_graph_path: graph.map(|graph| graph.path.clone()),
             inputs: container.boundary.inputs.clone(),
             outputs: container.boundary.outputs.clone(),
-            navigable: container.navigable && graph.is_some(),
-            status: if graph.is_some() {
+            mappings: self.graph_boundary_mapping_info(container, internal_graph_exists),
+            navigable: container.navigable && internal_graph_exists,
+            status: if internal_graph_exists {
                 GraphContainerStatus::Resolved
             } else {
                 GraphContainerStatus::MissingInternalGraph
             },
         }
+    }
+
+    fn graph_boundary_mapping_info(
+        &self,
+        container: &GraphContainerMetadata,
+        internal_graph_exists: bool,
+    ) -> Vec<GraphBoundaryMappingInfo> {
+        container
+            .boundary
+            .mappings
+            .iter()
+            .map(|mapping| {
+                let public_port_exists = match mapping.direction {
+                    GraphBoundaryMappingDirection::Input => container
+                        .boundary
+                        .inputs
+                        .iter()
+                        .any(|port| port.name == mapping.public_port_name),
+                    GraphBoundaryMappingDirection::Output => container
+                        .boundary
+                        .outputs
+                        .iter()
+                        .any(|port| port.name == mapping.public_port_name),
+                };
+                let status = if !internal_graph_exists {
+                    GraphBoundaryMappingStatus::MissingInternalGraph
+                } else if !public_port_exists {
+                    GraphBoundaryMappingStatus::MissingPublicPort
+                } else if mapping.internal_node_id.trim().is_empty()
+                    || mapping.internal_port_name.trim().is_empty()
+                {
+                    GraphBoundaryMappingStatus::MissingInternalAnchor
+                } else {
+                    GraphBoundaryMappingStatus::Resolved
+                };
+                GraphBoundaryMappingInfo {
+                    direction: mapping.direction,
+                    public_port_name: mapping.public_port_name.clone(),
+                    internal_node_id: mapping.internal_node_id.clone(),
+                    internal_port_name: mapping.internal_port_name.clone(),
+                    status,
+                }
+            })
+            .collect()
     }
 
     fn normalize_graph_containers(&mut self) {
@@ -5032,11 +5105,18 @@ impl GraphDocument {
                 let container = self.graph_container_info_for_node(node);
                 let input_count = container.inputs.len();
                 let output_count = container.outputs.len();
-                let warnings = if container.status == GraphContainerStatus::Resolved {
+                let mut warnings = if container.status == GraphContainerStatus::Resolved {
                     Vec::new()
                 } else {
                     vec![container.status.as_str().to_owned()]
                 };
+                warnings.extend(
+                    container
+                        .mappings
+                        .iter()
+                        .filter(|mapping| mapping.status != GraphBoundaryMappingStatus::Resolved)
+                        .map(GraphBoundaryMappingInfo::diagnostic),
+                );
                 NodeInfo {
                     kind: node.kind,
                     role: node.kind.role(),
@@ -9903,8 +9983,50 @@ pub(crate) struct GraphContainerNodeInfo {
     pub internal_graph_path: Option<String>,
     pub inputs: Vec<HoudiniOperatorPort>,
     pub outputs: Vec<HoudiniOperatorPort>,
+    pub mappings: Vec<GraphBoundaryMappingInfo>,
     pub navigable: bool,
     pub status: GraphContainerStatus,
+}
+
+#[allow(dead_code)]
+pub(crate) struct GraphBoundaryMappingInfo {
+    pub direction: GraphBoundaryMappingDirection,
+    pub public_port_name: String,
+    pub internal_node_id: String,
+    pub internal_port_name: String,
+    pub status: GraphBoundaryMappingStatus,
+}
+
+impl GraphBoundaryMappingInfo {
+    fn diagnostic(&self) -> String {
+        format!(
+            "Boundary {} mapping `{}` -> `{}`:`{}` is {}.",
+            self.direction.as_str(),
+            self.public_port_name,
+            self.internal_node_id,
+            self.internal_port_name,
+            self.status.as_str()
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GraphBoundaryMappingStatus {
+    Resolved,
+    MissingInternalGraph,
+    MissingPublicPort,
+    MissingInternalAnchor,
+}
+
+impl GraphBoundaryMappingStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolved => "resolved",
+            Self::MissingInternalGraph => "missing internal graph",
+            Self::MissingPublicPort => "missing public port",
+            Self::MissingInternalAnchor => "missing internal anchor",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10721,9 +10843,10 @@ mod tests {
     use super::{
         AttributeTableQuery, AttributeTableSort, EvaluationState, ExportGeometry,
         GeneratedNodeBindingState, GeneratedNodeInfo, GeneratedNodeSource, Geometry,
-        GeometryBounds, GeometryKind, GraphAnnotationKind, GraphBoundaryDeclaration, GraphColor,
-        GraphContainerStatus, GraphDataFlowEdge, GraphDataFlowEdgeDiagnosticStatus, GraphDocument,
-        GraphEvaluationMode, GraphNode, GraphPoint, GraphStyle, GraphWorkItemStatus,
+        GeometryBounds, GeometryKind, GraphAnnotationKind, GraphBoundaryDeclaration,
+        GraphBoundaryMapping, GraphBoundaryMappingDirection, GraphBoundaryMappingStatus,
+        GraphColor, GraphContainerStatus, GraphDataFlowEdge, GraphDataFlowEdgeDiagnosticStatus,
+        GraphDocument, GraphEvaluationMode, GraphNode, GraphPoint, GraphStyle, GraphWorkItemStatus,
         HoudiniCubicBezierParquetSchema, HoudiniDataKind, HoudiniGeometryRecord,
         HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
         HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
@@ -15672,6 +15795,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 required: true,
                 help: "Scalar threshold output.".to_owned(),
             }],
+            mappings: Vec::new(),
         };
         let output_index = graph
             .nodes
@@ -15695,6 +15819,128 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             GraphDataFlowEdgeDiagnosticStatus::IncompatibleDataKind
         );
         assert!(diagnostic.message.contains("threshold"));
+    }
+
+    #[test]
+    fn graph_container_boundary_mappings_round_trip_and_inspect() {
+        let mut graph = GraphDocument::sample();
+        let node_index = graph.add_graph_container_node(
+            "Mapped Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.mapped".to_owned(),
+                name: "Mapped".to_owned(),
+                path: "/obj/main/mapped".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+        graph.graph_containers[0]
+            .boundary
+            .mappings
+            .push(GraphBoundaryMapping {
+                direction: GraphBoundaryMappingDirection::Input,
+                public_port_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                internal_node_id: "IN_GEOMETRY".to_owned(),
+                internal_port_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            });
+        graph.graph_containers[0]
+            .boundary
+            .mappings
+            .push(GraphBoundaryMapping {
+                direction: GraphBoundaryMappingDirection::Output,
+                public_port_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                internal_node_id: "OUT_GEOMETRY".to_owned(),
+                internal_port_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            });
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        let restored_node_index = restored
+            .nodes
+            .iter()
+            .position(|node| node.node_id == graph.nodes[node_index].node_id)
+            .expect("container node should restore");
+        let restored_info = restored
+            .selected_node_info(restored_node_index)
+            .expect("container info should restore");
+        let restored_container = restored_info
+            .graph_container
+            .expect("container mappings should inspect");
+
+        assert!(json.contains("mappings"));
+        assert_eq!(
+            restored.graph_containers[0].boundary.mappings,
+            graph.graph_containers[0].boundary.mappings
+        );
+        assert_eq!(restored_info.status, NodeStatus::Healthy);
+        assert_eq!(restored_container.mappings.len(), 2);
+        assert_eq!(
+            restored_container.mappings[0].status,
+            GraphBoundaryMappingStatus::Resolved
+        );
+        assert_eq!(
+            restored_container.mappings[1].internal_node_id,
+            "OUT_GEOMETRY"
+        );
+    }
+
+    #[test]
+    fn graph_container_boundary_mapping_diagnostics_report_unresolved_metadata() {
+        let mut graph = GraphDocument::sample();
+        let node_index = graph.add_graph_container_node(
+            "Broken Mapping Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.broken_mapping".to_owned(),
+                name: "Broken Mapping".to_owned(),
+                path: "/obj/main/broken_mapping".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+        graph.graph_containers[0]
+            .boundary
+            .mappings
+            .push(GraphBoundaryMapping {
+                direction: GraphBoundaryMappingDirection::Output,
+                public_port_name: "missing_output".to_owned(),
+                internal_node_id: "OUT_GEOMETRY".to_owned(),
+                internal_port_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            });
+        graph.graph_containers[0]
+            .boundary
+            .mappings
+            .push(GraphBoundaryMapping {
+                direction: GraphBoundaryMappingDirection::Input,
+                public_port_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                internal_node_id: String::new(),
+                internal_port_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            });
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("container info should exist");
+        let container = info
+            .graph_container
+            .expect("container mappings should inspect");
+
+        assert_eq!(info.status, NodeStatus::Failed);
+        assert_eq!(
+            container.mappings[0].status,
+            GraphBoundaryMappingStatus::MissingPublicPort
+        );
+        assert_eq!(
+            container.mappings[1].status,
+            GraphBoundaryMappingStatus::MissingInternalAnchor
+        );
+        assert!(
+            info.warnings
+                .iter()
+                .any(|warning| warning.contains("missing public port"))
+        );
+        assert!(
+            info.warnings
+                .iter()
+                .any(|warning| warning.contains("missing internal anchor"))
+        );
     }
 
     #[test]
