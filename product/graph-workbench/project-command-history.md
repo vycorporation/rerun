@@ -23,6 +23,7 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Issue `#111`: add undo/redo for network box and sticky note creation.
 - Issue `#112`: add undo/redo for network box resize-to-contents edits.
 - Issue `#113`: add undo/redo for ordinary node deletion.
+- Issue `#114`: add undo/redo for reference target enablement and removal.
 
 ## Implementation notes
 
@@ -40,4 +41,5 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Organization creation commands restore network boxes and sticky notes with their captured stable annotation identities and do not change graph data flow.
 - Network box fit commands restore old and new organization bounds without moving member nodes or changing data flow.
 - Node delete commands restore the captured graph node by stable node ID; references to deleted nodes remain stable missing-reference diagnostics until undo restores the target.
+- Reference target commands restore per-target enablement and removed target entries by stable target identity without copying source data or rebinding by name.
 - Sidecar save/load intentionally omits the undo and redo stacks so history does not become a second persistence format.
