@@ -35,7 +35,8 @@ for the graph hierarchy lane.
 | `#131` | complete | Current graph path and graph-local inspection | Shows selected graph path, readable node path, and graph-local name uniqueness in node inspection while preserving stable ID references. |
 | `#132` | complete | Focused graph hierarchy tracker | Adds this tracker and points the main PRD/ADR status ledger at it. |
 | `#142` | complete | Graph container metadata | Adds serializable subnet-like graph container metadata keyed by stable node ID, pointing to an internal named graph without moving nodes yet. |
-| `#144` | complete when merged | Typed graph container boundaries | Adds serializable typed input/output declarations to graph containers and exposes boundary outputs as stable reference targets. |
+| `#144` | complete | Typed graph container boundaries | Adds serializable typed input/output declarations to graph containers and exposes boundary outputs as stable reference targets. |
+| `#146` | complete when merged | Graph container boundary anchor mappings | Adds serializable mappings from public boundary ports to internal graph anchors, with model diagnostics for unresolved metadata. |
 
 ## Next implementation candidates
 
@@ -57,6 +58,7 @@ for the graph hierarchy lane.
 
 4. Typed graph boundary inputs and outputs.
    - `#144` models typed public graph container inputs and outputs.
+   - `#146` maps typed public ports to internal input/output anchors.
    - Preserve ordinary editable graph references while preventing private asset
      internals from becoming external reference targets.
 
