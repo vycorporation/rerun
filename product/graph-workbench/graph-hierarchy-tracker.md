@@ -34,7 +34,8 @@ for the graph hierarchy lane.
 | `#130` | complete | Graph registry metadata | `GraphDocument` owns durable graph registry metadata, sidecar JSON round-trips it, and older sidecars default to the main graph. |
 | `#131` | complete | Current graph path and graph-local inspection | Shows selected graph path, readable node path, and graph-local name uniqueness in node inspection while preserving stable ID references. |
 | `#132` | complete | Focused graph hierarchy tracker | Adds this tracker and points the main PRD/ADR status ledger at it. |
-| `#142` | complete when merged | Graph container metadata | Adds serializable subnet-like graph container metadata keyed by stable node ID, pointing to an internal named graph without moving nodes yet. |
+| `#142` | complete | Graph container metadata | Adds serializable subnet-like graph container metadata keyed by stable node ID, pointing to an internal named graph without moving nodes yet. |
+| `#144` | complete when merged | Typed graph container boundaries | Adds serializable typed input/output declarations to graph containers and exposes boundary outputs as stable reference targets. |
 
 ## Next implementation candidates
 
@@ -55,7 +56,7 @@ for the graph hierarchy lane.
    - Keep selected-node collapse separate from network box organization.
 
 4. Typed graph boundary inputs and outputs.
-   - Model typed public graph container inputs and outputs.
+   - `#144` models typed public graph container inputs and outputs.
    - Preserve ordinary editable graph references while preventing private asset
      internals from becoming external reference targets.
 
