@@ -12,6 +12,7 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 
 - Issue `#88`: add the first project-command history slice for undo/redo of graph-owned node parameter edits.
 - Issue `#96`: add undo/redo for layer visibility and layer order presentation edits.
+- Issue `#98`: add undo/redo for stable-ID-safe node renames.
 
 ## Implementation notes
 
@@ -19,4 +20,5 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Runtime evaluation state, work items, running work, and cached outputs are not restored by undo/redo.
 - The first slice records node parameter edits with stable node identity, parameter label, old value, and new value.
 - Layer visibility and layer order commands restore presentation intent only; they do not replay work items or cached output.
+- Node rename commands restore user-facing node names while references continue to resolve by stable node ID.
 - Sidecar save/load intentionally omits the undo and redo stacks so history does not become a second persistence format.
