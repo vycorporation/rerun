@@ -939,7 +939,9 @@ impl TestContext {
                 SystemCommand::EnableInspectBlueprintTimeline(_) => handled = false,
 
                 #[cfg(not(target_arch = "wasm32"))]
-                SystemCommand::FileSaver(_) => handled = false,
+                SystemCommand::FileSaver(_) | SystemCommand::SaveActiveBlueprintToPath(_) => {
+                    handled = false
+                }
             }
 
             if !handled {

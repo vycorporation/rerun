@@ -334,13 +334,20 @@ fn workbench_browser_ui(
 
             if ui
                 .small_button("Duplicate")
-                .on_hover_text("Register a personal copy and open the Save Blueprint flow for the edited .rbl payload.")
+                .on_hover_text(
+                    "Register a personal copy and save the current blueprint to its .rbl payload.",
+                )
                 .clicked()
             {
                 if let WorkbenchLayoutSource::BundledPreset(preset) = entry.source {
-                    let _ = register_workbench_duplicate(WorkbenchLayoutScope::Personal, entry, preset);
-                    apply_houdini_workbench_preset(ctx, viewport_blueprint, preset);
-                    ctx.command_sender().send_ui(re_ui::UICommand::SaveBlueprint);
+                    if let Ok(registered) =
+                        register_workbench_duplicate(WorkbenchLayoutScope::Personal, entry, preset)
+                    {
+                        apply_houdini_workbench_preset(ctx, viewport_blueprint, preset);
+                        if let Some(path) = registered.blueprint_path {
+                            save_active_workbench_blueprint(ctx, path);
+                        }
+                    }
                 }
                 ui.close();
             }
@@ -415,6 +422,22 @@ fn open_workbench_blueprint(ctx: &re_viewer_context::ViewerContext<'_>, path: st
 
 #[cfg(target_arch = "wasm32")]
 fn open_workbench_blueprint(
+    _ctx: &re_viewer_context::ViewerContext<'_>,
+    _path: std::path::PathBuf,
+) {
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save_active_workbench_blueprint(
+    ctx: &re_viewer_context::ViewerContext<'_>,
+    path: std::path::PathBuf,
+) {
+    ctx.command_sender()
+        .send_system(SystemCommand::SaveActiveBlueprintToPath(path));
+}
+
+#[cfg(target_arch = "wasm32")]
+fn save_active_workbench_blueprint(
     _ctx: &re_viewer_context::ViewerContext<'_>,
     _path: std::path::PathBuf,
 ) {
