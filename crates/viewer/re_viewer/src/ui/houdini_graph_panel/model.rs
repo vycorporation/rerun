@@ -779,6 +779,18 @@ impl GraphDocument {
         Some(insert_index)
     }
 
+    pub fn remove_annotation(&mut self, annotation_index: usize) -> Option<GraphAnnotation> {
+        if annotation_index >= self.annotations.len() {
+            return None;
+        }
+        let annotation = self.annotations.remove(annotation_index);
+        self.record_project_command(ProjectCommand::AnnotationDelete {
+            annotation: annotation.clone(),
+            remove_index: annotation_index,
+        });
+        Some(annotation)
+    }
+
     pub fn settle_node_drag_for_network_boxes(
         &mut self,
         node_index: usize,
@@ -1574,6 +1586,34 @@ impl GraphDocument {
                         }
                         let insert_index = (*insert_index).min(self.annotations.len());
                         self.annotations.insert(insert_index, annotation.clone());
+                        true
+                    }
+                }
+            }
+            ProjectCommand::AnnotationDelete {
+                annotation,
+                remove_index,
+            } => {
+                match direction {
+                    ProjectCommandDirection::Undo => {
+                        if self
+                            .annotations
+                            .iter()
+                            .any(|existing| existing.annotation_id == annotation.annotation_id)
+                        {
+                            return false;
+                        }
+                        let insert_index = (*remove_index).min(self.annotations.len());
+                        self.annotations.insert(insert_index, annotation.clone());
+                        true
+                    }
+                    ProjectCommandDirection::Redo => {
+                        let Some(annotation_index) = self.annotations.iter().position(|existing| {
+                            existing.annotation_id == annotation.annotation_id
+                        }) else {
+                            return false;
+                        };
+                        self.annotations.remove(annotation_index);
                         true
                     }
                 }
@@ -7594,6 +7634,10 @@ pub(crate) enum ProjectCommand {
         annotation: GraphAnnotation,
         insert_index: usize,
     },
+    AnnotationDelete {
+        annotation: GraphAnnotation,
+        remove_index: usize,
+    },
     AnnotationResizeEdit {
         annotation_id: String,
         annotation_title: String,
@@ -7700,6 +7744,9 @@ impl ProjectCommand {
             }
             Self::AnnotationCreate { annotation, .. } => {
                 format!("Create {}", annotation.title)
+            }
+            Self::AnnotationDelete { annotation, .. } => {
+                format!("Delete {}", annotation.title)
             }
             Self::AnnotationResizeEdit {
                 annotation_title, ..
@@ -12192,6 +12239,88 @@ mod tests {
     }
 
     #[test]
+    fn annotation_delete_records_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        graph.annotations.clear();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+
+        let box_index = graph
+            .add_network_box_for_node(filter_index)
+            .expect("network box should be created for selected node");
+        let deleted_box = graph.annotations[box_index].clone();
+        let member_node_id = graph.nodes[filter_index].node_id.clone();
+
+        assert_eq!(
+            graph.remove_annotation(box_index),
+            Some(deleted_box.clone())
+        );
+
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|node| node.node_id == member_node_id)
+        );
+        assert!(graph.annotations.is_empty());
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::AnnotationDelete {
+                annotation,
+                remove_index: 0,
+            }) if annotation == &deleted_box
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Delete Network Box")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.annotations.len(), 1);
+        assert_eq!(graph.annotations[0], deleted_box);
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Delete Network Box")
+        );
+
+        assert!(graph.redo_project_command());
+        assert!(graph.annotations.is_empty());
+
+        let note_index = graph
+            .add_sticky_note_near_node(filter_index)
+            .expect("sticky note should be created near selected node");
+        assert!(graph.set_annotation_text(note_index, "Review output bounds.".to_owned()));
+        assert!(graph.set_annotation_collapsed(note_index, true));
+        let deleted_note = graph.annotations[note_index].clone();
+
+        assert_eq!(
+            graph.remove_annotation(note_index),
+            Some(deleted_note.clone())
+        );
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::AnnotationDelete {
+                annotation,
+                remove_index: 0,
+            }) if annotation == &deleted_note
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Delete Sticky Note")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.annotations.len(), 1);
+        assert_eq!(graph.annotations[0], deleted_note);
+        assert!(graph.redo_project_command());
+        assert!(graph.annotations.is_empty());
+        assert!(graph.remove_annotation(graph.annotations.len()).is_none());
+    }
+
+    #[test]
     fn annotation_resize_records_one_undoable_project_command() {
         let mut graph = GraphDocument::sample();
         let box_index = graph
@@ -12438,6 +12567,7 @@ mod tests {
         assert!(graph.set_annotation_text(1, "Check overlay bounds.".to_owned()));
         assert!(graph.set_annotation_collapsed(0, true));
         assert!(graph.set_all_annotations_collapsed(true));
+        assert!(graph.remove_annotation(0).is_some());
         assert!(!graph.command_history.undo_stack.is_empty());
 
         let json = graph.to_sidecar_json().unwrap();

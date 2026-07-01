@@ -3803,6 +3803,15 @@ impl HoudiniGraphPanel {
         }
 
         ui.separator();
+        if ui.button("Delete").clicked() {
+            if graph.remove_annotation(annotation_index).is_some() {
+                self.selected_annotation = None;
+            }
+            ui.close();
+        }
+        if !graph.annotations.is_empty() {
+            ui.separator();
+        }
         if ui.button("Organization Pane").clicked() {
             self.active_graph_pane = GraphWorkbenchPane::Operators;
             ui.close();
