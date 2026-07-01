@@ -127,7 +127,41 @@ pub(crate) struct GraphContainerMetadata {
     pub container_node_id: String,
     pub internal_graph_id: String,
     pub kind: GraphContainerKind,
+    #[serde(default = "GraphBoundaryDeclaration::geometry_passthrough")]
+    pub boundary: GraphBoundaryDeclaration,
     pub navigable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct GraphBoundaryDeclaration {
+    pub inputs: Vec<HoudiniOperatorPort>,
+    pub outputs: Vec<HoudiniOperatorPort>,
+}
+
+impl GraphBoundaryDeclaration {
+    fn geometry_passthrough() -> Self {
+        Self {
+            inputs: vec![HoudiniOperatorPort::geometry(
+                PRIMARY_GEOMETRY_OUTPUT,
+                "Geometry table entering the graph container boundary.",
+            )],
+            outputs: vec![HoudiniOperatorPort::geometry(
+                PRIMARY_GEOMETRY_OUTPUT,
+                "Geometry table exposed by the graph container boundary.",
+            )],
+        }
+    }
+
+    fn output_kind(&self, output_name: &str) -> Option<HoudiniDataKind> {
+        self.outputs
+            .iter()
+            .find(|port| port.name == output_name)
+            .map(|port| port.data_kind)
+    }
+
+    fn primary_output(&self) -> Option<&HoudiniOperatorPort> {
+        self.outputs.first()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -212,6 +246,8 @@ impl GraphDocument {
                 internal_graph_id: String::new(),
                 internal_graph_name: None,
                 internal_graph_path: None,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
                 navigable: false,
                 status: GraphContainerStatus::MissingContainerMetadata,
             };
@@ -222,6 +258,8 @@ impl GraphDocument {
             internal_graph_id: container.internal_graph_id.clone(),
             internal_graph_name: graph.map(|graph| graph.name.clone()),
             internal_graph_path: graph.map(|graph| graph.path.clone()),
+            inputs: container.boundary.inputs.clone(),
+            outputs: container.boundary.outputs.clone(),
             navigable: container.navigable && graph.is_some(),
             status: if graph.is_some() {
                 GraphContainerStatus::Resolved
@@ -379,7 +417,17 @@ impl GraphDocument {
                 message: format!("Source node id '{}' is missing.", edge.from_node_id),
             });
         };
-        if self.node_primary_output_kind(source_node.kind).is_none() {
+        let Some(source_output_kind) =
+            self.node_output_kind_for_name(source_node, &edge.from_output)
+        else {
+            if self.node_primary_output_name(source_node).is_some() {
+                return Some(GraphDataFlowEdgeDiagnostic {
+                    edge_id: edge.edge_id.clone(),
+                    status: GraphDataFlowEdgeDiagnosticStatus::MissingSourcePort,
+                    readable_path: self.readable_data_flow_edge_path(edge),
+                    message: format!("Source port '{}' is not available.", edge.from_output),
+                });
+            }
             return Some(GraphDataFlowEdgeDiagnostic {
                 edge_id: edge.edge_id.clone(),
                 status: GraphDataFlowEdgeDiagnosticStatus::IncompatibleDataKind,
@@ -389,33 +437,48 @@ impl GraphDocument {
                     source_node.kind.as_str()
                 ),
             });
-        }
-        if edge.from_output != PRIMARY_GEOMETRY_OUTPUT {
+        };
+        if source_output_kind != HoudiniDataKind::GeometryTable {
             return Some(GraphDataFlowEdgeDiagnostic {
                 edge_id: edge.edge_id.clone(),
-                status: GraphDataFlowEdgeDiagnosticStatus::MissingSourcePort,
+                status: GraphDataFlowEdgeDiagnosticStatus::IncompatibleDataKind,
                 readable_path: self.readable_data_flow_edge_path(edge),
-                message: format!("Source port '{}' is not available.", edge.from_output),
+                message: format!(
+                    "Source port '{}' is not geometry-table data.",
+                    edge.from_output
+                ),
             });
         }
-        if !self
+        let Some(target_node) = self
             .nodes
             .iter()
-            .any(|node| node.node_id == edge.to_node_id)
-        {
+            .find(|node| node.node_id == edge.to_node_id)
+        else {
             return Some(GraphDataFlowEdgeDiagnostic {
                 edge_id: edge.edge_id.clone(),
                 status: GraphDataFlowEdgeDiagnosticStatus::MissingTargetNode,
                 readable_path: self.readable_data_flow_edge_path(edge),
                 message: format!("Target node id '{}' is missing.", edge.to_node_id),
             });
-        }
-        if edge.to_input != PRIMARY_GEOMETRY_OUTPUT {
+        };
+        let Some(target_input_kind) = self.node_input_kind_for_name(target_node, &edge.to_input)
+        else {
             return Some(GraphDataFlowEdgeDiagnostic {
                 edge_id: edge.edge_id.clone(),
                 status: GraphDataFlowEdgeDiagnosticStatus::MissingTargetPort,
                 readable_path: self.readable_data_flow_edge_path(edge),
                 message: format!("Target port '{}' is not available.", edge.to_input),
+            });
+        };
+        if target_input_kind != HoudiniDataKind::GeometryTable {
+            return Some(GraphDataFlowEdgeDiagnostic {
+                edge_id: edge.edge_id.clone(),
+                status: GraphDataFlowEdgeDiagnosticStatus::IncompatibleDataKind,
+                readable_path: self.readable_data_flow_edge_path(edge),
+                message: format!(
+                    "Target port '{}' is not geometry-table data.",
+                    edge.to_input
+                ),
             });
         }
         None
@@ -2842,12 +2905,57 @@ impl GraphDocument {
         target_node_index: usize,
     ) -> Option<ReferenceTargetIdentity> {
         let node = self.nodes.get(target_node_index)?;
-        self.node_primary_output_kind(node.kind)?;
+        let output_name = self.node_primary_output_name(node)?;
         Some(ReferenceTargetIdentity {
             graph_id: self.current_graph_id().to_owned(),
             node_id: node.node_id.clone(),
-            output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            output_name,
         })
+    }
+
+    fn node_primary_output_name(&self, node: &GraphNode) -> Option<String> {
+        if node.kind == NodeKind::GraphContainer {
+            return self
+                .graph_container_metadata_for_node(&node.node_id)?
+                .boundary
+                .primary_output()
+                .map(|port| port.name.clone());
+        }
+        self.node_primary_output_kind(node.kind)?;
+        Some(PRIMARY_GEOMETRY_OUTPUT.to_owned())
+    }
+
+    fn node_output_kind_for_name(
+        &self,
+        node: &GraphNode,
+        output_name: &str,
+    ) -> Option<HoudiniDataKind> {
+        if node.kind == NodeKind::GraphContainer {
+            return self
+                .graph_container_metadata_for_node(&node.node_id)?
+                .boundary
+                .output_kind(output_name);
+        }
+        (output_name == PRIMARY_GEOMETRY_OUTPUT)
+            .then(|| self.node_primary_output_kind(node.kind))
+            .flatten()
+    }
+
+    fn node_input_kind_for_name(
+        &self,
+        node: &GraphNode,
+        input_name: &str,
+    ) -> Option<HoudiniDataKind> {
+        if node.kind == NodeKind::GraphContainer {
+            return self
+                .graph_container_metadata_for_node(&node.node_id)?
+                .boundary
+                .inputs
+                .iter()
+                .find(|port| port.name == input_name)
+                .map(|port| port.data_kind);
+        }
+        (input_name == PRIMARY_GEOMETRY_OUTPUT).then_some(HoudiniDataKind::GeometryTable)
     }
 
     fn node_primary_output_kind(&self, kind: NodeKind) -> Option<HoudiniDataKind> {
@@ -2920,15 +3028,8 @@ impl GraphDocument {
             );
         };
 
-        if target.output_name != PRIMARY_GEOMETRY_OUTPUT {
-            return ReferenceTargetResolution::diagnostic(
-                target,
-                ReferenceDiagnosticStatus::MissingOutput,
-                "Reference target output is missing.",
-            );
-        }
-
-        let Some(output_kind) = self.node_primary_output_kind(target_node.kind) else {
+        let Some(output_kind) = self.node_output_kind_for_name(target_node, &target.output_name)
+        else {
             return ReferenceTargetResolution::diagnostic(
                 target,
                 ReferenceDiagnosticStatus::MissingOutput,
@@ -3363,6 +3464,7 @@ impl GraphDocument {
             container_node_id: instance_id,
             internal_graph_id,
             kind: GraphContainerKind::Subnet,
+            boundary: GraphBoundaryDeclaration::geometry_passthrough(),
             navigable: true,
         });
         self.rebuild_default_data_flow_edges();
@@ -4928,6 +5030,8 @@ impl GraphDocument {
             }
             NodeKind::GraphContainer => {
                 let container = self.graph_container_info_for_node(node);
+                let input_count = container.inputs.len();
+                let output_count = container.outputs.len();
                 let warnings = if container.status == GraphContainerStatus::Resolved {
                     Vec::new()
                 } else {
@@ -4938,8 +5042,8 @@ impl GraphDocument {
                     role: node.kind.role(),
                     graph_location: graph_location.clone(),
                     data_flow: data_flow.clone(),
-                    input_count: 0,
-                    output_count: 0,
+                    input_count,
+                    output_count,
                     status: if warnings.is_empty() {
                         NodeStatus::Healthy
                     } else {
@@ -8237,6 +8341,17 @@ pub(crate) struct HoudiniOperatorPort {
     pub help: String,
 }
 
+impl HoudiniOperatorPort {
+    fn geometry(name: impl Into<String>, help: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            data_kind: HoudiniDataKind::GeometryTable,
+            required: true,
+            help: help.into(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum HoudiniDataKind {
     GeometryTable,
@@ -9786,6 +9901,8 @@ pub(crate) struct GraphContainerNodeInfo {
     pub internal_graph_id: String,
     pub internal_graph_name: Option<String>,
     pub internal_graph_path: Option<String>,
+    pub inputs: Vec<HoudiniOperatorPort>,
+    pub outputs: Vec<HoudiniOperatorPort>,
     pub navigable: bool,
     pub status: GraphContainerStatus,
 }
@@ -10604,32 +10721,32 @@ mod tests {
     use super::{
         AttributeTableQuery, AttributeTableSort, EvaluationState, ExportGeometry,
         GeneratedNodeBindingState, GeneratedNodeInfo, GeneratedNodeSource, Geometry,
-        GeometryBounds, GeometryKind, GraphAnnotationKind, GraphColor, GraphContainerStatus,
-        GraphDataFlowEdge, GraphDataFlowEdgeDiagnosticStatus, GraphDocument, GraphEvaluationMode,
-        GraphNode, GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniCubicBezierParquetSchema,
-        HoudiniDataKind, HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange,
-        HoudiniOperatorPort, HoudiniParameterDeclaration, HoudiniParameterKind,
-        HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
-        NativeOperatorFailureMode, NativeOperatorImplementation, NativeOperatorLoadStatus,
-        NativeOperatorOutputCounts, NativeOperatorProvenance, NetworkBadgeVisibility,
-        NetworkCommentDisplayMode, NetworkNodeRingVisibility, NodeEvaluation, NodeKind,
-        NodeParameter, NodeParameterKind, NodeStatus, OperatorVersionStatus,
-        OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode, OutputTargetId,
-        PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
-        ProceduralAssetSource, ProceduralAssetSubgraphReference, ProjectCommand,
-        ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole, PythonDependencyHealth,
-        PythonEnvironmentDescriptor, PythonEnvironmentPathMode, PythonEnvironmentPaths,
-        PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
-        PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
-        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorDependencyStatus,
-        PythonOperatorEntryPoint, PythonOperatorNumericRange, PythonOperatorOutputCounts,
-        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
-        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
-        PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
-        ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
-        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
-        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
-        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        GeometryBounds, GeometryKind, GraphAnnotationKind, GraphBoundaryDeclaration, GraphColor,
+        GraphContainerStatus, GraphDataFlowEdge, GraphDataFlowEdgeDiagnosticStatus, GraphDocument,
+        GraphEvaluationMode, GraphNode, GraphPoint, GraphStyle, GraphWorkItemStatus,
+        HoudiniCubicBezierParquetSchema, HoudiniDataKind, HoudiniGeometryRecord,
+        HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
+        HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
+        NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
+        NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
+        NativeOperatorProvenance, NetworkBadgeVisibility, NetworkCommentDisplayMode,
+        NetworkNodeRingVisibility, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
+        NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
+        OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
+        ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
+        ProjectCommand, ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole,
+        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
+        PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
+        PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
+        PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
+        PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
+        PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
+        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
+        PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
+        PythonRequirementsSource, ReferenceDiagnosticStatus, ReferenceTargetEntry,
+        ReferenceTargetIdentity, ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem,
+        SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
+        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -15380,10 +15497,20 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(node.name, "Cleanup Subnet");
         assert!(!node.participates_in_output);
         assert_eq!(info.status, NodeStatus::Healthy);
-        assert_eq!(info.input_count, 0);
-        assert_eq!(info.output_count, 0);
+        assert_eq!(info.input_count, 1);
+        assert_eq!(info.output_count, 1);
         assert_eq!(container.status, GraphContainerStatus::Resolved);
         assert_eq!(container.kind.as_str(), "Subnet");
+        assert_eq!(container.inputs[0].name, "geometry");
+        assert_eq!(
+            container.inputs[0].data_kind,
+            HoudiniDataKind::GeometryTable
+        );
+        assert_eq!(container.outputs[0].name, "geometry");
+        assert_eq!(
+            container.outputs[0].data_kind,
+            HoudiniDataKind::GeometryTable
+        );
         assert_eq!(container.internal_graph_id, "graph.cleanup");
         assert_eq!(container.internal_graph_name.as_deref(), Some("Cleanup"));
         assert_eq!(
@@ -15427,12 +15554,147 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
 
         assert_eq!(restored.graph_containers, graph.graph_containers);
         assert!(json.contains("graph_containers"));
+        assert!(json.contains("boundary"));
         assert_eq!(restored_container.status, GraphContainerStatus::Resolved);
         assert_eq!(restored_container.internal_graph_id, "graph.branch");
+        assert_eq!(
+            restored_container.outputs[0].data_kind,
+            HoudiniDataKind::GeometryTable
+        );
         assert_eq!(
             restored_container.internal_graph_path.as_deref(),
             Some("/obj/main/branch")
         );
+    }
+
+    #[test]
+    fn graph_container_sidecar_without_boundary_uses_geometry_default() {
+        let mut graph = GraphDocument::sample();
+        let node_index = graph.add_graph_container_node(
+            "Legacy Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.legacy".to_owned(),
+                name: "Legacy".to_owned(),
+                path: "/obj/main/legacy".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+        let mut value =
+            serde_json::from_str::<serde_json::Value>(&graph.to_sidecar_json().unwrap())
+                .expect("sidecar should be valid json");
+        value["graph_containers"][0]
+            .as_object_mut()
+            .expect("container metadata should be an object")
+            .remove("boundary");
+        let json = serde_json::to_string_pretty(&value).unwrap();
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        let restored_node_index = restored
+            .nodes
+            .iter()
+            .position(|node| node.node_id == graph.nodes[node_index].node_id)
+            .expect("container node should restore");
+        let restored_container = restored
+            .selected_node_info(restored_node_index)
+            .expect("container info should restore")
+            .graph_container
+            .expect("container metadata should restore");
+
+        assert_eq!(restored_container.inputs.len(), 1);
+        assert_eq!(restored_container.outputs.len(), 1);
+        assert_eq!(restored_container.outputs[0].name, PRIMARY_GEOMETRY_OUTPUT);
+        assert_eq!(
+            restored_container.outputs[0].data_kind,
+            HoudiniDataKind::GeometryTable
+        );
+    }
+
+    #[test]
+    fn graph_container_boundary_output_is_referenceable() {
+        let mut graph = GraphDocument::sample();
+        let node_index = graph.add_graph_container_node(
+            "Referenceable Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.referenceable".to_owned(),
+                name: "Referenceable".to_owned(),
+                path: "/obj/main/referenceable".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+        graph.graph_containers[0].boundary.outputs[0].name = "clean_geometry".to_owned();
+
+        let target = graph
+            .reference_target_for_node(node_index)
+            .expect("graph container boundary should be referenceable");
+        let reference_index = graph
+            .add_reference_input_node(node_index)
+            .expect("graph container boundary output should create a reference input");
+        let resolution = graph.resolve_reference_target(&target);
+
+        assert_eq!(target.node_id, graph.nodes[node_index].node_id);
+        assert_eq!(target.output_name, "clean_geometry");
+        assert_eq!(resolution.status, ReferenceDiagnosticStatus::Resolved);
+        assert_eq!(resolution.output_kind, Some(HoudiniDataKind::GeometryTable));
+        assert_eq!(
+            graph.nodes[reference_index]
+                .reference_input
+                .as_ref()
+                .expect("reference input should exist")
+                .targets[0]
+                .target
+                .output_name,
+            "clean_geometry"
+        );
+    }
+
+    #[test]
+    fn graph_container_boundary_data_flow_diagnostics_use_port_kind() {
+        let mut graph = GraphDocument::sample();
+        let node_index = graph.add_graph_container_node(
+            "Scalar Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.scalar".to_owned(),
+                name: "Scalar".to_owned(),
+                path: "/obj/main/scalar".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+        graph.graph_containers[0].boundary = GraphBoundaryDeclaration {
+            inputs: vec![HoudiniOperatorPort::geometry(
+                PRIMARY_GEOMETRY_OUTPUT,
+                "Geometry input.",
+            )],
+            outputs: vec![HoudiniOperatorPort {
+                name: "threshold".to_owned(),
+                data_kind: HoudiniDataKind::Scalar,
+                required: true,
+                help: "Scalar threshold output.".to_owned(),
+            }],
+        };
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .expect("sample graph should include output node");
+        let edge = GraphDataFlowEdge {
+            edge_id: "scalar-edge".to_owned(),
+            from_node_id: graph.nodes[node_index].node_id.clone(),
+            from_output: "threshold".to_owned(),
+            to_node_id: graph.nodes[output_index].node_id.clone(),
+            to_input: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+        };
+
+        let diagnostic = graph
+            .data_flow_edge_endpoint_diagnostic(&edge)
+            .expect("scalar boundary output should not satisfy geometry edge");
+
+        assert_eq!(
+            diagnostic.status,
+            GraphDataFlowEdgeDiagnosticStatus::IncompatibleDataKind
+        );
+        assert!(diagnostic.message.contains("threshold"));
     }
 
     #[test]
