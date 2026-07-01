@@ -14,6 +14,8 @@ pub(crate) enum HoudiniWorkbenchPreset {
     NetworkAndInspector,
     HoudiniDefault,
     GraphReview,
+    DataInspection,
+    OutputDebug,
 }
 
 struct ViewSpec {
@@ -41,6 +43,8 @@ impl HoudiniWorkbenchPreset {
             Self::NetworkAndInspector => "Network + Inspector",
             Self::HoudiniDefault => "Houdini Default",
             Self::GraphReview => "Graph Review",
+            Self::DataInspection => "Data Inspection",
+            Self::OutputDebug => "Output / Debug",
         }
     }
 
@@ -54,6 +58,12 @@ impl HoudiniWorkbenchPreset {
             }
             Self::GraphReview => {
                 "Output viewport beside inspection tabs, with project data and exports nearby."
+            }
+            Self::DataInspection => {
+                "Rendered graph viewport beside project data, attributes, info, and outputs."
+            }
+            Self::OutputDebug => {
+                "Rendered graph viewport beside output, display, layers, info, find, and ops tabs."
             }
         }
     }
@@ -76,6 +86,8 @@ pub(crate) fn houdini_workbench_toolbar_ui(
                         HoudiniWorkbenchPreset::NetworkAndInspector,
                         HoudiniWorkbenchPreset::HoudiniDefault,
                         HoudiniWorkbenchPreset::GraphReview,
+                        HoudiniWorkbenchPreset::DataInspection,
+                        HoudiniWorkbenchPreset::OutputDebug,
                     ] {
                         if ui
                             .button(preset.label())
@@ -308,6 +320,55 @@ fn build_preset_tree(
                 vec![graph, side],
             )
         }
+        HoudiniWorkbenchPreset::DataInspection => {
+            let graph = tiles.insert_pane(views.graph);
+            let data_tabs = insert_named_tabs(
+                &mut tiles,
+                &mut container_display_names,
+                "Data + Attributes",
+                vec![views.data, views.project, views.info],
+            );
+            let outputs = tiles.insert_pane(views.outputs);
+            let side = insert_named_vertical(
+                &mut tiles,
+                &mut container_display_names,
+                "Data Review",
+                vec![data_tabs, outputs],
+            );
+            insert_named_horizontal(
+                &mut tiles,
+                &mut container_display_names,
+                "Data Inspection Workbench",
+                vec![graph, side],
+            )
+        }
+        HoudiniWorkbenchPreset::OutputDebug => {
+            let graph = tiles.insert_pane(views.graph);
+            let output_tabs = insert_named_tabs(
+                &mut tiles,
+                &mut container_display_names,
+                "Output",
+                vec![views.outputs, views.display, views.layers],
+            );
+            let debug_tabs = insert_named_tabs(
+                &mut tiles,
+                &mut container_display_names,
+                "Debug",
+                vec![views.info, views.find, views.operators],
+            );
+            let side = insert_named_vertical(
+                &mut tiles,
+                &mut container_display_names,
+                "Output + Debug Controls",
+                vec![output_tabs, debug_tabs],
+            );
+            insert_named_horizontal(
+                &mut tiles,
+                &mut container_display_names,
+                "Output Debug Workbench",
+                vec![graph, side],
+            )
+        }
     };
 
     (
@@ -442,5 +503,42 @@ mod tests {
             tree.tiles.get(root_children[0]),
             Some(&Tile::Pane(preset_views().graph))
         );
+    }
+
+    #[test]
+    fn data_inspection_preset_groups_project_data_with_outputs() {
+        let (tree, names) =
+            build_preset_tree(HoudiniWorkbenchPreset::DataInspection, preset_views());
+
+        assert!(tree.root().is_some());
+        assert_eq!(
+            tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
+            5
+        );
+        assert!(
+            names
+                .iter()
+                .any(|(_, name)| name == "Data Inspection Workbench")
+        );
+        assert!(names.iter().any(|(_, name)| name == "Data + Attributes"));
+        assert!(names.iter().any(|(_, name)| name == "Data Review"));
+    }
+
+    #[test]
+    fn output_debug_preset_groups_output_and_diagnostics() {
+        let (tree, names) = build_preset_tree(HoudiniWorkbenchPreset::OutputDebug, preset_views());
+
+        assert!(tree.root().is_some());
+        assert_eq!(
+            tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
+            7
+        );
+        assert!(
+            names
+                .iter()
+                .any(|(_, name)| name == "Output Debug Workbench")
+        );
+        assert!(names.iter().any(|(_, name)| name == "Output"));
+        assert!(names.iter().any(|(_, name)| name == "Debug"));
     }
 }
