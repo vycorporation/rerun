@@ -1042,8 +1042,23 @@ impl GraphDocument {
         let Some(annotation) = self.annotations.get_mut(annotation_index) else {
             return false;
         };
+        if annotation.position == position && annotation.size == size {
+            return false;
+        }
+        let old_position = annotation.position;
+        let old_size = annotation.size;
+        let annotation_id = annotation.annotation_id.clone();
+        let annotation_title = annotation.title.clone();
         annotation.position = position;
         annotation.size = size;
+        self.record_project_command(ProjectCommand::AnnotationBoundsEdit {
+            annotation_id,
+            annotation_title,
+            old_position,
+            new_position: position,
+            old_size,
+            new_size: size,
+        });
         true
     }
 
@@ -1497,6 +1512,31 @@ impl GraphDocument {
                     .find(|annotation| annotation.annotation_id == *annotation_id)
                 else {
                     return false;
+                };
+                annotation.size = match direction {
+                    ProjectCommandDirection::Undo => *old_size,
+                    ProjectCommandDirection::Redo => *new_size,
+                };
+                true
+            }
+            ProjectCommand::AnnotationBoundsEdit {
+                annotation_id,
+                old_position,
+                new_position,
+                old_size,
+                new_size,
+                ..
+            } => {
+                let Some(annotation) = self
+                    .annotations
+                    .iter_mut()
+                    .find(|annotation| annotation.annotation_id == *annotation_id)
+                else {
+                    return false;
+                };
+                annotation.position = match direction {
+                    ProjectCommandDirection::Undo => *old_position,
+                    ProjectCommandDirection::Redo => *new_position,
                 };
                 annotation.size = match direction {
                     ProjectCommandDirection::Undo => *old_size,
@@ -7369,6 +7409,14 @@ pub(crate) enum ProjectCommand {
         old_size: GraphPoint,
         new_size: GraphPoint,
     },
+    AnnotationBoundsEdit {
+        annotation_id: String,
+        annotation_title: String,
+        old_position: GraphPoint,
+        new_position: GraphPoint,
+        old_size: GraphPoint,
+        new_size: GraphPoint,
+    },
     AnnotationTitleEdit {
         annotation_id: String,
         annotation_title: String,
@@ -7446,6 +7494,11 @@ impl ProjectCommand {
                 annotation_title, ..
             } => {
                 format!("Resize {annotation_title}")
+            }
+            Self::AnnotationBoundsEdit {
+                annotation_title, ..
+            } => {
+                format!("Fit {annotation_title} to contents")
             }
             Self::AnnotationTitleEdit {
                 annotation_title, ..
@@ -13465,6 +13518,9 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             .expect("network box should be created for selected node");
         graph.annotations[box_index].position = GraphPoint::new(0.0, 0.0);
         graph.annotations[box_index].size = GraphPoint::new(0.90, 0.90);
+        let original_position = graph.annotations[box_index].position;
+        let original_size = graph.annotations[box_index].size;
+        let annotation_title = graph.annotations[box_index].title.clone();
 
         assert!(graph.resize_network_box_to_contents(box_index));
 
@@ -13472,6 +13528,37 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert!((graph.annotations[box_index].position.y - 0.36).abs() < 0.0001);
         assert!((graph.annotations[box_index].size.x - 0.16).abs() < 0.0001);
         assert!((graph.annotations[box_index].size.y - 0.28).abs() < 0.0001);
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::AnnotationBoundsEdit {
+                annotation_title: recorded_title,
+                old_position,
+                old_size,
+                ..
+            }) if recorded_title == &annotation_title
+                && *old_position == original_position
+                && *old_size == original_size
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Fit Network Box to contents")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.annotations[box_index].position, original_position);
+        assert_eq!(graph.annotations[box_index].size, original_size);
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Fit Network Box to contents")
+        );
+
+        assert!(graph.redo_project_command());
+        assert!((graph.annotations[box_index].position.x - 0.42).abs() < 0.0001);
+        assert!((graph.annotations[box_index].position.y - 0.36).abs() < 0.0001);
+        assert!((graph.annotations[box_index].size.x - 0.16).abs() < 0.0001);
+        assert!((graph.annotations[box_index].size.y - 0.28).abs() < 0.0001);
+        assert!(!graph.resize_network_box_to_contents(box_index));
+        assert!(!graph.resize_network_box_to_contents(graph.annotations.len()));
     }
 
     #[test]
