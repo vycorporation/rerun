@@ -1104,6 +1104,20 @@ impl GraphDocument {
         direction: ProjectCommandDirection,
     ) -> bool {
         match command {
+            ProjectCommand::NodeRename {
+                node_id,
+                old_name,
+                new_name,
+            } => {
+                let Some(node) = self.nodes.iter_mut().find(|node| node.node_id == *node_id) else {
+                    return false;
+                };
+                node.name = match direction {
+                    ProjectCommandDirection::Undo => old_name.clone(),
+                    ProjectCommandDirection::Redo => new_name.clone(),
+                };
+                true
+            }
             ProjectCommand::NodeParameterEdit {
                 node_id,
                 old_value,
@@ -1270,15 +1284,27 @@ impl GraphDocument {
     }
 
     pub fn set_node_name(&mut self, node_index: usize, candidate: impl Into<String>) -> bool {
-        let candidate = candidate.into().trim().to_owned();
-        if candidate.is_empty() {
-            return false;
-        }
-        let Some(current_name) = self.nodes.get(node_index).map(|node| node.name.clone()) else {
+        let Some(command) = self.set_node_name_without_history(node_index, candidate) else {
             return false;
         };
+        self.record_project_command(command);
+        true
+    }
+
+    fn set_node_name_without_history(
+        &mut self,
+        node_index: usize,
+        candidate: impl Into<String>,
+    ) -> Option<ProjectCommand> {
+        let candidate = candidate.into().trim().to_owned();
+        if candidate.is_empty() {
+            return None;
+        }
+        let Some(current_name) = self.nodes.get(node_index).map(|node| node.name.clone()) else {
+            return None;
+        };
         if current_name == candidate {
-            return true;
+            return None;
         }
 
         let mut name = candidate.clone();
@@ -1304,10 +1330,14 @@ impl GraphDocument {
         }
 
         if let Some(node) = self.nodes.get_mut(node_index) {
-            node.name = name;
-            true
+            node.name = name.clone();
+            Some(ProjectCommand::NodeRename {
+                node_id: node.node_id.clone(),
+                old_name: current_name,
+                new_name: name,
+            })
         } else {
-            false
+            None
         }
     }
 
@@ -6743,6 +6773,11 @@ pub(crate) struct ProjectCommandHistory {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ProjectCommand {
+    NodeRename {
+        node_id: String,
+        old_name: String,
+        new_name: String,
+    },
     NodeParameterEdit {
         node_id: String,
         node_name: String,
@@ -6769,6 +6804,7 @@ pub(crate) enum ProjectCommand {
 impl ProjectCommand {
     fn summary(&self) -> String {
         match self {
+            Self::NodeRename { old_name, .. } => format!("Rename {old_name}"),
             Self::NodeParameterEdit {
                 node_name,
                 parameter_name,
@@ -9532,6 +9568,68 @@ mod tests {
     }
 
     #[test]
+    fn node_rename_records_undoable_project_command_and_keeps_references_resolved() {
+        let mut graph = GraphDocument::sample();
+        let null_index = graph.add_null_operator_node("OUT_ORIGINAL");
+        let reference_index = graph
+            .add_reference_input_node(null_index)
+            .expect("null output should be a compatible reference target");
+        let target = graph.nodes[reference_index]
+            .reference_input
+            .as_ref()
+            .expect("reference input should exist")
+            .targets
+            .first()
+            .expect("reference input should have a target")
+            .target
+            .clone();
+        let node_id = graph.nodes[null_index].node_id.clone();
+
+        assert!(graph.set_node_name(null_index, "OUT_FILTERED"));
+
+        assert_eq!(graph.nodes[null_index].name, "OUT_FILTERED");
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodeRename {
+                node_id: recorded_node_id,
+                old_name,
+                new_name,
+            }) if recorded_node_id == &node_id
+                && old_name == "OUT_ORIGINAL"
+                && new_name == "OUT_FILTERED"
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Rename OUT_ORIGINAL")
+        );
+        assert_eq!(
+            graph.resolve_reference_target(&target).readable_path,
+            "main/OUT_FILTERED:geometry"
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes[null_index].name, "OUT_ORIGINAL");
+        assert_eq!(
+            graph.resolve_reference_target(&target).readable_path,
+            "main/OUT_ORIGINAL:geometry"
+        );
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Rename OUT_ORIGINAL")
+        );
+
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.nodes[null_index].name, "OUT_FILTERED");
+        assert_eq!(
+            graph.resolve_reference_target(&target).readable_path,
+            "main/OUT_FILTERED:geometry"
+        );
+        assert!(!graph.set_node_name(null_index, "OUT_FILTERED"));
+        assert!(!graph.set_node_name(null_index, ""));
+        assert!(!graph.set_node_name(graph.nodes.len(), "MISSING"));
+    }
+
+    #[test]
     fn duplicate_node_creates_new_identity_without_publication_state() {
         let mut graph = GraphDocument::sample();
         let filter_index = graph
@@ -10459,6 +10557,7 @@ mod tests {
     #[test]
     fn command_history_is_runtime_state_not_sidecar_state() {
         let mut graph = GraphDocument::sample();
+        assert!(graph.set_node_name(1, "FILTER_LOW"));
         assert!(graph.set_node_parameter_value(1, 0.72));
         assert!(graph.set_layer_visibility(0, false));
         assert!(graph.set_layer_order(1, 42));
