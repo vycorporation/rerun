@@ -66,7 +66,8 @@ Any Houdini-specific wrapper should store only metadata needed for naming, categ
 
 ## Implementation follow-up
 
-Track the implementation in #72.
+Track the bundled preset implementation in #72.
+Track the richer named personal/project workbench browser in #74.
 
 Initial implementation slice: bundled workbench layout loading is available from the viewport
 Workbench menu, using native Rerun blueprint views, splits, tab containers, and named containers.

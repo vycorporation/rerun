@@ -2142,6 +2142,16 @@ impl HoudiniGraphPanel {
 
     fn graph_document_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         ui.horizontal(|ui| {
+            if ui.button("Load Malware Starter").clicked() {
+                *graph = GraphDocument::malware_starter();
+                self.selected_node = 0;
+                self.selected_annotation = None;
+                self.node_info_open = true;
+                self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
+                self.graph_document_status =
+                    Some("Loaded malware byteplot starter graph.".to_owned());
+            }
+
             #[cfg(not(target_arch = "wasm32"))]
             if ui.button("Save Graph...").clicked()
                 && let Some(path) = rfd::FileDialog::new()

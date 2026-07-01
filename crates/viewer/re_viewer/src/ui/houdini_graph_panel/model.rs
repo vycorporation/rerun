@@ -261,6 +261,313 @@ impl GraphDocument {
         }
     }
 
+    pub fn malware_starter() -> Self {
+        let geometry = vec![
+            Geometry::Polygon(Polygon {
+                points: vec![
+                    GraphPoint::new(20.0, 24.0),
+                    GraphPoint::new(86.0, 18.0),
+                    GraphPoint::new(112.0, 54.0),
+                    GraphPoint::new(92.0, 116.0),
+                    GraphPoint::new(34.0, 104.0),
+                ],
+                score: 0.91,
+            }),
+            Geometry::Polygon(Polygon {
+                points: vec![
+                    GraphPoint::new(132.0, 36.0),
+                    GraphPoint::new(214.0, 42.0),
+                    GraphPoint::new(226.0, 88.0),
+                    GraphPoint::new(192.0, 126.0),
+                    GraphPoint::new(144.0, 104.0),
+                ],
+                score: 0.84,
+            }),
+            Geometry::Polygon(Polygon {
+                points: vec![
+                    GraphPoint::new(46.0, 152.0),
+                    GraphPoint::new(104.0, 136.0),
+                    GraphPoint::new(142.0, 164.0),
+                    GraphPoint::new(118.0, 202.0),
+                    GraphPoint::new(76.0, 190.0),
+                    GraphPoint::new(58.0, 220.0),
+                    GraphPoint::new(28.0, 190.0),
+                ],
+                score: 0.76,
+            }),
+            Geometry::Polygon(Polygon {
+                points: vec![
+                    GraphPoint::new(156.0, 148.0),
+                    GraphPoint::new(228.0, 136.0),
+                    GraphPoint::new(236.0, 216.0),
+                    GraphPoint::new(178.0, 232.0),
+                    GraphPoint::new(166.0, 196.0),
+                    GraphPoint::new(130.0, 184.0),
+                ],
+                score: 0.68,
+            }),
+        ];
+        let coordinate_contract = SubstrateCoordinateContract::malware_byteplot();
+        let mut metadata = SourceMetadata::from_geometry(
+            SourceProvenance::SyntheticMalware,
+            Some("examples/malware_byteplot/mock-byteplot.png".to_owned()),
+            &geometry,
+            Vec::new(),
+        );
+        metadata.attribute_names = vec![
+            "score".to_owned(),
+            "region_family".to_owned(),
+            "hull_kind".to_owned(),
+            "record_id".to_owned(),
+        ];
+
+        Self {
+            source: GraphSource::malware_starter(metadata),
+            nodes: vec![
+                GraphNode {
+                    node_id: "source.byteplot".to_owned(),
+                    name: "Byteplot Substrate".to_owned(),
+                    kind: NodeKind::Source,
+                    layout_position: GraphPoint::new(0.0, 0.28),
+                    generated: None,
+                    coordinate_contract: Some(coordinate_contract.clone()),
+                    output_operator: None,
+                    null_operator: None,
+                    reference_input: None,
+                    substrate_projection: None,
+                    python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
+                    evaluation: NodeEvaluation::clean(),
+                    participates_in_output: true,
+                    comment: "Synthetic 256x256 byteplot image substrate; polygons use this pixel space.".to_owned(),
+                    show_comment_in_network: true,
+                    parameter: NodeParameter::scalar(
+                        "Image ready",
+                        1.0,
+                        0.0..=1.0,
+                        "Synthetic byteplot substrate readiness for the malware starter graph.",
+                    ),
+                    info: "Loads the byteplot image substrate that region polygons annotate.",
+                },
+                GraphNode {
+                    node_id: "source.convex_regions".to_owned(),
+                    name: "Convex Hull Regions".to_owned(),
+                    kind: NodeKind::Source,
+                    layout_position: GraphPoint::new(0.0, 0.56),
+                    generated: None,
+                    coordinate_contract: Some(coordinate_contract.clone()),
+                    output_operator: None,
+                    null_operator: None,
+                    reference_input: None,
+                    substrate_projection: None,
+                    python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
+                    evaluation: NodeEvaluation::clean(),
+                    participates_in_output: true,
+                    comment: "Mock upstream ML detections represented as convex polygon hull records.".to_owned(),
+                    show_comment_in_network: true,
+                    parameter: NodeParameter::scalar(
+                        "Layer enabled",
+                        1.0,
+                        0.0..=1.0,
+                        "Convex hull polygon source visibility placeholder.",
+                    ),
+                    info: "Loads one independent polygon source layer for convex malware regions.",
+                },
+                GraphNode {
+                    node_id: "source.concave_regions".to_owned(),
+                    name: "Concave Hull Regions".to_owned(),
+                    kind: NodeKind::Source,
+                    layout_position: GraphPoint::new(0.0, 0.84),
+                    generated: None,
+                    coordinate_contract: Some(coordinate_contract.clone()),
+                    output_operator: None,
+                    null_operator: None,
+                    reference_input: None,
+                    substrate_projection: None,
+                    python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
+                    evaluation: NodeEvaluation::clean(),
+                    participates_in_output: true,
+                    comment: "Mock upstream ML detections represented as concave polygon hull records.".to_owned(),
+                    show_comment_in_network: true,
+                    parameter: NodeParameter::scalar(
+                        "Layer enabled",
+                        1.0,
+                        0.0..=1.0,
+                        "Concave hull polygon source visibility placeholder.",
+                    ),
+                    info: "Loads one independent polygon source layer for concave malware regions.",
+                },
+                GraphNode {
+                    node_id: "filter.high_confidence".to_owned(),
+                    name: "High Confidence Filter".to_owned(),
+                    kind: NodeKind::Filter,
+                    layout_position: GraphPoint::new(0.36, 0.56),
+                    generated: Some(GeneratedNodeInfo::managed(
+                        GeneratedNodeSource::AttributeTableCommit,
+                    )),
+                    coordinate_contract: Some(coordinate_contract.clone()),
+                    output_operator: None,
+                    null_operator: None,
+                    reference_input: None,
+                    substrate_projection: None,
+                    python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
+                    evaluation: NodeEvaluation::clean(),
+                    participates_in_output: true,
+                    comment: "Logical filtered view; records stay graph-owned and identity-preserving.".to_owned(),
+                    show_comment_in_network: true,
+                    parameter: NodeParameter::attribute_rule(
+                        "Minimum ML score",
+                        "score",
+                        FilterComparison::GreaterOrEqual,
+                        0.70,
+                        0.0..=1.0,
+                        "Filters mock malware regions by upstream ML confidence.",
+                    ),
+                    info: "Filters byteplot region polygons as a logical view rather than copying them.",
+                },
+                GraphNode {
+                    node_id: "style.region_overlay".to_owned(),
+                    name: "Region Overlay Style".to_owned(),
+                    kind: NodeKind::Style,
+                    layout_position: GraphPoint::new(0.64, 0.56),
+                    generated: None,
+                    coordinate_contract: Some(coordinate_contract.clone()),
+                    output_operator: None,
+                    null_operator: None,
+                    reference_input: None,
+                    substrate_projection: None,
+                    python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
+                    evaluation: NodeEvaluation::clean(),
+                    participates_in_output: true,
+                    comment: "Applies overlay styling while preserving substrate pixel-space geometry.".to_owned(),
+                    show_comment_in_network: false,
+                    parameter: NodeParameter::scalar(
+                        "Overlay stroke",
+                        0.68,
+                        0.0..=1.0,
+                        "Controls polygon overlay stroke scale.",
+                    ),
+                    info: "Styles malware region overlays before Rerun output mapping.",
+                },
+                GraphNode {
+                    node_id: "output.rerun_malware".to_owned(),
+                    name: "Rerun Malware Output".to_owned(),
+                    kind: NodeKind::Output,
+                    layout_position: GraphPoint::new(1.0, 0.56),
+                    generated: None,
+                    coordinate_contract: Some(coordinate_contract),
+                    output_operator: Some(OutputOperatorNode::rerun_scene()),
+                    null_operator: None,
+                    reference_input: None,
+                    substrate_projection: None,
+                    python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
+                    evaluation: NodeEvaluation::clean(),
+                    participates_in_output: true,
+                    comment: "Composes the byteplot substrate and polygon overlays for Rerun inspection.".to_owned(),
+                    show_comment_in_network: true,
+                    parameter: NodeParameter::scalar(
+                        "Overlay fidelity",
+                        1.0,
+                        0.0..=1.0,
+                        "Controls prepared overlay output fidelity for the Rerun target.",
+                    ),
+                    info: "Maps graph-owned malware substrate overlays to a Rerun viewer output.",
+                },
+            ],
+            annotations: vec![
+                GraphAnnotation::network_box(
+                    "box.malware_sources".to_owned(),
+                    "Independent Sources".to_owned(),
+                    GraphPoint::new(-0.08, 0.08),
+                    GraphPoint::new(0.28, 0.90),
+                    vec![
+                        "source.byteplot".to_owned(),
+                        "source.convex_regions".to_owned(),
+                        "source.concave_regions".to_owned(),
+                    ],
+                ),
+                GraphAnnotation::network_box(
+                    "box.malware_output".to_owned(),
+                    "Filter Style Output".to_owned(),
+                    GraphPoint::new(0.28, 0.34),
+                    GraphPoint::new(0.82, 0.44),
+                    vec![
+                        "filter.high_confidence".to_owned(),
+                        "style.region_overlay".to_owned(),
+                        "output.rerun_malware".to_owned(),
+                    ],
+                ),
+                GraphAnnotation::sticky_note(
+                    "note.pixel_space".to_owned(),
+                    "Pixel Space".to_owned(),
+                    "All mock region polygons are authored in the byteplot image pixel coordinate space.".to_owned(),
+                    GraphPoint::new(0.30, 0.08),
+                    GraphPoint::new(0.44, 0.22),
+                ),
+            ],
+            network_view: NetworkViewDisplayOptions::default(),
+            layers: vec![
+                Layer {
+                    name: "Malware hull overlays".to_owned(),
+                    kind: LayerKind::Polygons,
+                    visible: true,
+                    order: 0,
+                    style: GraphStyle {
+                        color: GraphColor {
+                            r: 239,
+                            g: 96,
+                            b: 121,
+                        },
+                        opacity: 0.78,
+                        stroke_scale: 0.68,
+                    },
+                },
+                Layer {
+                    name: "Debug validation".to_owned(),
+                    kind: LayerKind::Debug,
+                    visible: false,
+                    order: 1,
+                    style: GraphStyle {
+                        color: GraphColor {
+                            r: 115,
+                            g: 210,
+                            b: 155,
+                        },
+                        opacity: 0.85,
+                        stroke_scale: 0.75,
+                    },
+                },
+            ],
+            style: GraphStyle {
+                color: GraphColor {
+                    r: 239,
+                    g: 96,
+                    b: 121,
+                },
+                opacity: 0.78,
+                stroke_scale: 0.68,
+            },
+            geometry,
+            recording_geometry: Vec::new(),
+            python_operator_declarations: Vec::new(),
+            procedural_asset_declarations: Vec::new(),
+            native_operator_declarations: Vec::new(),
+            native_operator_trust: NativeOperatorTrustPolicy::default(),
+            python_environment: PythonEnvironmentDescriptor::default(),
+        }
+    }
+
     pub fn polygon_count(&self) -> usize {
         self.active_geometry()
             .iter()
@@ -3550,7 +3857,7 @@ impl GraphDocument {
 
     fn active_geometry(&self) -> &[Geometry] {
         match self.source.mode {
-            GraphSourceMode::DemoFallback => &self.geometry,
+            GraphSourceMode::DemoFallback | GraphSourceMode::SyntheticMalware => &self.geometry,
             GraphSourceMode::RecordingQuery => &self.recording_geometry,
         }
     }
@@ -3950,6 +4257,7 @@ pub(crate) enum SourceProvenance {
     ParquetImport,
     RecordingQuery,
     SyntheticBenchmark,
+    SyntheticMalware,
     PythonOperator,
 }
 
@@ -3960,6 +4268,7 @@ impl SourceProvenance {
             Self::ParquetImport => "parquet import",
             Self::RecordingQuery => "recording query",
             Self::SyntheticBenchmark => "synthetic benchmark",
+            Self::SyntheticMalware => "synthetic malware",
             Self::PythonOperator => "python operator",
         }
     }
@@ -4028,6 +4337,17 @@ impl GraphSource {
         }
     }
 
+    fn malware_starter(metadata: SourceMetadata) -> Self {
+        Self {
+            mode: GraphSourceMode::SyntheticMalware,
+            matching_entity_count: metadata.record_count,
+            visible_data_result_count: metadata.record_count,
+            source_path: metadata.source_path.clone(),
+            metadata,
+            import_error: None,
+        }
+    }
+
     fn from_query_bridge(query_bridge: &RerunQueryBridge) -> Self {
         let has_recording_input =
             query_bridge.matching_entity_count > 0 || query_bridge.visible_data_result_count > 0;
@@ -4058,6 +4378,7 @@ impl GraphSource {
         match self.mode {
             GraphSourceMode::DemoFallback => "demo fallback",
             GraphSourceMode::RecordingQuery => "recording query",
+            GraphSourceMode::SyntheticMalware => "synthetic malware",
         }
     }
 
@@ -4087,6 +4408,7 @@ impl GraphSource {
 pub(crate) enum GraphSourceMode {
     DemoFallback,
     RecordingQuery,
+    SyntheticMalware,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -4204,12 +4526,18 @@ impl HoudiniGraphSidecar {
         graph.native_operator_trust = self.native_operator_trust;
         graph.python_environment = self.python_environment;
 
+        let mut matched_node_indices = vec![false; graph.nodes.len()];
         for (snapshot_index, node_snapshot) in self.nodes.into_iter().enumerate() {
-            let matching_node = graph.nodes.iter_mut().find(|node| {
-                node.kind == node_snapshot.kind
+            let matching_node_index = graph.nodes.iter().enumerate().position(|(index, node)| {
+                !matched_node_indices[index]
+                    && node.kind == node_snapshot.kind
                     && node_matches_snapshot_identity(node, &node_snapshot)
             });
-            if let Some(node) = matching_node {
+            if let Some(node_index) = matching_node_index {
+                matched_node_indices[node_index] = true;
+                let Some(node) = graph.nodes.get_mut(node_index) else {
+                    continue;
+                };
                 if !node_snapshot.name.is_empty() {
                     node.name = node_snapshot.name;
                 }
@@ -4242,6 +4570,7 @@ impl HoudiniGraphSidecar {
                 graph
                     .nodes
                     .insert(insert_index, node_snapshot.into_instance_node());
+                matched_node_indices.insert(insert_index, true);
             }
         }
 
@@ -4311,7 +4640,8 @@ impl NodeSidecar {
     fn is_instance_node(&self) -> bool {
         matches!(
             self.kind,
-            NodeKind::Null
+            NodeKind::Source
+                | NodeKind::Null
                 | NodeKind::ReferenceInput
                 | NodeKind::SubstrateProjection
                 | NodeKind::PythonOperator
@@ -5100,6 +5430,16 @@ impl SubstrateCoordinateContract {
             substrate_id: "demo-byteplot-pixel-space".to_owned(),
             width: 1024,
             height: 1024,
+            origin: SubstrateOrigin::TopLeft,
+            y_axis: SubstrateYAxis::Down,
+        }
+    }
+
+    fn malware_byteplot() -> Self {
+        Self {
+            substrate_id: "malware-byteplot-pixel-space".to_owned(),
+            width: 256,
+            height: 256,
             origin: SubstrateOrigin::TopLeft,
             y_axis: SubstrateYAxis::Down,
         }
@@ -8043,6 +8383,104 @@ mod tests {
             .selected_node_info(3)
             .expect("sample graph should include output node");
         assert_eq!(output.output_count, 2);
+    }
+
+    #[test]
+    fn malware_starter_graph_models_byteplot_polygon_workflow() {
+        let graph = GraphDocument::malware_starter();
+
+        assert_eq!(graph.source.mode, super::GraphSourceMode::SyntheticMalware);
+        assert_eq!(
+            graph.source.metadata.provenance,
+            SourceProvenance::SyntheticMalware
+        );
+        assert_eq!(graph.polygon_count(), 4);
+        assert_eq!(graph.cubic_bezier_count(), 0);
+        assert_eq!(graph.visible_output_count(), 3);
+        assert!(
+            graph
+                .source
+                .metadata
+                .attribute_names
+                .contains(&"hull_kind".to_owned())
+        );
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|node| node.name == "Byteplot Substrate" && node.kind == NodeKind::Source)
+        );
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|node| node.name == "Convex Hull Regions" && node.kind == NodeKind::Source)
+        );
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|node| node.name == "Concave Hull Regions" && node.kind == NodeKind::Source)
+        );
+
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.name == "Rerun Malware Output")
+            .expect("malware starter should include Rerun output node");
+        let output_info = graph
+            .selected_node_info(output_index)
+            .expect("output node info should exist");
+        assert_eq!(output_info.output_count, 3);
+        assert_eq!(
+            output_info
+                .output_operator
+                .as_ref()
+                .and_then(|operator| operator.preferred_target),
+            Some(OutputTargetId::Rerun)
+        );
+
+        let contract = graph.nodes[output_index]
+            .coordinate_contract
+            .as_ref()
+            .expect("output should carry substrate pixel-space contract");
+        assert_eq!(contract.substrate_id, "malware-byteplot-pixel-space");
+        assert_eq!(contract.width, 256);
+        assert_eq!(contract.height, 256);
+        assert_eq!(contract.origin, SubstrateOrigin::TopLeft);
+        assert_eq!(contract.y_axis, SubstrateYAxis::Down);
+    }
+
+    #[test]
+    fn malware_starter_graph_round_trips_through_sidecar() {
+        let graph = GraphDocument::malware_starter();
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(
+            restored.source.mode,
+            super::GraphSourceMode::SyntheticMalware
+        );
+        assert_eq!(
+            restored.source.metadata.provenance,
+            SourceProvenance::SyntheticMalware
+        );
+        assert_eq!(restored.nodes.len(), graph.nodes.len());
+        assert_eq!(restored.visible_output_count(), 3);
+        assert!(
+            restored
+                .annotations
+                .iter()
+                .any(|annotation| annotation.title == "Independent Sources")
+        );
+        assert!(
+            restored
+                .nodes
+                .iter()
+                .any(|node| node.name == "Rerun Malware Output" && node.output_operator.is_some())
+        );
     }
 
     #[test]
