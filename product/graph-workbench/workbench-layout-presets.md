@@ -84,3 +84,7 @@ Issue #74 first browser slice: the Workbench menu now groups bundled presets wit
 and project workbench metadata. Saved entries are named JSON metadata wrappers that point at `.rbl`
 blueprint payloads and track separate personal/project default flags. Bundled presets can be
 duplicated into personal metadata and saved directly to the registered `.rbl` payload path.
+The browser also exposes a draft layout name, personal/project save scope, personal/project
+default toggles, default-selection buttons for saved layouts, and project-layout duplication into
+a new named saved workbench. The same draft controls can save the current edited blueprint layout
+as a named personal or project workbench without first applying a bundled preset.
