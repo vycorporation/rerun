@@ -129,7 +129,29 @@ pub(crate) struct GraphContainerMetadata {
     pub kind: GraphContainerKind,
     #[serde(default = "GraphBoundaryDeclaration::geometry_passthrough")]
     pub boundary: GraphBoundaryDeclaration,
+    #[serde(default)]
+    pub collapse_manifest: Option<GraphContainerCollapseManifest>,
     pub navigable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct GraphContainerCollapseManifest {
+    pub source_graph_id: String,
+    pub captured_node_ids: Vec<String>,
+    #[serde(default)]
+    pub external_edges: Vec<GraphContainerExternalEdge>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct GraphContainerExternalEdge {
+    pub direction: GraphBoundaryMappingDirection,
+    pub edge_id: String,
+    pub external_node_id: String,
+    pub external_port_name: String,
+    pub internal_node_id: String,
+    pub internal_port_name: String,
+    pub public_port_name: String,
+    pub data_kind: HoudiniDataKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -275,6 +297,7 @@ impl GraphDocument {
                 inputs: Vec::new(),
                 outputs: Vec::new(),
                 mappings: Vec::new(),
+                collapse_manifest: None,
                 navigable: false,
                 status: GraphContainerStatus::MissingContainerMetadata,
             };
@@ -289,6 +312,7 @@ impl GraphDocument {
             inputs: container.boundary.inputs.clone(),
             outputs: container.boundary.outputs.clone(),
             mappings: self.graph_boundary_mapping_info(container, internal_graph_exists),
+            collapse_manifest: container.collapse_manifest.clone(),
             navigable: container.navigable && internal_graph_exists,
             status: if internal_graph_exists {
                 GraphContainerStatus::Resolved
@@ -3538,10 +3562,259 @@ impl GraphDocument {
             internal_graph_id,
             kind: GraphContainerKind::Subnet,
             boundary: GraphBoundaryDeclaration::geometry_passthrough(),
+            collapse_manifest: None,
             navigable: true,
         });
         self.rebuild_default_data_flow_edges();
         insert_index
+    }
+
+    #[allow(dead_code)]
+    pub fn add_graph_container_collapse_manifest_for_node_set(
+        &mut self,
+        name: impl Into<String>,
+        node_indices: &[usize],
+    ) -> Result<usize, GraphContainerCollapseError> {
+        let captured_node_ids = self.captured_node_ids_for_indices(node_indices)?;
+        if !self.node_set_is_connected(&captured_node_ids) {
+            return Err(GraphContainerCollapseError::DisconnectedSelection);
+        }
+
+        let source_graph_id = self.current_graph_id().to_owned();
+        let source_graph_path = self.current_graph_path().to_owned();
+        let name = name.into();
+        let internal_graph = ProjectGraphMetadata {
+            graph_id: self.unique_graph_id(&name),
+            name: name.clone(),
+            path: format!(
+                "{}/{}",
+                source_graph_path.trim_end_matches('/'),
+                sanitize_asset_id_part(&name)
+            ),
+            role: ProjectGraphRole::Subgraph,
+        };
+        let (boundary, external_edges) = self.collapse_boundary_for_node_set(&captured_node_ids)?;
+        let selection_center = self.node_set_layout_center(&captured_node_ids);
+
+        let container_index = self.add_graph_container_node(name, internal_graph);
+        if let Some(center) = selection_center
+            && let Some(node) = self.nodes.get_mut(container_index)
+        {
+            node.layout_position = center;
+        }
+        let Some(container) = self
+            .graph_containers
+            .iter_mut()
+            .find(|container| container.container_node_id == self.nodes[container_index].node_id)
+        else {
+            return Ok(container_index);
+        };
+        container.boundary = boundary;
+        container.collapse_manifest = Some(GraphContainerCollapseManifest {
+            source_graph_id,
+            captured_node_ids,
+            external_edges,
+        });
+        Ok(container_index)
+    }
+
+    fn captured_node_ids_for_indices(
+        &self,
+        node_indices: &[usize],
+    ) -> Result<Vec<String>, GraphContainerCollapseError> {
+        if node_indices.is_empty() {
+            return Err(GraphContainerCollapseError::EmptySelection);
+        }
+        let mut captured_node_ids = Vec::new();
+        for &node_index in node_indices {
+            let Some(node) = self.nodes.get(node_index) else {
+                return Err(GraphContainerCollapseError::MissingNodeIndex(node_index));
+            };
+            if !captured_node_ids
+                .iter()
+                .any(|node_id| node_id == &node.node_id)
+            {
+                captured_node_ids.push(node.node_id.clone());
+            }
+        }
+        if captured_node_ids.is_empty() {
+            return Err(GraphContainerCollapseError::EmptySelection);
+        }
+        Ok(captured_node_ids)
+    }
+
+    fn node_set_is_connected(&self, node_ids: &[String]) -> bool {
+        if node_ids.len() <= 1 {
+            return true;
+        }
+        let selected = node_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut stack = vec![node_ids[0].as_str()];
+        let mut visited = std::collections::BTreeSet::new();
+        while let Some(node_id) = stack.pop() {
+            if !visited.insert(node_id) {
+                continue;
+            }
+            for edge in &self.data_flow_edges {
+                let from_selected = selected.contains(edge.from_node_id.as_str());
+                let to_selected = selected.contains(edge.to_node_id.as_str());
+                if !(from_selected && to_selected) {
+                    continue;
+                }
+                if edge.from_node_id == node_id {
+                    stack.push(edge.to_node_id.as_str());
+                } else if edge.to_node_id == node_id {
+                    stack.push(edge.from_node_id.as_str());
+                }
+            }
+        }
+        visited.len() == selected.len()
+    }
+
+    fn collapse_boundary_for_node_set(
+        &self,
+        captured_node_ids: &[String],
+    ) -> Result<
+        (GraphBoundaryDeclaration, Vec<GraphContainerExternalEdge>),
+        GraphContainerCollapseError,
+    > {
+        let captured = captured_node_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        let mut mappings = Vec::new();
+        let mut external_edges = Vec::new();
+        let mut input_names = Vec::new();
+        let mut output_names = Vec::new();
+
+        for edge in &self.data_flow_edges {
+            let from_captured = captured.contains(edge.from_node_id.as_str());
+            let to_captured = captured.contains(edge.to_node_id.as_str());
+            match (from_captured, to_captured) {
+                (false, true) => {
+                    let data_kind = self.data_kind_for_edge(edge).ok_or_else(|| {
+                        GraphContainerCollapseError::UntypedExternalEdge(edge.edge_id.clone())
+                    })?;
+                    let public_port_name =
+                        unique_boundary_port_name(&edge.to_input, &mut input_names);
+                    inputs.push(HoudiniOperatorPort {
+                        name: public_port_name.clone(),
+                        data_kind,
+                        required: true,
+                        help: format!("Collapse input for external edge {}.", edge.edge_id),
+                    });
+                    mappings.push(GraphBoundaryMapping {
+                        direction: GraphBoundaryMappingDirection::Input,
+                        public_port_name: public_port_name.clone(),
+                        internal_node_id: edge.to_node_id.clone(),
+                        internal_port_name: edge.to_input.clone(),
+                    });
+                    external_edges.push(GraphContainerExternalEdge {
+                        direction: GraphBoundaryMappingDirection::Input,
+                        edge_id: edge.edge_id.clone(),
+                        external_node_id: edge.from_node_id.clone(),
+                        external_port_name: edge.from_output.clone(),
+                        internal_node_id: edge.to_node_id.clone(),
+                        internal_port_name: edge.to_input.clone(),
+                        public_port_name,
+                        data_kind,
+                    });
+                }
+                (true, false) => {
+                    let data_kind = self.data_kind_for_edge(edge).ok_or_else(|| {
+                        GraphContainerCollapseError::UntypedExternalEdge(edge.edge_id.clone())
+                    })?;
+                    let public_port_name =
+                        unique_boundary_port_name(&edge.from_output, &mut output_names);
+                    outputs.push(HoudiniOperatorPort {
+                        name: public_port_name.clone(),
+                        data_kind,
+                        required: true,
+                        help: format!("Collapse output for external edge {}.", edge.edge_id),
+                    });
+                    mappings.push(GraphBoundaryMapping {
+                        direction: GraphBoundaryMappingDirection::Output,
+                        public_port_name: public_port_name.clone(),
+                        internal_node_id: edge.from_node_id.clone(),
+                        internal_port_name: edge.from_output.clone(),
+                    });
+                    external_edges.push(GraphContainerExternalEdge {
+                        direction: GraphBoundaryMappingDirection::Output,
+                        edge_id: edge.edge_id.clone(),
+                        external_node_id: edge.to_node_id.clone(),
+                        external_port_name: edge.to_input.clone(),
+                        internal_node_id: edge.from_node_id.clone(),
+                        internal_port_name: edge.from_output.clone(),
+                        public_port_name,
+                        data_kind,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        Ok((
+            GraphBoundaryDeclaration {
+                inputs,
+                outputs,
+                mappings,
+            },
+            external_edges,
+        ))
+    }
+
+    fn data_kind_for_edge(&self, edge: &GraphDataFlowEdge) -> Option<HoudiniDataKind> {
+        let source_kind = self
+            .nodes
+            .iter()
+            .find(|node| node.node_id == edge.from_node_id)
+            .and_then(|node| self.node_output_kind_for_name(node, &edge.from_output));
+        let target_kind = self
+            .nodes
+            .iter()
+            .find(|node| node.node_id == edge.to_node_id)
+            .and_then(|node| self.node_input_kind_for_name(node, &edge.to_input));
+        match (source_kind, target_kind) {
+            (Some(source_kind), Some(target_kind)) if source_kind == target_kind => {
+                Some(source_kind)
+            }
+            (Some(data_kind), None) | (None, Some(data_kind)) => Some(data_kind),
+            _ => None,
+        }
+    }
+
+    fn node_set_layout_center(&self, node_ids: &[String]) -> Option<GraphPoint> {
+        let mut count = 0.0;
+        let mut total = GraphPoint::new(0.0, 0.0);
+        for node in &self.nodes {
+            if node_ids.iter().any(|node_id| node_id == &node.node_id) {
+                count += 1.0;
+                total.x += node.layout_position.x;
+                total.y += node.layout_position.y;
+            }
+        }
+        (count > 0.0).then(|| GraphPoint::new(total.x / count, total.y / count))
+    }
+
+    fn unique_graph_id(&self, name: &str) -> String {
+        let slug = sanitize_asset_id_part(name);
+        let base = format!("graph.{slug}");
+        if self.graph_registry.graph(&base).is_none() {
+            return base;
+        }
+
+        let mut suffix = 2;
+        loop {
+            let graph_id = format!("{base}_{suffix}");
+            if self.graph_registry.graph(&graph_id).is_none() {
+                return graph_id;
+            }
+            suffix += 1;
+        }
     }
 
     #[allow(dead_code)]
@@ -9540,6 +9813,29 @@ fn port_names(ports: &[HoudiniOperatorPort]) -> Vec<String> {
         .collect()
 }
 
+fn unique_boundary_port_name(candidate: &str, used_names: &mut Vec<String>) -> String {
+    let sanitized = sanitize_asset_id_part(candidate);
+    let base = if sanitized.is_empty() {
+        PRIMARY_GEOMETRY_OUTPUT.to_owned()
+    } else {
+        sanitized
+    };
+    if !used_names.iter().any(|name| name == &base) {
+        used_names.push(base.clone());
+        return base;
+    }
+
+    let mut suffix = 2;
+    loop {
+        let name = format!("{base}_{suffix}");
+        if !used_names.iter().any(|used_name| used_name == &name) {
+            used_names.push(name.clone());
+            return name;
+        }
+        suffix += 1;
+    }
+}
+
 fn native_operator_node_status(
     version_status: OperatorVersionStatus,
     load_status: NativeOperatorLoadStatus,
@@ -9984,6 +10280,7 @@ pub(crate) struct GraphContainerNodeInfo {
     pub inputs: Vec<HoudiniOperatorPort>,
     pub outputs: Vec<HoudiniOperatorPort>,
     pub mappings: Vec<GraphBoundaryMappingInfo>,
+    pub collapse_manifest: Option<GraphContainerCollapseManifest>,
     pub navigable: bool,
     pub status: GraphContainerStatus,
 }
@@ -10044,6 +10341,14 @@ impl GraphContainerStatus {
             Self::MissingInternalGraph => "Missing internal graph",
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GraphContainerCollapseError {
+    EmptySelection,
+    MissingNodeIndex(usize),
+    DisconnectedSelection,
+    UntypedExternalEdge(String),
 }
 
 pub(crate) struct PythonOperatorNodeInfo {
@@ -10845,31 +11150,32 @@ mod tests {
         GeneratedNodeBindingState, GeneratedNodeInfo, GeneratedNodeSource, Geometry,
         GeometryBounds, GeometryKind, GraphAnnotationKind, GraphBoundaryDeclaration,
         GraphBoundaryMapping, GraphBoundaryMappingDirection, GraphBoundaryMappingStatus,
-        GraphColor, GraphContainerStatus, GraphDataFlowEdge, GraphDataFlowEdgeDiagnosticStatus,
-        GraphDocument, GraphEvaluationMode, GraphNode, GraphPoint, GraphStyle, GraphWorkItemStatus,
-        HoudiniCubicBezierParquetSchema, HoudiniDataKind, HoudiniGeometryRecord,
-        HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
-        HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
-        NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
-        NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
-        NativeOperatorProvenance, NetworkBadgeVisibility, NetworkCommentDisplayMode,
-        NetworkNodeRingVisibility, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
-        NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
-        OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
-        ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
-        ProjectCommand, ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole,
-        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
-        PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
-        PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
-        PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
-        PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
-        PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
-        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
-        PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
-        PythonRequirementsSource, ReferenceDiagnosticStatus, ReferenceTargetEntry,
-        ReferenceTargetIdentity, ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem,
-        SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
-        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        GraphColor, GraphContainerCollapseError, GraphContainerStatus, GraphDataFlowEdge,
+        GraphDataFlowEdgeDiagnosticStatus, GraphDocument, GraphEvaluationMode, GraphNode,
+        GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniCubicBezierParquetSchema,
+        HoudiniDataKind, HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange,
+        HoudiniOperatorPort, HoudiniParameterDeclaration, HoudiniParameterKind,
+        HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
+        NativeOperatorFailureMode, NativeOperatorImplementation, NativeOperatorLoadStatus,
+        NativeOperatorOutputCounts, NativeOperatorProvenance, NetworkBadgeVisibility,
+        NetworkCommentDisplayMode, NetworkNodeRingVisibility, NodeEvaluation, NodeKind,
+        NodeParameter, NodeParameterKind, NodeStatus, OperatorVersionStatus,
+        OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode, OutputTargetId,
+        PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
+        ProceduralAssetSource, ProceduralAssetSubgraphReference, ProjectCommand,
+        ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole, PythonDependencyHealth,
+        PythonEnvironmentDescriptor, PythonEnvironmentPathMode, PythonEnvironmentPaths,
+        PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
+        PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
+        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorDependencyStatus,
+        PythonOperatorEntryPoint, PythonOperatorNumericRange, PythonOperatorOutputCounts,
+        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
+        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
+        PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
+        ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
+        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
+        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
+        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -15940,6 +16246,171 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             info.warnings
                 .iter()
                 .any(|warning| warning.contains("missing internal anchor"))
+        );
+    }
+
+    #[test]
+    fn graph_container_collapse_manifest_captures_connected_selection_crossings() {
+        let mut graph = GraphDocument::sample();
+        let source_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "source.main")
+            .expect("sample graph should include source");
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "filter.main")
+            .expect("sample graph should include filter");
+        let style_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "style.main")
+            .expect("sample graph should include style");
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "output.rerun")
+            .expect("sample graph should include output");
+        let source_node_id = graph.nodes[source_index].node_id.clone();
+        let output_node_id = graph.nodes[output_index].node_id.clone();
+        let selected_node_ids = vec![
+            graph.nodes[filter_index].node_id.clone(),
+            graph.nodes[style_index].node_id.clone(),
+        ];
+
+        let container_index = graph
+            .add_graph_container_collapse_manifest_for_node_set(
+                "Cleanup Subnet",
+                &[filter_index, style_index],
+            )
+            .expect("connected filter and style selection should collapse");
+        let container_node_id = graph.nodes[container_index].node_id.clone();
+        let metadata = graph
+            .graph_containers
+            .iter()
+            .find(|container| container.container_node_id == container_node_id)
+            .expect("container metadata should be created");
+        let manifest = metadata
+            .collapse_manifest
+            .as_ref()
+            .expect("collapse manifest should be recorded");
+
+        assert_eq!(metadata.internal_graph_id, "graph.cleanup_subnet");
+        assert_eq!(metadata.boundary.inputs.len(), 1);
+        assert_eq!(metadata.boundary.outputs.len(), 1);
+        assert_eq!(metadata.boundary.mappings.len(), 2);
+        assert_eq!(manifest.source_graph_id, "main");
+        assert_eq!(manifest.captured_node_ids, selected_node_ids);
+        assert_eq!(manifest.external_edges.len(), 2);
+        assert!(graph.nodes.iter().any(|node| node.node_id == "filter.main"));
+        assert!(graph.nodes.iter().any(|node| node.node_id == "style.main"));
+
+        let input_edge = manifest
+            .external_edges
+            .iter()
+            .find(|edge| edge.direction == GraphBoundaryMappingDirection::Input)
+            .expect("collapse manifest should capture incoming edge");
+        assert_eq!(input_edge.external_node_id, source_node_id);
+        assert_eq!(input_edge.internal_node_id, "filter.main");
+        assert_eq!(input_edge.public_port_name, PRIMARY_GEOMETRY_OUTPUT);
+        assert_eq!(input_edge.data_kind, HoudiniDataKind::GeometryTable);
+
+        let output_edge = manifest
+            .external_edges
+            .iter()
+            .find(|edge| edge.direction == GraphBoundaryMappingDirection::Output)
+            .expect("collapse manifest should capture outgoing edge");
+        assert_eq!(output_edge.internal_node_id, "style.main");
+        assert_eq!(output_edge.external_node_id, output_node_id);
+        assert_eq!(output_edge.public_port_name, PRIMARY_GEOMETRY_OUTPUT);
+        assert_eq!(output_edge.data_kind, HoudiniDataKind::GeometryTable);
+
+        let info = graph
+            .selected_node_info(container_index)
+            .expect("container node should inspect");
+        let container_info = info
+            .graph_container
+            .expect("container info should be exposed");
+        assert_eq!(
+            container_info
+                .collapse_manifest
+                .expect("inspector info should include collapse manifest")
+                .external_edges,
+            manifest.external_edges
+        );
+    }
+
+    #[test]
+    fn graph_container_collapse_manifest_round_trips_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "filter.main")
+            .expect("sample graph should include filter");
+        let style_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "style.main")
+            .expect("sample graph should include style");
+        let container_index = graph
+            .add_graph_container_collapse_manifest_for_node_set(
+                "Cleanup Subnet",
+                &[filter_index, style_index],
+            )
+            .expect("connected selection should collapse");
+        let container_node_id = graph.nodes[container_index].node_id.clone();
+        let json = graph.to_sidecar_json().unwrap();
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        let restored_container = restored
+            .graph_containers
+            .iter()
+            .find(|container| container.container_node_id == container_node_id)
+            .expect("container metadata should restore");
+
+        assert!(json.contains("collapse_manifest"));
+        assert_eq!(restored_container, &graph.graph_containers[0]);
+        assert_eq!(
+            restored_container
+                .collapse_manifest
+                .as_ref()
+                .expect("collapse manifest should restore")
+                .captured_node_ids,
+            vec!["filter.main".to_owned(), "style.main".to_owned()]
+        );
+    }
+
+    #[test]
+    fn graph_container_collapse_manifest_rejects_invalid_selection() {
+        let mut graph = GraphDocument::sample();
+        let source_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "source.main")
+            .expect("sample graph should include source");
+        let style_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "style.main")
+            .expect("sample graph should include style");
+
+        assert_eq!(
+            graph.add_graph_container_collapse_manifest_for_node_set("Empty", &[]),
+            Err(GraphContainerCollapseError::EmptySelection)
+        );
+        assert_eq!(
+            graph.add_graph_container_collapse_manifest_for_node_set("Missing", &[usize::MAX]),
+            Err(GraphContainerCollapseError::MissingNodeIndex(usize::MAX))
+        );
+        assert_eq!(
+            graph.add_graph_container_collapse_manifest_for_node_set(
+                "Disconnected",
+                &[source_index, style_index],
+            ),
+            Err(GraphContainerCollapseError::DisconnectedSelection)
         );
     }
 
