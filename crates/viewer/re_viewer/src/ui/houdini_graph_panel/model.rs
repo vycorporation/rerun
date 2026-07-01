@@ -881,6 +881,14 @@ impl GraphDocument {
             .collect()
     }
 
+    pub fn network_box_organization_snapshots(&self) -> Vec<NetworkBoxOrganizationSnapshot> {
+        self.annotations
+            .iter()
+            .filter(|annotation| annotation.kind == GraphAnnotationKind::NetworkBox)
+            .map(NetworkBoxOrganizationSnapshot::from_annotation)
+            .collect()
+    }
+
     pub fn finish_annotation_drag(
         &mut self,
         annotation_index: usize,
@@ -1533,6 +1541,7 @@ impl GraphDocument {
                 node_id,
                 old_position,
                 new_position,
+                network_box_changes,
                 ..
             } => {
                 let Some(node) = self.nodes.iter_mut().find(|node| node.node_id == *node_id) else {
@@ -1542,6 +1551,19 @@ impl GraphDocument {
                     ProjectCommandDirection::Undo => *old_position,
                     ProjectCommandDirection::Redo => *new_position,
                 };
+                for change in network_box_changes {
+                    if let Some(annotation) = self
+                        .annotations
+                        .iter_mut()
+                        .find(|annotation| annotation.annotation_id == change.annotation_id)
+                    {
+                        let snapshot = match direction {
+                            ProjectCommandDirection::Undo => &change.old_state,
+                            ProjectCommandDirection::Redo => &change.new_state,
+                        };
+                        snapshot.apply_to_annotation(annotation);
+                    }
+                }
                 true
             }
             ProjectCommand::ReferenceTargetEnablementEdit {
@@ -3828,12 +3850,37 @@ impl GraphDocument {
         }
     }
 
+    #[allow(dead_code)]
     pub fn finish_node_layout_drag(&mut self, index: usize, old_position: GraphPoint) -> bool {
+        self.finish_node_layout_drag_with_network_box_snapshots(index, old_position, &[])
+    }
+
+    pub fn finish_node_layout_drag_with_network_box_snapshots(
+        &mut self,
+        index: usize,
+        old_position: GraphPoint,
+        old_network_box_states: &[NetworkBoxOrganizationSnapshot],
+    ) -> bool {
         let Some(node) = self.nodes.get(index) else {
             return false;
         };
         let new_position = node.layout_position;
-        if old_position == new_position {
+        let network_box_changes = old_network_box_states
+            .iter()
+            .filter_map(|old_state| {
+                let annotation = self
+                    .annotations
+                    .iter()
+                    .find(|annotation| annotation.annotation_id == old_state.annotation_id)?;
+                let new_state = NetworkBoxOrganizationSnapshot::from_annotation(annotation);
+                (*old_state != new_state).then(|| NetworkBoxOrganizationCommandSnapshot {
+                    annotation_id: old_state.annotation_id.clone(),
+                    old_state: old_state.clone(),
+                    new_state,
+                })
+            })
+            .collect::<Vec<_>>();
+        if old_position == new_position && network_box_changes.is_empty() {
             return false;
         }
         let node_id = node.node_id.clone();
@@ -3843,6 +3890,7 @@ impl GraphDocument {
             node_name,
             old_position,
             new_position,
+            network_box_changes,
         });
         true
     }
@@ -7701,6 +7749,7 @@ pub(crate) enum ProjectCommand {
         node_name: String,
         old_position: GraphPoint,
         new_position: GraphPoint,
+        network_box_changes: Vec<NetworkBoxOrganizationCommandSnapshot>,
     },
     ReferenceTargetEnablementEdit {
         reference_node_id: String,
@@ -7947,6 +7996,38 @@ pub(crate) struct NodeLayoutCommandSnapshot {
     node_id: String,
     old_position: GraphPoint,
     new_position: GraphPoint,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NetworkBoxOrganizationCommandSnapshot {
+    annotation_id: String,
+    old_state: NetworkBoxOrganizationSnapshot,
+    new_state: NetworkBoxOrganizationSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NetworkBoxOrganizationSnapshot {
+    annotation_id: String,
+    position: GraphPoint,
+    size: GraphPoint,
+    member_node_ids: Vec<String>,
+}
+
+impl NetworkBoxOrganizationSnapshot {
+    fn from_annotation(annotation: &GraphAnnotation) -> Self {
+        Self {
+            annotation_id: annotation.annotation_id.clone(),
+            position: annotation.position,
+            size: annotation.size,
+            member_node_ids: annotation.member_node_ids.clone(),
+        }
+    }
+
+    fn apply_to_annotation(&self, annotation: &mut GraphAnnotation) {
+        annotation.position = self.position;
+        annotation.size = self.size;
+        annotation.member_node_ids = self.member_node_ids.clone();
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -12308,6 +12389,123 @@ mod tests {
         assert_eq!(graph.nodes[filter_index].layout_position, final_position);
         assert!(!graph.finish_node_layout_drag(filter_index, final_position));
         assert!(!graph.finish_node_layout_drag(graph.nodes.len(), original_position));
+    }
+
+    #[test]
+    fn node_layout_drag_restores_network_box_expansion() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "filter.main")
+            .expect("sample filter node should exist");
+        let box_index = graph
+            .annotations
+            .iter()
+            .position(|annotation| annotation.annotation_id == "box.prep")
+            .expect("sample network box should exist");
+        let old_position = graph.nodes[filter_index].layout_position;
+        let old_box_position = graph.annotations[box_index].position;
+        let old_box_size = graph.annotations[box_index].size;
+        let old_box_members = graph.annotations[box_index].member_node_ids.clone();
+        let old_network_box_states = graph.network_box_organization_snapshots();
+        let new_position = GraphPoint::new(0.93, 0.90);
+
+        graph.set_node_layout_position(filter_index, new_position);
+        assert!(graph.settle_node_drag_for_network_boxes(filter_index, false));
+        let expanded_box_position = graph.annotations[box_index].position;
+        let expanded_box_size = graph.annotations[box_index].size;
+
+        assert!(graph.finish_node_layout_drag_with_network_box_snapshots(
+            filter_index,
+            old_position,
+            &old_network_box_states,
+        ));
+
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodeLayoutEdit {
+                network_box_changes,
+                ..
+            }) if network_box_changes.len() == 1
+                && network_box_changes[0].annotation_id == "box.prep"
+        ));
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes[filter_index].layout_position, old_position);
+        assert_eq!(graph.annotations[box_index].position, old_box_position);
+        assert_eq!(graph.annotations[box_index].size, old_box_size);
+        assert_eq!(
+            graph.annotations[box_index].member_node_ids,
+            old_box_members
+        );
+
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.nodes[filter_index].layout_position, new_position);
+        assert_eq!(graph.annotations[box_index].position, expanded_box_position);
+        assert_eq!(graph.annotations[box_index].size, expanded_box_size);
+        assert!(
+            graph.annotations[box_index]
+                .member_node_ids
+                .contains(&"filter.main".to_owned())
+        );
+    }
+
+    #[test]
+    fn node_layout_drag_restores_network_box_fast_drag_membership_removal() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "filter.main")
+            .expect("sample filter node should exist");
+        let box_index = graph
+            .annotations
+            .iter()
+            .position(|annotation| annotation.annotation_id == "box.prep")
+            .expect("sample network box should exist");
+        let old_position = graph.nodes[filter_index].layout_position;
+        let old_box_members = graph.annotations[box_index].member_node_ids.clone();
+        let old_network_box_states = graph.network_box_organization_snapshots();
+        let new_position = GraphPoint::new(0.0, 0.0);
+
+        assert!(old_box_members.contains(&"filter.main".to_owned()));
+        graph.set_node_layout_position(filter_index, new_position);
+        assert!(graph.settle_node_drag_for_network_boxes(filter_index, true));
+        assert!(
+            !graph.annotations[box_index]
+                .member_node_ids
+                .contains(&"filter.main".to_owned())
+        );
+
+        assert!(graph.finish_node_layout_drag_with_network_box_snapshots(
+            filter_index,
+            old_position,
+            &old_network_box_states,
+        ));
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodeLayoutEdit {
+                network_box_changes,
+                ..
+            }) if network_box_changes.len() == 1
+                && network_box_changes[0].annotation_id == "box.prep"
+        ));
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes[filter_index].layout_position, old_position);
+        assert_eq!(
+            graph.annotations[box_index].member_node_ids,
+            old_box_members
+        );
+
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.nodes[filter_index].layout_position, new_position);
+        assert!(
+            !graph.annotations[box_index]
+                .member_node_ids
+                .contains(&"filter.main".to_owned())
+        );
     }
 
     #[test]
