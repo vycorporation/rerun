@@ -1,6 +1,6 @@
 use re_sdk_types::ViewClassIdentifier;
 use re_ui::UICommandSender as _;
-use re_viewer_context::ViewId;
+use re_viewer_context::{SystemCommand, SystemCommandSender as _, ViewId};
 use re_viewport_blueprint::{ViewBlueprint, ViewportBlueprint};
 
 use crate::ui::{
@@ -9,7 +9,7 @@ use crate::ui::{
     HoudiniParametersView, HoudiniProjectView,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum HoudiniWorkbenchPreset {
     NetworkAndInspector,
     HoudiniDefault,
@@ -67,6 +67,209 @@ impl HoudiniWorkbenchPreset {
             }
         }
     }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Self::NetworkAndInspector => "network-and-inspector",
+            Self::HoudiniDefault => "houdini-default",
+            Self::GraphReview => "graph-review",
+            Self::DataInspection => "data-inspection",
+            Self::OutputDebug => "output-debug",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorkbenchCatalog {
+    bundled: Vec<WorkbenchLayoutEntry>,
+    personal: Vec<WorkbenchLayoutEntry>,
+    project: Vec<WorkbenchLayoutEntry>,
+}
+
+impl WorkbenchCatalog {
+    fn load() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(root) = workbench_metadata_root() {
+            return Self::load_from_root(&root);
+        }
+
+        Self {
+            bundled: bundled_workbench_entries(),
+            personal: Vec::new(),
+            project: Vec::new(),
+        }
+    }
+
+    fn load_from_root(root: &std::path::Path) -> Self {
+        Self {
+            bundled: bundled_workbench_entries(),
+            personal: load_saved_workbench_entries(root, WorkbenchLayoutScope::Personal),
+            project: load_saved_workbench_entries(root, WorkbenchLayoutScope::Project),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct WorkbenchLayoutEntry {
+    id: String,
+    display_name: String,
+    scope: WorkbenchLayoutScope,
+    source: WorkbenchLayoutSource,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    blueprint_path: Option<std::path::PathBuf>,
+    #[serde(default)]
+    default_for_project: bool,
+    #[serde(default)]
+    default_for_user: bool,
+    #[serde(default = "workbench_compatibility_version")]
+    compatibility_version: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+enum WorkbenchLayoutScope {
+    Bundled,
+    Personal,
+    Project,
+}
+
+impl WorkbenchLayoutScope {
+    fn directory_name(self) -> &'static str {
+        match self {
+            Self::Bundled => "bundled",
+            Self::Personal => "personal",
+            Self::Project => "project",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+enum WorkbenchLayoutSource {
+    BundledPreset(HoudiniWorkbenchPreset),
+    SavedBlueprint,
+}
+
+fn bundled_workbench_entries() -> Vec<WorkbenchLayoutEntry> {
+    [
+        HoudiniWorkbenchPreset::NetworkAndInspector,
+        HoudiniWorkbenchPreset::HoudiniDefault,
+        HoudiniWorkbenchPreset::GraphReview,
+        HoudiniWorkbenchPreset::DataInspection,
+        HoudiniWorkbenchPreset::OutputDebug,
+    ]
+    .into_iter()
+    .map(|preset| WorkbenchLayoutEntry {
+        id: format!("bundled:{}", preset.slug()),
+        display_name: preset.label().to_owned(),
+        scope: WorkbenchLayoutScope::Bundled,
+        source: WorkbenchLayoutSource::BundledPreset(preset),
+        description: Some(preset.description().to_owned()),
+        blueprint_path: None,
+        default_for_project: preset == HoudiniWorkbenchPreset::HoudiniDefault,
+        default_for_user: false,
+        compatibility_version: workbench_compatibility_version(),
+    })
+    .collect()
+}
+
+fn load_saved_workbench_entries(
+    root: &std::path::Path,
+    scope: WorkbenchLayoutScope,
+) -> Vec<WorkbenchLayoutEntry> {
+    let directory = root.join(scope.directory_name());
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+
+    let mut layouts = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+                .then_some(path)
+        })
+        .filter_map(|path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|json| serde_json::from_str::<WorkbenchLayoutEntry>(&json).ok())
+        })
+        .filter(|entry| entry.scope == scope)
+        .collect::<Vec<_>>();
+    layouts.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    layouts
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn register_workbench_duplicate(
+    scope: WorkbenchLayoutScope,
+    source_entry: &WorkbenchLayoutEntry,
+    preset: HoudiniWorkbenchPreset,
+) -> anyhow::Result<WorkbenchLayoutEntry> {
+    let root = workbench_metadata_root()
+        .ok_or_else(|| anyhow::anyhow!("could not locate Rerun storage directory"))?;
+    let directory = root.join(scope.directory_name());
+    std::fs::create_dir_all(&directory)?;
+
+    let display_name = format!("Copy of {}", source_entry.display_name);
+    let slug = sanitize_workbench_id(&display_name);
+    let blueprint_path = directory.join(format!("{slug}.rbl"));
+    let entry = WorkbenchLayoutEntry {
+        id: format!("{}:{slug}", scope.directory_name()),
+        display_name,
+        scope,
+        source: WorkbenchLayoutSource::SavedBlueprint,
+        description: Some(format!("Personal copy of {}", preset.label())),
+        blueprint_path: Some(blueprint_path),
+        default_for_project: false,
+        default_for_user: false,
+        compatibility_version: workbench_compatibility_version(),
+    };
+    std::fs::write(
+        directory.join(format!("{slug}.json")),
+        serde_json::to_string_pretty(&entry)?,
+    )?;
+    Ok(entry)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn register_workbench_duplicate(
+    _scope: WorkbenchLayoutScope,
+    _source_entry: &WorkbenchLayoutEntry,
+    _preset: HoudiniWorkbenchPreset,
+) -> anyhow::Result<WorkbenchLayoutEntry> {
+    anyhow::bail!("workbench metadata is only available in the native viewer")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn workbench_metadata_root() -> Option<std::path::PathBuf> {
+    eframe::storage_dir(crate::native::APP_ID).map(|storage_dir| storage_dir.join("workbenches"))
+}
+
+fn workbench_compatibility_version() -> String {
+    "re_viewer-houdini-workbench-0.1".to_owned()
+}
+
+fn sanitize_workbench_id(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if sanitized.is_empty() {
+        "workbench".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 pub(crate) fn houdini_workbench_toolbar_ui(
@@ -74,6 +277,8 @@ pub(crate) fn houdini_workbench_toolbar_ui(
     ctx: &re_viewer_context::ViewerContext<'_>,
     viewport_blueprint: &ViewportBlueprint,
 ) {
+    let workbenches = WorkbenchCatalog::load();
+
     egui::Frame::new()
         .fill(ui.visuals().panel_fill)
         .inner_margin(egui::Margin::symmetric(8, 4))
@@ -81,24 +286,7 @@ pub(crate) fn houdini_workbench_toolbar_ui(
             ui.horizontal(|ui| {
                 ui.strong("Workbench");
 
-                ui.menu_button("Layouts", |ui| {
-                    for preset in [
-                        HoudiniWorkbenchPreset::NetworkAndInspector,
-                        HoudiniWorkbenchPreset::HoudiniDefault,
-                        HoudiniWorkbenchPreset::GraphReview,
-                        HoudiniWorkbenchPreset::DataInspection,
-                        HoudiniWorkbenchPreset::OutputDebug,
-                    ] {
-                        if ui
-                            .button(preset.label())
-                            .on_hover_text(preset.description())
-                            .clicked()
-                        {
-                            apply_houdini_workbench_preset(ctx, viewport_blueprint, preset);
-                            ui.close();
-                        }
-                    }
-                });
+                ui.menu_button("Layouts", |ui| workbench_browser_ui(ui, ctx, viewport_blueprint, &workbenches));
 
                 if ui
                     .small_button("Open saved layout...")
@@ -122,6 +310,114 @@ pub(crate) fn houdini_workbench_toolbar_ui(
                 }
             });
         });
+}
+
+fn workbench_browser_ui(
+    ui: &mut egui::Ui,
+    ctx: &re_viewer_context::ViewerContext<'_>,
+    viewport_blueprint: &ViewportBlueprint,
+    catalog: &WorkbenchCatalog,
+) {
+    ui.strong("Bundled");
+    for entry in &catalog.bundled {
+        ui.horizontal(|ui| {
+            if ui
+                .button(entry.display_name.as_str())
+                .on_hover_text(entry.description.as_deref().unwrap_or_default())
+                .clicked()
+            {
+                if let WorkbenchLayoutSource::BundledPreset(preset) = entry.source {
+                    apply_houdini_workbench_preset(ctx, viewport_blueprint, preset);
+                }
+                ui.close();
+            }
+
+            if ui
+                .small_button("Duplicate")
+                .on_hover_text("Register a personal copy and open the Save Blueprint flow for the edited .rbl payload.")
+                .clicked()
+            {
+                if let WorkbenchLayoutSource::BundledPreset(preset) = entry.source {
+                    let _ = register_workbench_duplicate(WorkbenchLayoutScope::Personal, entry, preset);
+                    apply_houdini_workbench_preset(ctx, viewport_blueprint, preset);
+                    ctx.command_sender().send_ui(re_ui::UICommand::SaveBlueprint);
+                }
+                ui.close();
+            }
+        });
+    }
+
+    ui.separator();
+    saved_workbench_section_ui(ui, ctx, "Personal", &catalog.personal);
+    ui.separator();
+    saved_workbench_section_ui(ui, ctx, "Project", &catalog.project);
+}
+
+fn saved_workbench_section_ui(
+    ui: &mut egui::Ui,
+    ctx: &re_viewer_context::ViewerContext<'_>,
+    heading: &str,
+    entries: &[WorkbenchLayoutEntry],
+) {
+    ui.strong(heading);
+    if entries.is_empty() {
+        ui.weak("No saved layouts");
+        return;
+    }
+
+    for entry in entries {
+        ui.horizontal(|ui| {
+            let load_enabled = entry
+                .blueprint_path
+                .as_ref()
+                .is_some_and(|path| path.exists());
+            if ui
+                .add_enabled(load_enabled, egui::Button::new(entry.display_name.as_str()))
+                .on_hover_text(
+                    entry
+                        .blueprint_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "No .rbl payload path registered".to_owned()),
+                )
+                .clicked()
+            {
+                if let Some(path) = &entry.blueprint_path {
+                    open_workbench_blueprint(ctx, path.clone());
+                }
+                ui.close();
+            }
+            if entry.default_for_project {
+                ui.weak("project default");
+            }
+            if entry.default_for_user {
+                ui.weak("personal default");
+            }
+        });
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn open_workbench_blueprint(ctx: &re_viewer_context::ViewerContext<'_>, path: std::path::PathBuf) {
+    use re_data_source::LogDataSource;
+    use re_log_types::FileSource;
+
+    ctx.command_sender()
+        .send_system(SystemCommand::LoadDataSource(LogDataSource::FilePath {
+            file_source: FileSource::FileDialog {
+                recommended_store_id: None,
+                force_store_info: false,
+            },
+            path,
+            follow: false,
+        }));
+}
+
+#[cfg(target_arch = "wasm32")]
+fn open_workbench_blueprint(
+    _ctx: &re_viewer_context::ViewerContext<'_>,
+    _path: std::path::PathBuf,
+) {
 }
 
 fn apply_houdini_workbench_preset(
@@ -419,7 +715,11 @@ mod tests {
     use egui_tiles::{ContainerKind, Tile};
     use re_viewer_context::ViewId;
 
-    use super::{HoudiniWorkbenchPreset, PresetViews, build_preset_tree};
+    use super::{
+        HoudiniWorkbenchPreset, PresetViews, WorkbenchCatalog, WorkbenchLayoutEntry,
+        WorkbenchLayoutScope, WorkbenchLayoutSource, build_preset_tree, sanitize_workbench_id,
+        workbench_compatibility_version,
+    };
 
     fn view_id(byte: u8) -> ViewId {
         ViewId::from_bytes([byte; 16])
@@ -540,5 +840,88 @@ mod tests {
         );
         assert!(names.iter().any(|(_, name)| name == "Output"));
         assert!(names.iter().any(|(_, name)| name == "Debug"));
+    }
+
+    #[test]
+    fn workbench_catalog_lists_bundled_presets_with_defaults() {
+        let catalog = WorkbenchCatalog::load_from_root(std::path::Path::new("/missing"));
+
+        assert_eq!(catalog.bundled.len(), 5);
+        assert!(
+            catalog
+                .bundled
+                .iter()
+                .any(|entry| entry.display_name == "Houdini Default" && entry.default_for_project)
+        );
+        assert!(catalog.personal.is_empty());
+        assert!(catalog.project.is_empty());
+    }
+
+    #[test]
+    fn workbench_catalog_loads_personal_and_project_metadata_by_name() {
+        let root = tempfile::tempdir().unwrap();
+        let personal_dir = root.path().join("personal");
+        let project_dir = root.path().join("project");
+        std::fs::create_dir_all(&personal_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let personal = saved_entry(
+            "personal:analysis",
+            "Analysis",
+            WorkbenchLayoutScope::Personal,
+            true,
+            false,
+        );
+        let project = saved_entry(
+            "project:team-default",
+            "Team Default",
+            WorkbenchLayoutScope::Project,
+            false,
+            true,
+        );
+        std::fs::write(
+            personal_dir.join("analysis.json"),
+            serde_json::to_string_pretty(&personal).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            project_dir.join("team-default.json"),
+            serde_json::to_string_pretty(&project).unwrap(),
+        )
+        .unwrap();
+
+        let catalog = WorkbenchCatalog::load_from_root(root.path());
+
+        assert_eq!(catalog.personal, vec![personal]);
+        assert_eq!(catalog.project, vec![project]);
+    }
+
+    #[test]
+    fn workbench_metadata_ids_are_filename_safe() {
+        assert_eq!(
+            sanitize_workbench_id("Copy of Houdini Default!"),
+            "copy-of-houdini-default"
+        );
+        assert_eq!(sanitize_workbench_id("///"), "workbench");
+    }
+
+    fn saved_entry(
+        id: &str,
+        display_name: &str,
+        scope: WorkbenchLayoutScope,
+        default_for_user: bool,
+        default_for_project: bool,
+    ) -> WorkbenchLayoutEntry {
+        WorkbenchLayoutEntry {
+            id: id.to_owned(),
+            display_name: display_name.to_owned(),
+            scope,
+            source: WorkbenchLayoutSource::SavedBlueprint,
+            description: None,
+            blueprint_path: Some(std::path::PathBuf::from(format!("{display_name}.rbl"))),
+            default_for_project,
+            default_for_user,
+            compatibility_version: workbench_compatibility_version(),
+        }
     }
 }

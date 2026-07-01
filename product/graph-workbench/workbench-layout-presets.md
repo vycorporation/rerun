@@ -79,3 +79,10 @@ layout file or duplicate the current edited layout without leaving the graph wor
 Follow-up work remains for a dedicated personal/project workbench browser with named layout
 metadata, categories, default-selection controls, and a clearer distinction between "save current
 blueprint for this app" and "save this workbench as a reusable named layout."
+
+Issue #74 first browser slice: the Workbench menu now groups bundled presets with saved personal
+and project workbench metadata. Saved entries are named JSON metadata wrappers that point at `.rbl`
+blueprint payloads and track separate personal/project default flags. Bundled presets can be
+duplicated into personal metadata before the existing Save Blueprint flow is invoked. A later slice
+should wire the Save Blueprint command to write directly to the registered metadata path instead of
+asking the user to pick the `.rbl` path manually.
