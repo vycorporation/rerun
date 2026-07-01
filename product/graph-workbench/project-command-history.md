@@ -18,6 +18,7 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Issue `#102`: add undo/redo for coalesced node layout drag commands.
 - Issue `#104`: add undo/redo for coalesced annotation drag and resize commands.
 - Issue `#106`: add undo/redo for annotation title, text, and collapse edits.
+- Issue `#108`: add undo/redo for ordinary node duplication with new stable node identities.
 
 ## Implementation notes
 
@@ -30,4 +31,5 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 - Node layout drag commands coalesce high-frequency drag updates into one old-position/new-position command at gesture completion.
 - Annotation gesture commands coalesce drag and resize updates; network box drag restores the member node positions moved by the gesture.
 - Annotation content commands coalesce repeated title/body text edits for the same annotation and keep collapse-all as one project command.
+- Node duplicate commands restore ordinary copied graph material with the captured new stable node ID, while output participation and output operators are not silently copied.
 - Sidecar save/load intentionally omits the undo and redo stacks so history does not become a second persistence format.
