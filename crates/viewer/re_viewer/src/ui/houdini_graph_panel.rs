@@ -81,8 +81,10 @@ fn shared_houdini_graph_panel_id() -> egui::Id {
 
 pub(crate) struct HoudiniGraphPanel {
     selected_node: usize,
+    selected_edge: Option<String>,
     selected_annotation: Option<usize>,
     context_menu_canvas: bool,
+    context_menu_edge: Option<String>,
     active_graph_pane: GraphWorkbenchPane,
     dragging_node: Option<usize>,
     node_drag_start_position: Option<GraphPoint>,
@@ -135,8 +137,10 @@ impl Default for HoudiniGraphPanel {
     fn default() -> Self {
         Self {
             selected_node: 1,
+            selected_edge: None,
             selected_annotation: None,
             context_menu_canvas: false,
+            context_menu_edge: None,
             active_graph_pane: GraphWorkbenchPane::Parameters,
             dragging_node: None,
             node_drag_start_position: None,
@@ -3207,6 +3211,7 @@ impl HoudiniGraphPanel {
                 || response.drag_started_by(egui::PointerButton::Primary)
             {
                 self.context_menu_canvas = false;
+                self.context_menu_edge = None;
                 self.dragging_node = None;
                 self.dragging_annotation = None;
                 self.resizing_annotation = None;
@@ -3236,6 +3241,7 @@ impl HoudiniGraphPanel {
                     }
                     if node_rect.contains(pointer_pos) {
                         self.selected_node = index;
+                        self.selected_edge = None;
                         self.selected_annotation = None;
                         self.node_info_open = true;
                         self.dragging_node = Some(index);
@@ -3257,11 +3263,13 @@ impl HoudiniGraphPanel {
                                 graph.set_annotation_collapsed(index, !annotation.collapsed);
                             }
                             self.selected_annotation = Some(index);
+                            self.selected_edge = None;
                             hit_annotation = true;
                             break;
                         }
                         if annotation_resize_handle_rect(*annotation_rect).contains(pointer_pos) {
                             self.selected_annotation = Some(index);
+                            self.selected_edge = None;
                             self.resizing_annotation = Some(index);
                             self.annotation_resize_start_size = graph
                                 .annotations
@@ -3272,6 +3280,7 @@ impl HoudiniGraphPanel {
                         }
                         if annotation_rect.contains(pointer_pos) {
                             self.selected_annotation = Some(index);
+                            self.selected_edge = None;
                             self.dragging_annotation = Some(index);
                             self.annotation_drag_start_position = graph
                                 .annotations
@@ -3285,34 +3294,75 @@ impl HoudiniGraphPanel {
                     }
                 }
 
+                let hit_edge = if !hit_node && !hit_annotation {
+                    graph_edge_at(
+                        graph,
+                        &node_rects,
+                        pointer_pos,
+                        edge_hit_radius(self.graph_view_zoom),
+                    )
+                    .map(|edge_id| {
+                        self.selected_edge = Some(edge_id);
+                        self.selected_annotation = None;
+                    })
+                    .is_some()
+                } else {
+                    false
+                };
+
                 if response.clicked_by(egui::PointerButton::Primary)
                     && !hit_node
                     && !hit_annotation
+                    && !hit_edge
                     && !self.node_info_pinned
                 {
                     self.node_info_open = false;
                     self.selected_annotation = None;
+                    self.selected_edge = None;
                 }
             }
 
             if response.clicked_by(egui::PointerButton::Secondary) {
                 self.selected_annotation = None;
+                self.context_menu_edge = None;
                 self.context_menu_canvas = true;
+                let mut hit_annotation = false;
                 for (index, annotation_rect) in annotation_rects.iter().enumerate().rev() {
                     if annotation_rect.contains(pointer_pos) {
                         self.selected_annotation = Some(index);
+                        self.selected_edge = None;
                         self.context_menu_canvas = false;
+                        hit_annotation = true;
                         break;
                     }
                 }
-                for (index, node_rect) in node_rects.iter().enumerate() {
-                    if node_rect.contains(pointer_pos) {
-                        self.selected_node = index;
-                        self.selected_annotation = None;
-                        self.context_menu_canvas = false;
-                        self.node_info_open = true;
-                        break;
+                let mut hit_node = false;
+                if !hit_annotation {
+                    for (index, node_rect) in node_rects.iter().enumerate() {
+                        if node_rect.contains(pointer_pos) {
+                            self.selected_node = index;
+                            self.selected_edge = None;
+                            self.selected_annotation = None;
+                            self.context_menu_canvas = false;
+                            self.node_info_open = true;
+                            hit_node = true;
+                            break;
+                        }
                     }
+                }
+                if !hit_annotation
+                    && !hit_node
+                    && let Some(edge_id) = graph_edge_at(
+                        graph,
+                        &node_rects,
+                        pointer_pos,
+                        edge_hit_radius(self.graph_view_zoom),
+                    )
+                {
+                    self.selected_edge = Some(edge_id.clone());
+                    self.context_menu_edge = Some(edge_id);
+                    self.selected_annotation = None;
+                    self.context_menu_canvas = false;
                 }
             }
 
@@ -3455,6 +3505,20 @@ impl HoudiniGraphPanel {
             None
         };
 
+        let hovered_edge_id = if response.hovered() {
+            ui.input(|input| input.pointer.hover_pos())
+                .and_then(|pointer_pos| {
+                    graph_edge_at(
+                        graph,
+                        &node_rects,
+                        pointer_pos,
+                        edge_hit_radius(self.graph_view_zoom),
+                    )
+                })
+        } else {
+            None
+        };
+
         let connector_color = ui.visuals().widgets.noninteractive.fg_stroke.color;
         for edge in graph.graph_layout().edges {
             let from_rect = node_rects[edge.from_node];
@@ -3467,7 +3531,21 @@ impl HoudiniGraphPanel {
             } else {
                 1.0
             };
-            let connector_stroke = Stroke::new(1.5, faded_color(connector_color, fade));
+            let selected = self
+                .selected_edge
+                .as_deref()
+                .is_some_and(|edge_id| edge_id == edge.edge_id);
+            let hovered = hovered_edge_id
+                .as_deref()
+                .is_some_and(|edge_id| edge_id == edge.edge_id);
+            let connector_stroke = if selected || hovered {
+                Stroke::new(
+                    if selected { 3.0 } else { 2.2 },
+                    ui.visuals().selection.stroke.color,
+                )
+            } else {
+                Stroke::new(1.5, faded_color(connector_color, fade))
+            };
             painter.line_segment([start, end], connector_stroke);
             draw_arrowhead(&painter, end, connector_stroke.color);
         }
@@ -3703,6 +3781,10 @@ impl HoudiniGraphPanel {
             self.annotation_context_menu_ui(ui, graph);
             return;
         }
+        if self.context_menu_edge.is_some() {
+            self.edge_context_menu_ui(ui, graph);
+            return;
+        }
         if self.context_menu_canvas {
             self.canvas_context_menu_ui(ui, graph);
             return;
@@ -3802,6 +3884,33 @@ impl HoudiniGraphPanel {
         if ui.button("Frame Selected    F").clicked() {
             self.pending_frame_selected = true;
             ui.close();
+        }
+    }
+
+    fn edge_context_menu_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        let Some(edge_id) = self.context_menu_edge.clone() else {
+            return;
+        };
+        ui.strong("Connection");
+        if let Some(readable_path) = graph.data_flow_edge_readable_path(&edge_id) {
+            ui.weak(readable_path);
+            ui.separator();
+            if ui.button("Remove Connection").clicked() {
+                if graph.remove_data_flow_edge(&edge_id).is_some() {
+                    if self.selected_edge.as_deref() == Some(edge_id.as_str()) {
+                        self.selected_edge = None;
+                    }
+                    self.context_menu_edge = None;
+                }
+                ui.close();
+            }
+        } else {
+            ui.weak("Connection no longer exists.");
+            if ui.button("Clear Selection").clicked() {
+                self.selected_edge = None;
+                self.context_menu_edge = None;
+                ui.close();
+            }
         }
     }
 
@@ -5590,6 +5699,47 @@ fn node_flag_rect(node_rect: Rect, action: NodeRingAction) -> Option<Rect> {
     ))
 }
 
+fn edge_hit_radius(zoom: f32) -> f32 {
+    (8.0 * zoom).clamp(6.0, 14.0)
+}
+
+fn graph_edge_at(
+    graph: &GraphDocument,
+    node_rects: &[Rect],
+    pointer_pos: Pos2,
+    hit_radius: f32,
+) -> Option<String> {
+    graph
+        .graph_layout()
+        .edges
+        .into_iter()
+        .filter_map(|edge| {
+            let from_rect = *node_rects.get(edge.from_node)?;
+            let to_rect = *node_rects.get(edge.to_node)?;
+            let start = Pos2::new(from_rect.right(), from_rect.center().y);
+            let end = Pos2::new(to_rect.left(), to_rect.center().y);
+            let distance = distance_to_segment(pointer_pos, start, end);
+            (distance <= hit_radius).then_some((edge.edge_id, distance))
+        })
+        .min_by(|(_, left_distance), (_, right_distance)| {
+            left_distance
+                .partial_cmp(right_distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(edge_id, _)| edge_id)
+}
+
+fn distance_to_segment(point: Pos2, start: Pos2, end: Pos2) -> f32 {
+    let segment = end - start;
+    let length_squared = segment.length_sq();
+    if length_squared <= f32::EPSILON {
+        return point.distance(start);
+    }
+    let point_delta = point - start;
+    let t = (point_delta.dot(segment) / length_squared).clamp(0.0, 1.0);
+    point.distance(start + segment * t)
+}
+
 fn evaluation_color_from_visuals(visuals: &egui::Visuals, state: EvaluationState) -> Color32 {
     match state {
         EvaluationState::Clean => visuals.text_color(),
@@ -5868,10 +6018,57 @@ fn draw_arrowhead(painter: &egui::Painter, tip: Pos2, color: Color32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        GraphSearchTarget, HoudiniGraphPanel,
+        GraphSearchTarget, HoudiniGraphPanel, distance_to_segment, graph_edge_at,
+        layout_node_rects,
         model::{ProjectGraphMetadata, ProjectGraphRole},
     };
     use crate::ui::houdini_graph_panel::model::GraphDocument;
+
+    #[test]
+    fn distance_to_segment_clamps_to_nearest_endpoint_or_segment() {
+        let start = egui::pos2(10.0, 10.0);
+        let end = egui::pos2(30.0, 10.0);
+
+        assert_eq!(distance_to_segment(egui::pos2(20.0, 13.0), start, end), 3.0);
+        assert_eq!(distance_to_segment(egui::pos2(5.0, 10.0), start, end), 5.0);
+        assert_eq!(distance_to_segment(egui::pos2(35.0, 10.0), start, end), 5.0);
+    }
+
+    #[test]
+    fn graph_edge_at_returns_stable_edge_id_for_drawn_connection() {
+        let graph = GraphDocument::sample();
+        let layout_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(480.0, 220.0));
+        let node_rects = layout_node_rects(
+            &graph,
+            layout_rect,
+            egui::vec2(116.0, 48.0),
+            1.0,
+            egui::Vec2::ZERO,
+        );
+        let layout = graph.graph_layout();
+        let first_edge = layout
+            .edges
+            .first()
+            .expect("sample graph should have a first edge");
+        let start = egui::pos2(
+            node_rects[first_edge.from_node].right(),
+            node_rects[first_edge.from_node].center().y,
+        );
+        let end = egui::pos2(
+            node_rects[first_edge.to_node].left(),
+            node_rects[first_edge.to_node].center().y,
+        );
+        let midpoint = start + (end - start) * 0.5;
+
+        assert_eq!(
+            graph_edge_at(&graph, &node_rects, midpoint + egui::vec2(0.0, 3.0), 8.0),
+            Some(first_edge.edge_id.clone())
+        );
+        assert_eq!(
+            graph_edge_at(&graph, &node_rects, egui::pos2(8.0, 210.0), 4.0),
+            None
+        );
+    }
 
     #[test]
     fn graph_search_result_switches_to_node_parent_graph() {

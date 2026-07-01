@@ -671,6 +671,14 @@ impl GraphDocument {
     }
 
     #[allow(dead_code)]
+    pub fn data_flow_edge_readable_path(&self, edge_id: &str) -> Option<String> {
+        self.data_flow_edges
+            .iter()
+            .find(|edge| edge.edge_id == edge_id)
+            .map(|edge| self.readable_data_flow_edge_path(edge))
+    }
+
+    #[allow(dead_code)]
     pub fn insert_node_on_data_flow_edge(
         &mut self,
         edge_id: &str,
@@ -5643,6 +5651,7 @@ impl GraphDocument {
             .iter()
             .filter_map(|edge| {
                 Some(GraphEdge {
+                    edge_id: edge.edge_id.clone(),
                     from_node: *node_indices_by_id.get(edge.from_node_id.as_str())?,
                     to_node: *node_indices_by_id.get(edge.to_node_id.as_str())?,
                 })
@@ -11316,6 +11325,7 @@ pub(crate) struct GraphLayoutNode {
 }
 
 pub(crate) struct GraphEdge {
+    pub edge_id: String,
     pub from_node: usize,
     pub to_node: usize,
 }
