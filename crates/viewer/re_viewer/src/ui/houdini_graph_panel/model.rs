@@ -251,6 +251,13 @@ pub(crate) struct ReconnectNodeDeleteResult {
     pub skipped_diagnostics: Vec<GraphDataFlowEdgeDiagnostic>,
 }
 
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct InsertNodeOnConnectionResult {
+    pub removed_edge: GraphDataFlowEdge,
+    pub added_edges: Vec<GraphDataFlowEdge>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GraphDataFlowEdgeDiagnosticStatus {
     MissingSourceNode,
@@ -663,6 +670,97 @@ impl GraphDocument {
         Some(edge)
     }
 
+    #[allow(dead_code)]
+    pub fn insert_node_on_data_flow_edge(
+        &mut self,
+        edge_id: &str,
+        inserted_node_id: &str,
+        inserted_input: &str,
+        inserted_output: &str,
+    ) -> Option<Result<InsertNodeOnConnectionResult, Vec<GraphDataFlowEdgeDiagnostic>>> {
+        let removed_edge = self
+            .data_flow_edges
+            .iter()
+            .find(|edge| edge.edge_id == edge_id)?
+            .clone();
+        let inserted_node_name = self
+            .nodes
+            .iter()
+            .find(|node| node.node_id == inserted_node_id)?
+            .name
+            .clone();
+        let incoming_edge = GraphDataFlowEdge {
+            edge_id: Self::data_flow_edge_id(
+                &removed_edge.from_node_id,
+                &removed_edge.from_output,
+                inserted_node_id,
+                inserted_input,
+            ),
+            from_node_id: removed_edge.from_node_id.clone(),
+            from_output: removed_edge.from_output.clone(),
+            to_node_id: inserted_node_id.to_owned(),
+            to_input: inserted_input.to_owned(),
+        };
+        let outgoing_edge = GraphDataFlowEdge {
+            edge_id: Self::data_flow_edge_id(
+                inserted_node_id,
+                inserted_output,
+                &removed_edge.to_node_id,
+                &removed_edge.to_input,
+            ),
+            from_node_id: inserted_node_id.to_owned(),
+            from_output: inserted_output.to_owned(),
+            to_node_id: removed_edge.to_node_id.clone(),
+            to_input: removed_edge.to_input.clone(),
+        };
+
+        let mut candidate_edges = self
+            .data_flow_edges
+            .iter()
+            .filter(|edge| edge.edge_id != removed_edge.edge_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut diagnostics = Vec::new();
+        if let Some(diagnostic) =
+            self.data_flow_edge_addition_diagnostic_with_edges(&incoming_edge, &candidate_edges)
+        {
+            diagnostics.push(diagnostic);
+        } else {
+            candidate_edges.push(incoming_edge.clone());
+        }
+        if let Some(diagnostic) =
+            self.data_flow_edge_addition_diagnostic_with_edges(&outgoing_edge, &candidate_edges)
+        {
+            diagnostics.push(diagnostic);
+        } else {
+            candidate_edges.push(outgoing_edge.clone());
+        }
+        if !diagnostics.is_empty() {
+            return Some(Err(diagnostics));
+        }
+
+        if !self.remove_data_flow_edge_without_history(&removed_edge.edge_id) {
+            return None;
+        }
+        let added_edges = vec![incoming_edge, outgoing_edge];
+        for edge in &added_edges {
+            if !self.add_data_flow_edge_without_history(edge.clone()) {
+                return None;
+            }
+        }
+        let readable_path = self.readable_data_flow_edge_path(&removed_edge);
+        self.record_project_command(ProjectCommand::DataFlowEdgeInsertNode {
+            readable_path,
+            inserted_node_name,
+            removed_edge: removed_edge.clone(),
+            added_edges: added_edges.clone(),
+        });
+        Some(Ok(InsertNodeOnConnectionResult {
+            removed_edge,
+            added_edges,
+        }))
+    }
+
     pub fn data_flow_edge_diagnostics(&self) -> Vec<GraphDataFlowEdgeDiagnostic> {
         self.data_flow_edges
             .iter()
@@ -704,8 +802,15 @@ impl GraphDocument {
         &self,
         edge: &GraphDataFlowEdge,
     ) -> Option<GraphDataFlowEdgeDiagnostic> {
-        if self
-            .data_flow_edges
+        self.data_flow_edge_addition_diagnostic_with_edges(edge, &self.data_flow_edges)
+    }
+
+    fn data_flow_edge_addition_diagnostic_with_edges(
+        &self,
+        edge: &GraphDataFlowEdge,
+        data_flow_edges: &[GraphDataFlowEdge],
+    ) -> Option<GraphDataFlowEdgeDiagnostic> {
+        if data_flow_edges
             .iter()
             .any(|existing_edge| existing_edge.edge_id == edge.edge_id)
         {
@@ -718,13 +823,18 @@ impl GraphDocument {
         }
 
         self.data_flow_edge_endpoint_diagnostic(edge).or_else(|| {
-            self.edge_would_create_cycle(&edge.from_node_id, &edge.to_node_id, None)
-                .then(|| GraphDataFlowEdgeDiagnostic {
-                    edge_id: edge.edge_id.clone(),
-                    status: GraphDataFlowEdgeDiagnosticStatus::Cycle,
-                    readable_path: self.readable_data_flow_edge_path(edge),
-                    message: "Connection would create cyclic v1 data flow.".to_owned(),
-                })
+            self.edge_would_create_cycle_in_edges(
+                &edge.from_node_id,
+                &edge.to_node_id,
+                None,
+                data_flow_edges,
+            )
+            .then(|| GraphDataFlowEdgeDiagnostic {
+                edge_id: edge.edge_id.clone(),
+                status: GraphDataFlowEdgeDiagnosticStatus::Cycle,
+                readable_path: self.readable_data_flow_edge_path(edge),
+                message: "Connection would create cyclic v1 data flow.".to_owned(),
+            })
         })
     }
 
@@ -869,8 +979,23 @@ impl GraphDocument {
         to_node_id: &str,
         ignored_edge_id: Option<&str>,
     ) -> bool {
+        self.edge_would_create_cycle_in_edges(
+            from_node_id,
+            to_node_id,
+            ignored_edge_id,
+            &self.data_flow_edges,
+        )
+    }
+
+    fn edge_would_create_cycle_in_edges(
+        &self,
+        from_node_id: &str,
+        to_node_id: &str,
+        ignored_edge_id: Option<&str>,
+        data_flow_edges: &[GraphDataFlowEdge],
+    ) -> bool {
         let mut adjacency = std::collections::BTreeMap::<&str, Vec<&str>>::new();
-        for edge in &self.data_flow_edges {
+        for edge in data_flow_edges {
             if ignored_edge_id.is_some_and(|edge_id| edge.edge_id == edge_id) {
                 continue;
             }
@@ -2392,6 +2517,31 @@ impl GraphDocument {
                 }
                 ProjectCommandDirection::Redo => {
                     self.remove_data_flow_edge_without_history(&edge.edge_id)
+                }
+            },
+            ProjectCommand::DataFlowEdgeInsertNode {
+                removed_edge,
+                added_edges,
+                ..
+            } => match direction {
+                ProjectCommandDirection::Undo => {
+                    for edge in added_edges.iter().rev() {
+                        if !self.remove_data_flow_edge_without_history(&edge.edge_id) {
+                            return false;
+                        }
+                    }
+                    self.add_data_flow_edge_without_history(removed_edge.clone())
+                }
+                ProjectCommandDirection::Redo => {
+                    if !self.remove_data_flow_edge_without_history(&removed_edge.edge_id) {
+                        return false;
+                    }
+                    for edge in added_edges {
+                        if !self.add_data_flow_edge_without_history(edge.clone()) {
+                            return false;
+                        }
+                    }
+                    true
                 }
             },
             ProjectCommand::NodeParameterEdit {
@@ -9905,6 +10055,12 @@ pub(crate) enum ProjectCommand {
         edge: GraphDataFlowEdge,
         readable_path: String,
     },
+    DataFlowEdgeInsertNode {
+        readable_path: String,
+        inserted_node_name: String,
+        removed_edge: GraphDataFlowEdge,
+        added_edges: Vec<GraphDataFlowEdge>,
+    },
     NodeParameterEdit {
         node_id: String,
         node_name: String,
@@ -10051,6 +10207,13 @@ impl ProjectCommand {
             }
             Self::DataFlowEdgeRemove { readable_path, .. } => {
                 format!("Remove connection {readable_path}")
+            }
+            Self::DataFlowEdgeInsertNode {
+                readable_path,
+                inserted_node_name,
+                ..
+            } => {
+                format!("Insert {inserted_node_name} on connection {readable_path}")
             }
             Self::NodeParameterEdit {
                 node_name,
@@ -16298,6 +16461,181 @@ mod tests {
 
         assert_eq!(graph.data_flow_edges.len(), initial_edge_count);
         assert!(graph.command_history.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn insert_node_on_data_flow_edge_records_atomic_rewire_command() {
+        let mut graph = GraphDocument::sample();
+        let source_node_id = graph.nodes[0].node_id.clone();
+        let filter_node_id = graph.nodes[1].node_id.clone();
+        let removed_edge_id = GraphDocument::data_flow_edge_id(
+            &source_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+            &filter_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+        );
+        let inserted_node_index = graph
+            .duplicate_node(1)
+            .expect("filter should duplicate as compatible insert node");
+        let inserted_node_id = graph.nodes[inserted_node_index].node_id.clone();
+        let inserted_node_name = graph.nodes[inserted_node_index].name.clone();
+        let incoming_edge_id = GraphDocument::data_flow_edge_id(
+            &source_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+            &inserted_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+        );
+        let outgoing_edge_id = GraphDocument::data_flow_edge_id(
+            &inserted_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+            &filter_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+        );
+        let edge_count_before_insert = graph.data_flow_edges.len();
+
+        let result = graph
+            .insert_node_on_data_flow_edge(
+                &removed_edge_id,
+                &inserted_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+                PRIMARY_GEOMETRY_OUTPUT,
+            )
+            .expect("source to filter edge should exist")
+            .unwrap_or_else(|diagnostics| panic!("insert should be valid: {diagnostics:?}"));
+
+        assert_eq!(result.removed_edge.edge_id, removed_edge_id);
+        assert_eq!(result.added_edges.len(), 2);
+        assert_eq!(graph.data_flow_edges.len(), edge_count_before_insert + 1);
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == removed_edge_id)
+        );
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == incoming_edge_id)
+        );
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == outgoing_edge_id)
+        );
+        assert_eq!(
+            graph.nodes[inserted_node_index].evaluation.state,
+            EvaluationState::Stale
+        );
+        assert_eq!(graph.nodes[1].evaluation.state, EvaluationState::Stale);
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::DataFlowEdgeInsertNode {
+                inserted_node_name: recorded_name,
+                removed_edge,
+                added_edges,
+                ..
+            }) if recorded_name == &inserted_node_name
+                && removed_edge.edge_id == removed_edge_id
+                && added_edges.len() == 2
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some(
+                format!(
+                    "Insert {inserted_node_name} on connection /obj/main/Source:geometry -> /obj/main/Filter:geometry"
+                )
+                .as_str()
+            )
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.data_flow_edges.len(), edge_count_before_insert);
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == removed_edge_id)
+        );
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == incoming_edge_id)
+        );
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == outgoing_edge_id)
+        );
+
+        assert!(graph.redo_project_command());
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == removed_edge_id)
+        );
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == incoming_edge_id)
+        );
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == outgoing_edge_id)
+        );
+    }
+
+    #[test]
+    fn insert_node_on_data_flow_edge_returns_diagnostics_without_mutating() {
+        let mut graph = GraphDocument::sample();
+        let source_node_id = graph.nodes[0].node_id.clone();
+        let filter_node_id = graph.nodes[1].node_id.clone();
+        let output_node_id = graph.nodes[3].node_id.clone();
+        let removed_edge_id = GraphDocument::data_flow_edge_id(
+            &source_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+            &filter_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+        );
+        let edges_before = graph.data_flow_edges.clone();
+
+        let diagnostics = match graph
+            .insert_node_on_data_flow_edge(
+                &removed_edge_id,
+                &output_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+                PRIMARY_GEOMETRY_OUTPUT,
+            )
+            .expect("source to filter edge should exist")
+        {
+            Ok(_) => panic!("output node should not be insertable as a producing middle node"),
+            Err(diagnostics) => diagnostics,
+        };
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].status,
+            GraphDataFlowEdgeDiagnosticStatus::IncompatibleDataKind
+        );
+        assert_eq!(graph.data_flow_edges, edges_before);
+        assert!(graph.command_history.undo_stack.is_empty());
+        assert!(
+            graph
+                .insert_node_on_data_flow_edge(
+                    "missing.edge",
+                    &output_node_id,
+                    PRIMARY_GEOMETRY_OUTPUT,
+                    PRIMARY_GEOMETRY_OUTPUT,
+                )
+                .is_none()
+        );
     }
 
     #[test]
