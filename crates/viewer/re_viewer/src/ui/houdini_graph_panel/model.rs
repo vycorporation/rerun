@@ -1170,6 +1170,21 @@ impl GraphDocument {
                 };
                 true
             }
+            ProjectCommand::NodeLayoutEdit {
+                node_id,
+                old_position,
+                new_position,
+                ..
+            } => {
+                let Some(node) = self.nodes.iter_mut().find(|node| node.node_id == *node_id) else {
+                    return false;
+                };
+                node.layout_position = match direction {
+                    ProjectCommandDirection::Undo => *old_position,
+                    ProjectCommandDirection::Redo => *new_position,
+                };
+                true
+            }
             ProjectCommand::LayerVisibilityEdit {
                 layer_index,
                 old_visible,
@@ -3078,6 +3093,25 @@ impl GraphDocument {
         if let Some(node) = self.nodes.get_mut(index) {
             node.layout_position = position;
         }
+    }
+
+    pub fn finish_node_layout_drag(&mut self, index: usize, old_position: GraphPoint) -> bool {
+        let Some(node) = self.nodes.get(index) else {
+            return false;
+        };
+        let new_position = node.layout_position;
+        if old_position == new_position {
+            return false;
+        }
+        let node_id = node.node_id.clone();
+        let node_name = node.name.clone();
+        self.record_project_command(ProjectCommand::NodeLayoutEdit {
+            node_id,
+            node_name,
+            old_position,
+            new_position,
+        });
+        true
     }
 
     #[allow(dead_code)]
@@ -6885,6 +6919,12 @@ pub(crate) enum ProjectCommand {
         old_show_comment: bool,
         new_show_comment: bool,
     },
+    NodeLayoutEdit {
+        node_id: String,
+        node_name: String,
+        old_position: GraphPoint,
+        new_position: GraphPoint,
+    },
     LayerVisibilityEdit {
         layer_index: usize,
         layer_name: String,
@@ -6916,6 +6956,7 @@ impl ProjectCommand {
             Self::NodeCommentVisibilityEdit { node_name, .. } => {
                 format!("Set {node_name} comment visibility")
             }
+            Self::NodeLayoutEdit { node_name, .. } => format!("Move {node_name}"),
             Self::LayerVisibilityEdit { layer_name, .. } => {
                 format!("Set {layer_name} visibility")
             }
@@ -10743,14 +10784,66 @@ mod tests {
     }
 
     #[test]
+    fn node_layout_drag_records_one_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+        let original_position = graph.nodes[filter_index].layout_position;
+        let intermediate_position = GraphPoint::new(0.25, 0.75);
+        let final_position = GraphPoint::new(-1.0, 2.0);
+
+        graph.set_node_layout_position(filter_index, intermediate_position);
+        graph.set_node_layout_position(filter_index, final_position);
+        assert!(graph.command_history.undo_stack.is_empty());
+
+        assert!(graph.finish_node_layout_drag(filter_index, original_position));
+
+        assert_eq!(graph.nodes[filter_index].layout_position, final_position);
+        assert!(graph.command_history.redo_stack.is_empty());
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodeLayoutEdit {
+                node_name,
+                old_position,
+                new_position,
+                ..
+            }) if node_name == "Filter"
+                && *old_position == original_position
+                && *new_position == final_position
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Move Filter")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes[filter_index].layout_position, original_position);
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Move Filter")
+        );
+
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.nodes[filter_index].layout_position, final_position);
+        assert!(!graph.finish_node_layout_drag(filter_index, final_position));
+        assert!(!graph.finish_node_layout_drag(graph.nodes.len(), original_position));
+    }
+
+    #[test]
     fn command_history_is_runtime_state_not_sidecar_state() {
         let mut graph = GraphDocument::sample();
+        let original_position = graph.nodes[1].layout_position;
         assert!(graph.set_node_name(1, "FILTER_LOW"));
         assert!(graph.set_node_parameter_value(1, 0.72));
         assert!(graph.set_layer_visibility(0, false));
         assert!(graph.set_layer_order(1, 42));
         assert!(graph.set_node_output_participation(1, false));
         assert!(graph.set_node_comment_visibility(1, true));
+        graph.set_node_layout_position(1, GraphPoint::new(0.25, 0.75));
+        assert!(graph.finish_node_layout_drag(1, original_position));
         assert!(!graph.command_history.undo_stack.is_empty());
 
         let json = graph.to_sidecar_json().unwrap();
