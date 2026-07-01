@@ -1389,9 +1389,21 @@ impl HoudiniGraphPanel {
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    if let Some(node) = graph.nodes.get_mut(self.selected_node) {
-                        ui.re_checkbox(&mut node.participates_in_output, "Display output");
-                        ui.re_checkbox(&mut node.show_comment_in_network, "Show comment");
+                    if self.selected_node < graph.nodes.len() {
+                        let mut participates =
+                            graph.nodes[self.selected_node].participates_in_output;
+                        if ui
+                            .re_checkbox(&mut participates, "Display output")
+                            .changed()
+                        {
+                            graph.set_node_output_participation(self.selected_node, participates);
+                        }
+
+                        let mut show_comment =
+                            graph.nodes[self.selected_node].show_comment_in_network;
+                        if ui.re_checkbox(&mut show_comment, "Show comment").changed() {
+                            graph.set_node_comment_visibility(self.selected_node, show_comment);
+                        }
                     }
 
                     let mut manual = graph.nodes[self.selected_node].evaluation.manual;
@@ -2007,23 +2019,31 @@ impl HoudiniGraphPanel {
     }
 
     fn selected_node_comment_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
-        let Some(node) = graph.nodes.get_mut(self.selected_node) else {
-            return;
-        };
+        let mut show_comment = {
+            let Some(node) = graph.nodes.get_mut(self.selected_node) else {
+                return;
+            };
 
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.colored_label(ui.visuals().selection.stroke.color, "Comment");
-            if node.comment.trim().is_empty() {
-                ui.weak("empty");
-            }
-        });
-        ui.add(
-            egui::TextEdit::multiline(&mut node.comment)
-                .desired_rows(2)
-                .hint_text("Click to enter a comment"),
-        );
-        ui.re_checkbox(&mut node.show_comment_in_network, "Show comment in Network");
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.colored_label(ui.visuals().selection.stroke.color, "Comment");
+                if node.comment.trim().is_empty() {
+                    ui.weak("empty");
+                }
+            });
+            ui.add(
+                egui::TextEdit::multiline(&mut node.comment)
+                    .desired_rows(2)
+                    .hint_text("Click to enter a comment"),
+            );
+            node.show_comment_in_network
+        };
+        if ui
+            .re_checkbox(&mut show_comment, "Show comment in Network")
+            .changed()
+        {
+            graph.set_node_comment_visibility(self.selected_node, show_comment);
+        }
     }
 
     fn graph_workbench_additional_node_info_ui(
@@ -3558,13 +3578,13 @@ impl HoudiniGraphPanel {
             self.active_graph_pane = GraphWorkbenchPane::Info;
             ui.close();
         }
-        if let Some(node) = graph.nodes.get_mut(self.selected_node) {
+        if let Some(node) = graph.nodes.get(self.selected_node) {
             let mut show_comment = node.show_comment_in_network;
             if ui
                 .checkbox(&mut show_comment, "Show Comment in Network")
                 .changed()
             {
-                node.show_comment_in_network = show_comment;
+                graph.set_node_comment_visibility(self.selected_node, show_comment);
                 ui.close();
             }
         }
@@ -3771,8 +3791,8 @@ impl HoudiniGraphPanel {
                 self.active_graph_pane = GraphWorkbenchPane::Info;
             }
             NodeRingAction::Display => {
-                if let Some(node) = graph.nodes.get_mut(node_index) {
-                    node.participates_in_output = !node.participates_in_output;
+                if let Some(node) = graph.nodes.get(node_index) {
+                    graph.set_node_output_participation(node_index, !node.participates_in_output);
                 }
             }
             NodeRingAction::Manual => {
