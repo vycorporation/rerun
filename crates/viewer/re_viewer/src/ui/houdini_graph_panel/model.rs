@@ -4017,6 +4017,131 @@ impl GraphDocument {
     }
 
     #[allow(dead_code)]
+    pub fn add_procedural_asset_boundary_port(
+        &mut self,
+        asset_id: &str,
+        direction: ProceduralAssetBoundaryDirection,
+        port: HoudiniOperatorPort,
+    ) -> bool {
+        let Some(port) = normalized_asset_boundary_port(port) else {
+            return false;
+        };
+        let changed = self.edit_procedural_asset_boundary_ports(asset_id, direction, |ports| {
+            if ports.iter().any(|existing| existing.name == port.name) {
+                return false;
+            }
+            ports.push(port);
+            true
+        });
+        if changed {
+            self.mark_procedural_asset_boundary_changed(asset_id, direction);
+        }
+        changed
+    }
+
+    #[allow(dead_code)]
+    pub fn replace_procedural_asset_boundary_port(
+        &mut self,
+        asset_id: &str,
+        direction: ProceduralAssetBoundaryDirection,
+        existing_port_name: &str,
+        port: HoudiniOperatorPort,
+    ) -> bool {
+        let existing_port_name = existing_port_name.trim();
+        if existing_port_name.is_empty() {
+            return false;
+        }
+        let Some(port) = normalized_asset_boundary_port(port) else {
+            return false;
+        };
+        let changed = self.edit_procedural_asset_boundary_ports(asset_id, direction, |ports| {
+            let Some(index) = ports
+                .iter()
+                .position(|existing| existing.name == existing_port_name)
+            else {
+                return false;
+            };
+            if port.name != existing_port_name
+                && ports.iter().any(|existing| existing.name == port.name)
+            {
+                return false;
+            }
+            if ports[index] == port {
+                return false;
+            }
+            ports[index] = port;
+            true
+        });
+        if changed {
+            self.mark_procedural_asset_boundary_changed(asset_id, direction);
+        }
+        changed
+    }
+
+    #[allow(dead_code)]
+    pub fn remove_procedural_asset_boundary_port(
+        &mut self,
+        asset_id: &str,
+        direction: ProceduralAssetBoundaryDirection,
+        port_name: &str,
+    ) -> bool {
+        let port_name = port_name.trim();
+        if port_name.is_empty() {
+            return false;
+        }
+        let changed = self.edit_procedural_asset_boundary_ports(asset_id, direction, |ports| {
+            if direction == ProceduralAssetBoundaryDirection::Output && ports.len() <= 1 {
+                return false;
+            }
+            let Some(index) = ports.iter().position(|port| port.name == port_name) else {
+                return false;
+            };
+            ports.remove(index);
+            true
+        });
+        if changed {
+            self.mark_procedural_asset_boundary_changed(asset_id, direction);
+        }
+        changed
+    }
+
+    fn edit_procedural_asset_boundary_ports(
+        &mut self,
+        asset_id: &str,
+        direction: ProceduralAssetBoundaryDirection,
+        edit: impl FnOnce(&mut Vec<HoudiniOperatorPort>) -> bool,
+    ) -> bool {
+        let Some(declaration) = self
+            .procedural_asset_declarations
+            .iter_mut()
+            .find(|declaration| declaration.asset_id == asset_id)
+        else {
+            return false;
+        };
+        edit(direction.ports_mut(declaration))
+    }
+
+    fn mark_procedural_asset_boundary_changed(
+        &mut self,
+        asset_id: &str,
+        direction: ProceduralAssetBoundaryDirection,
+    ) {
+        for node in &mut self.nodes {
+            let Some(asset_node) = node.procedural_asset.as_ref() else {
+                continue;
+            };
+            if asset_node.asset_id != asset_id {
+                continue;
+            }
+            node.evaluation.state = EvaluationState::Stale;
+            node.evaluation.message = Some(format!(
+                "Asset {} boundary changed; review instance bindings before running.",
+                direction.as_str()
+            ));
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn unlocked_asset_graph_id_for_node(&self, node_index: usize) -> Option<String> {
         self.nodes
             .get(node_index)?
@@ -8411,6 +8536,32 @@ pub(crate) struct ProceduralAssetInstanceNode {
     pub version_status: OperatorVersionStatus,
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProceduralAssetBoundaryDirection {
+    Input,
+    Output,
+}
+
+impl ProceduralAssetBoundaryDirection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+        }
+    }
+
+    fn ports_mut(
+        self,
+        declaration: &mut ProceduralAssetDeclaration,
+    ) -> &mut Vec<HoudiniOperatorPort> {
+        match self {
+            Self::Input => &mut declaration.inputs,
+            Self::Output => &mut declaration.outputs,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct NativeOperatorNode {
     #[serde(default)]
@@ -8848,6 +8999,12 @@ impl HoudiniOperatorPort {
             help: help.into(),
         }
     }
+}
+
+fn normalized_asset_boundary_port(mut port: HoudiniOperatorPort) -> Option<HoudiniOperatorPort> {
+    port.name = port.name.trim().to_owned();
+    port.help = port.help.trim().to_owned();
+    (!port.name.is_empty()).then_some(port)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -11327,21 +11484,22 @@ mod tests {
         NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind, NodeStatus,
         OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode,
         OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetArtifactReference,
-        ProceduralAssetArtifactRole, ProceduralAssetArtifactStatus, ProceduralAssetDeclaration,
-        ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
-        ProjectCommand, ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole,
-        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
-        PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
-        PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
-        PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
-        PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
-        PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
-        PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
-        PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
-        PythonRequirementsSource, ReferenceDiagnosticStatus, ReferenceTargetEntry,
-        ReferenceTargetIdentity, ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem,
-        SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
-        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        ProceduralAssetArtifactRole, ProceduralAssetArtifactStatus,
+        ProceduralAssetBoundaryDirection, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
+        ProceduralAssetSource, ProceduralAssetSubgraphReference, ProjectCommand,
+        ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole, PythonDependencyHealth,
+        PythonEnvironmentDescriptor, PythonEnvironmentPathMode, PythonEnvironmentPaths,
+        PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
+        PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
+        PythonOperatorDeclaration, PythonOperatorDependencies, PythonOperatorDependencyStatus,
+        PythonOperatorEntryPoint, PythonOperatorNumericRange, PythonOperatorOutputCounts,
+        PythonOperatorParameterDeclaration, PythonOperatorParameterKind,
+        PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
+        PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
+        ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
+        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
+        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
+        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -17845,6 +18003,151 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         let current_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
         assert!(!graph.match_procedural_asset_definition(current_index));
         assert!(!graph.upgrade_procedural_asset_to_current_definition(current_index));
+    }
+
+    #[test]
+    fn procedural_asset_boundary_model_actions_edit_typed_ports() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        let node_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+
+        assert!(graph.add_procedural_asset_boundary_port(
+            "vy.asset.curve_cleanup",
+            ProceduralAssetBoundaryDirection::Input,
+            HoudiniOperatorPort {
+                name: "  threshold  ".to_owned(),
+                data_kind: HoudiniDataKind::Scalar,
+                required: false,
+                help: " Optional score threshold. ".to_owned(),
+            },
+        ));
+        assert!(graph.replace_procedural_asset_boundary_port(
+            "vy.asset.curve_cleanup",
+            ProceduralAssetBoundaryDirection::Output,
+            "geometry",
+            HoudiniOperatorPort {
+                name: "clean_curves".to_owned(),
+                data_kind: HoudiniDataKind::GeometryTable,
+                required: true,
+                help: "Clean native cubic Bezier and polygon geometry.".to_owned(),
+            },
+        ));
+        assert!(graph.remove_procedural_asset_boundary_port(
+            "vy.asset.curve_cleanup",
+            ProceduralAssetBoundaryDirection::Input,
+            "threshold",
+        ));
+
+        let declaration = &graph.procedural_asset_declarations[0];
+        assert_eq!(
+            declaration
+                .inputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["geometry"]
+        );
+        assert_eq!(
+            declaration
+                .outputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["clean_curves"]
+        );
+        assert!(
+            declaration.outputs[0]
+                .data_kind
+                .preserves_native_cubic_bezier()
+        );
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("asset info should exist");
+        assert_eq!(info.input_count, 1);
+        assert_eq!(info.output_count, 1);
+        assert_eq!(info.evaluation.state, EvaluationState::Stale);
+        assert_eq!(
+            info.evaluation.message.as_deref(),
+            Some("Asset input boundary changed; review instance bindings before running.")
+        );
+    }
+
+    #[test]
+    fn procedural_asset_boundary_actions_reject_ambiguous_edits() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+
+        assert!(!graph.add_procedural_asset_boundary_port(
+            "vy.asset.curve_cleanup",
+            ProceduralAssetBoundaryDirection::Input,
+            geometry_port("geometry", "Duplicate input."),
+        ));
+        assert!(!graph.add_procedural_asset_boundary_port(
+            "vy.asset.curve_cleanup",
+            ProceduralAssetBoundaryDirection::Output,
+            geometry_port(" ", "Missing stable port name."),
+        ));
+        assert!(!graph.replace_procedural_asset_boundary_port(
+            "vy.asset.curve_cleanup",
+            ProceduralAssetBoundaryDirection::Output,
+            "missing",
+            geometry_port("renamed", "Missing original port."),
+        ));
+        assert!(!graph.remove_procedural_asset_boundary_port(
+            "vy.asset.curve_cleanup",
+            ProceduralAssetBoundaryDirection::Output,
+            "geometry",
+        ));
+
+        assert!(graph.add_procedural_asset_boundary_port(
+            "vy.asset.curve_cleanup",
+            ProceduralAssetBoundaryDirection::Output,
+            HoudiniOperatorPort {
+                name: "attributes".to_owned(),
+                data_kind: HoudiniDataKind::AttributeTable,
+                required: false,
+                help: "Optional attribute table output.".to_owned(),
+            },
+        ));
+        assert!(!graph.replace_procedural_asset_boundary_port(
+            "vy.asset.curve_cleanup",
+            ProceduralAssetBoundaryDirection::Output,
+            "attributes",
+            geometry_port("geometry", "Would duplicate the existing output."),
+        ));
+        assert!(graph.remove_procedural_asset_boundary_port(
+            "vy.asset.curve_cleanup",
+            ProceduralAssetBoundaryDirection::Output,
+            "attributes",
+        ));
+        assert!(!graph.add_procedural_asset_boundary_port(
+            "vy.asset.missing",
+            ProceduralAssetBoundaryDirection::Input,
+            geometry_port("new_input", "Missing declaration."),
+        ));
+
+        let declaration = &graph.procedural_asset_declarations[0];
+        assert_eq!(
+            declaration
+                .inputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["geometry"]
+        );
+        assert_eq!(
+            declaration
+                .outputs
+                .iter()
+                .map(|port| port.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["geometry"]
+        );
     }
 
     #[test]
