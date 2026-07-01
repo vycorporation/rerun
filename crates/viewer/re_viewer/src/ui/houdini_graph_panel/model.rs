@@ -750,8 +750,13 @@ impl GraphDocument {
             GraphPoint::new(0.22, 0.24),
             vec![node.node_id.clone()],
         );
-        self.annotations.push(annotation);
-        Some(self.annotations.len() - 1)
+        let insert_index = self.annotations.len();
+        self.annotations.push(annotation.clone());
+        self.record_project_command(ProjectCommand::AnnotationCreate {
+            annotation,
+            insert_index,
+        });
+        Some(insert_index)
     }
 
     pub fn add_sticky_note_near_node(&mut self, node_index: usize) -> Option<usize> {
@@ -765,8 +770,13 @@ impl GraphDocument {
             position,
             GraphPoint::new(0.22, 0.20),
         );
-        self.annotations.push(annotation);
-        Some(self.annotations.len() - 1)
+        let insert_index = self.annotations.len();
+        self.annotations.push(annotation.clone());
+        self.record_project_command(ProjectCommand::AnnotationCreate {
+            annotation,
+            insert_index,
+        });
+        Some(insert_index)
     }
 
     pub fn settle_node_drag_for_network_boxes(
@@ -1446,6 +1456,34 @@ impl GraphDocument {
                     }
                 }
                 true
+            }
+            ProjectCommand::AnnotationCreate {
+                annotation,
+                insert_index,
+            } => {
+                match direction {
+                    ProjectCommandDirection::Undo => {
+                        let Some(annotation_index) = self.annotations.iter().position(|existing| {
+                            existing.annotation_id == annotation.annotation_id
+                        }) else {
+                            return false;
+                        };
+                        self.annotations.remove(annotation_index);
+                        true
+                    }
+                    ProjectCommandDirection::Redo => {
+                        if self
+                            .annotations
+                            .iter()
+                            .any(|existing| existing.annotation_id == annotation.annotation_id)
+                        {
+                            return false;
+                        }
+                        let insert_index = (*insert_index).min(self.annotations.len());
+                        self.annotations.insert(insert_index, annotation.clone());
+                        true
+                    }
+                }
             }
             ProjectCommand::AnnotationResizeEdit {
                 annotation_id,
@@ -7321,6 +7359,10 @@ pub(crate) enum ProjectCommand {
         new_position: GraphPoint,
         moved_nodes: Vec<NodeLayoutCommandSnapshot>,
     },
+    AnnotationCreate {
+        annotation: GraphAnnotation,
+        insert_index: usize,
+    },
     AnnotationResizeEdit {
         annotation_id: String,
         annotation_title: String,
@@ -7396,6 +7438,9 @@ impl ProjectCommand {
                 annotation_title, ..
             } => {
                 format!("Move {annotation_title}")
+            }
+            Self::AnnotationCreate { annotation, .. } => {
+                format!("Create {}", annotation.title)
             }
             Self::AnnotationResizeEdit {
                 annotation_title, ..
@@ -11574,6 +11619,88 @@ mod tests {
     }
 
     #[test]
+    fn organization_creation_records_undoable_project_commands() {
+        let mut graph = GraphDocument::sample();
+        graph.annotations.clear();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+
+        let box_index = graph
+            .add_network_box_for_node(filter_index)
+            .expect("network box should be created for selected node");
+        let box_id = graph.annotations[box_index].annotation_id.clone();
+        assert_eq!(
+            graph.annotations[box_index].kind,
+            GraphAnnotationKind::NetworkBox
+        );
+        assert_eq!(
+            graph.annotations[box_index].member_node_ids,
+            vec![graph.nodes[filter_index].node_id.clone()]
+        );
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::AnnotationCreate {
+                annotation,
+                insert_index: 0,
+            }) if annotation.annotation_id == box_id
+                && annotation.kind == GraphAnnotationKind::NetworkBox
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Create Network Box")
+        );
+
+        assert!(graph.undo_project_command());
+        assert!(graph.annotations.is_empty());
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Create Network Box")
+        );
+
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.annotations.len(), 1);
+        assert_eq!(graph.annotations[0].annotation_id, box_id);
+
+        let note_index = graph
+            .add_sticky_note_near_node(filter_index)
+            .expect("sticky note should be created near selected node");
+        let note_id = graph.annotations[note_index].annotation_id.clone();
+        assert_eq!(
+            graph.annotations[note_index].kind,
+            GraphAnnotationKind::StickyNote
+        );
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::AnnotationCreate {
+                annotation,
+                insert_index: 1,
+            }) if annotation.annotation_id == note_id
+                && annotation.kind == GraphAnnotationKind::StickyNote
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Create Sticky Note")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.annotations.len(), 1);
+        assert!(
+            !graph
+                .annotations
+                .iter()
+                .any(|annotation| annotation.annotation_id == note_id)
+        );
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.annotations.len(), 2);
+        assert_eq!(graph.annotations[1].annotation_id, note_id);
+        assert!(graph.add_network_box_for_node(graph.nodes.len()).is_none());
+        assert!(graph.add_sticky_note_near_node(graph.nodes.len()).is_none());
+    }
+
+    #[test]
     fn annotation_resize_records_one_undoable_project_command() {
         let mut graph = GraphDocument::sample();
         let box_index = graph
@@ -11804,6 +11931,8 @@ mod tests {
         assert!(graph.set_node_output_participation(1, false));
         assert!(graph.set_node_comment_visibility(1, true));
         assert!(graph.set_node_manual(1, true));
+        assert!(graph.add_network_box_for_node(1).is_some());
+        assert!(graph.add_sticky_note_near_node(1).is_some());
         graph.set_node_layout_position(1, GraphPoint::new(0.25, 0.75));
         assert!(graph.finish_node_layout_drag(1, original_position));
         assert!(graph.translate_annotation(0, GraphPoint::new(0.04, 0.04)));
