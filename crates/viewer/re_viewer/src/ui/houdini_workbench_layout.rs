@@ -89,8 +89,20 @@ pub(crate) fn houdini_workbench_toolbar_ui(
                 });
 
                 if ui
-                    .small_button("Save blueprint...")
-                    .on_hover_text("Save the current workbench layout to a Rerun blueprint file.")
+                    .small_button("Open saved layout...")
+                    .on_hover_text(
+                        "Open a saved Rerun blueprint file (.rbl) as a workbench layout.",
+                    )
+                    .clicked()
+                {
+                    ctx.command_sender().send_ui(re_ui::UICommand::Open);
+                }
+
+                if ui
+                    .small_button("Save workbench as...")
+                    .on_hover_text(
+                        "Duplicate the current workbench layout to a named Rerun blueprint file (.rbl).",
+                    )
                     .clicked()
                 {
                     ctx.command_sender()

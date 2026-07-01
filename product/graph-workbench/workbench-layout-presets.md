@@ -70,5 +70,9 @@ Track the implementation in #72.
 
 Initial implementation slice: bundled workbench layout loading is available from the viewport
 Workbench menu, using native Rerun blueprint views, splits, tab containers, and named containers.
-Follow-up work remains for duplicating presets into named personal layouts and browsing/reloading
-saved personal or project workbenches beyond the existing `.rbl` blueprint save path.
+The Workbench toolbar also exposes `.rbl`-backed open/save-as actions so users can load a saved
+layout file or duplicate the current edited layout without leaving the graph workspace.
+
+Follow-up work remains for a dedicated personal/project workbench browser with named layout
+metadata, categories, default-selection controls, and a clearer distinction between "save current
+blueprint for this app" and "save this workbench as a reusable named layout."
