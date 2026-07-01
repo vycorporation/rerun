@@ -11,10 +11,12 @@ This note maps the undo/redo and project-command PRD lane to implementation issu
 ## Issue slices
 
 - Issue `#88`: add the first project-command history slice for undo/redo of graph-owned node parameter edits.
+- Issue `#96`: add undo/redo for layer visibility and layer order presentation edits.
 
 ## Implementation notes
 
 - Project command history restores graph/project intent and marks affected outputs stale.
 - Runtime evaluation state, work items, running work, and cached outputs are not restored by undo/redo.
 - The first slice records node parameter edits with stable node identity, parameter label, old value, and new value.
+- Layer visibility and layer order commands restore presentation intent only; they do not replay work items or cached output.
 - Sidecar save/load intentionally omits the undo and redo stacks so history does not become a second persistence format.

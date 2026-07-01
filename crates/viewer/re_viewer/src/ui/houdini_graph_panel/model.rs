@@ -683,6 +683,62 @@ impl GraphDocument {
         true
     }
 
+    pub fn set_layer_visibility(&mut self, layer_index: usize, visible: bool) -> bool {
+        let Some(command) = self.set_layer_visibility_without_history(layer_index, visible) else {
+            return false;
+        };
+        self.record_project_command(command);
+        true
+    }
+
+    fn set_layer_visibility_without_history(
+        &mut self,
+        layer_index: usize,
+        visible: bool,
+    ) -> Option<ProjectCommand> {
+        let layer = self.layers.get_mut(layer_index)?;
+        if layer.visible == visible {
+            return None;
+        }
+        let old_visible = layer.visible;
+        layer.visible = visible;
+        Some(ProjectCommand::LayerVisibilityEdit {
+            layer_index,
+            layer_name: layer.name.clone(),
+            layer_kind: layer.kind,
+            old_visible,
+            new_visible: visible,
+        })
+    }
+
+    pub fn set_layer_order(&mut self, layer_index: usize, order: i32) -> bool {
+        let Some(command) = self.set_layer_order_without_history(layer_index, order) else {
+            return false;
+        };
+        self.record_project_command(command);
+        true
+    }
+
+    fn set_layer_order_without_history(
+        &mut self,
+        layer_index: usize,
+        order: i32,
+    ) -> Option<ProjectCommand> {
+        let layer = self.layers.get_mut(layer_index)?;
+        if layer.order == order {
+            return None;
+        }
+        let old_order = layer.order;
+        layer.order = order;
+        Some(ProjectCommand::LayerOrderEdit {
+            layer_index,
+            layer_name: layer.name.clone(),
+            layer_kind: layer.kind,
+            old_order,
+            new_order: order,
+        })
+    }
+
     pub fn add_network_box_for_node(&mut self, node_index: usize) -> Option<usize> {
         let node = self.nodes.get(node_index)?;
         let position =
@@ -1068,6 +1124,38 @@ impl GraphDocument {
                 node.parameter.value =
                     value.clamp(*node.parameter.range.start(), *node.parameter.range.end());
                 self.mark_node_stale(node_index);
+                true
+            }
+            ProjectCommand::LayerVisibilityEdit {
+                layer_index,
+                old_visible,
+                new_visible,
+                ..
+            } => {
+                let visible = match direction {
+                    ProjectCommandDirection::Undo => *old_visible,
+                    ProjectCommandDirection::Redo => *new_visible,
+                };
+                let Some(layer) = self.layers.get_mut(*layer_index) else {
+                    return false;
+                };
+                layer.visible = visible;
+                true
+            }
+            ProjectCommand::LayerOrderEdit {
+                layer_index,
+                old_order,
+                new_order,
+                ..
+            } => {
+                let order = match direction {
+                    ProjectCommandDirection::Undo => *old_order,
+                    ProjectCommandDirection::Redo => *new_order,
+                };
+                let Some(layer) = self.layers.get_mut(*layer_index) else {
+                    return false;
+                };
+                layer.order = order;
                 true
             }
         }
@@ -6662,6 +6750,20 @@ pub(crate) enum ProjectCommand {
         old_value: f32,
         new_value: f32,
     },
+    LayerVisibilityEdit {
+        layer_index: usize,
+        layer_name: String,
+        layer_kind: LayerKind,
+        old_visible: bool,
+        new_visible: bool,
+    },
+    LayerOrderEdit {
+        layer_index: usize,
+        layer_name: String,
+        layer_kind: LayerKind,
+        old_order: i32,
+        new_order: i32,
+    },
 }
 
 impl ProjectCommand {
@@ -6672,6 +6774,12 @@ impl ProjectCommand {
                 parameter_name,
                 ..
             } => format!("Edit {node_name} {parameter_name}"),
+            Self::LayerVisibilityEdit { layer_name, .. } => {
+                format!("Set {layer_name} visibility")
+            }
+            Self::LayerOrderEdit { layer_name, .. } => {
+                format!("Set {layer_name} order")
+            }
         }
     }
 }
@@ -10276,9 +10384,84 @@ mod tests {
     }
 
     #[test]
+    fn layer_visibility_records_undoable_project_commands() {
+        let mut graph = GraphDocument::sample();
+        assert!(graph.layers[0].visible);
+
+        assert!(graph.set_layer_visibility(0, false));
+
+        assert!(!graph.layers[0].visible);
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+        assert!(graph.command_history.redo_stack.is_empty());
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::LayerVisibilityEdit {
+                layer_index: 0,
+                layer_name,
+                layer_kind: LayerKind::Polygons,
+                old_visible: true,
+                new_visible: false,
+            }) if layer_name == "Polygons"
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Set Polygons visibility")
+        );
+
+        assert!(graph.undo_project_command());
+        assert!(graph.layers[0].visible);
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Set Polygons visibility")
+        );
+
+        assert!(graph.redo_project_command());
+        assert!(!graph.layers[0].visible);
+        assert!(!graph.set_layer_visibility(0, false));
+        assert!(!graph.set_layer_visibility(graph.layers.len(), true));
+    }
+
+    #[test]
+    fn layer_order_records_undoable_project_commands_and_clears_redo() {
+        let mut graph = GraphDocument::sample();
+        let original_order = graph.layers[1].order;
+
+        assert!(graph.set_layer_order(1, 42));
+
+        assert_eq!(graph.layers[1].order, 42);
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::LayerOrderEdit {
+                layer_index: 1,
+                layer_name,
+                layer_kind: LayerKind::Curves,
+                old_order,
+                new_order: 42,
+            }) if layer_name == "Curves" && *old_order == original_order
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Set Curves order")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.layers[1].order, original_order);
+        assert_eq!(graph.command_history.redo_stack.len(), 1);
+
+        assert!(graph.set_layer_order(1, 7));
+        assert_eq!(graph.layers[1].order, 7);
+        assert!(graph.command_history.redo_stack.is_empty());
+        assert!(!graph.set_layer_order(1, 7));
+        assert!(!graph.set_layer_order(graph.layers.len(), 9));
+    }
+
+    #[test]
     fn command_history_is_runtime_state_not_sidecar_state() {
         let mut graph = GraphDocument::sample();
         assert!(graph.set_node_parameter_value(1, 0.72));
+        assert!(graph.set_layer_visibility(0, false));
+        assert!(graph.set_layer_order(1, 42));
         assert!(!graph.command_history.undo_stack.is_empty());
 
         let json = graph.to_sidecar_json().unwrap();
