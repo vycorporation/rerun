@@ -45,6 +45,7 @@ for the graph hierarchy lane.
 | `#172` | complete | Graph container enter inspector action | Adds a workbench node-info Enter action for resolved navigable graph containers using the selected-graph navigation seam. |
 | `#174` | complete | Selected graph data-flow diagnostics | Adds graph-scoped data-flow diagnostic queries and surfaces selected-graph invalid/cyclic connection diagnostics in the workbench Info pane. |
 | `#176` | complete | Cross-graph search result navigation | Carries graph IDs and readable node paths through workbench search so node results switch to their parent graph before selection. |
+| `#178` | complete | Graph-path reference delete warnings | Adds readable target node paths to reference output change warnings so delete/edit warnings disambiguate graph-local names. |
 
 ## Next implementation candidates
 
@@ -88,6 +89,8 @@ for the graph hierarchy lane.
      warnings.
    - `#176` makes workbench node search path-aware and switches to a result's
      parent graph before focusing the node.
+   - `#178` uses readable target node paths in reference output edit/delete
+     warnings while keeping stable IDs as durable references.
    - Keep durable references backed by stable graph IDs and node IDs.
 
 ## Maintenance
