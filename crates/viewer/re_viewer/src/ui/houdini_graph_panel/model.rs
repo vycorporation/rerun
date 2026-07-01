@@ -1382,6 +1382,24 @@ impl GraphDocument {
                 };
                 true
             }
+            ProjectCommand::NodeManualCookEdit {
+                node_id,
+                old_manual,
+                new_manual,
+                ..
+            } => {
+                let Some(node) = self.nodes.iter_mut().find(|node| node.node_id == *node_id) else {
+                    return false;
+                };
+                Self::apply_node_manual_state(
+                    node,
+                    match direction {
+                        ProjectCommandDirection::Undo => *old_manual,
+                        ProjectCommandDirection::Redo => *new_manual,
+                    },
+                );
+                true
+            }
             ProjectCommand::NodeLayoutEdit {
                 node_id,
                 old_position,
@@ -3464,16 +3482,34 @@ impl GraphDocument {
         self.mark_reference_inputs_stale_for_target_index(index);
     }
 
-    pub fn set_node_manual(&mut self, index: usize, manual: bool) {
-        if let Some(node) = self.nodes.get_mut(index) {
-            node.evaluation.manual = manual;
-            node.evaluation.state = if manual {
-                EvaluationState::Manual
-            } else {
-                EvaluationState::Stale
-            };
-            node.evaluation.message = None;
+    pub fn set_node_manual(&mut self, index: usize, manual: bool) -> bool {
+        let Some(node) = self.nodes.get_mut(index) else {
+            return false;
+        };
+        if node.evaluation.manual == manual {
+            return false;
         }
+        let old_manual = node.evaluation.manual;
+        Self::apply_node_manual_state(node, manual);
+        let node_id = node.node_id.clone();
+        let node_name = node.name.clone();
+        self.record_project_command(ProjectCommand::NodeManualCookEdit {
+            node_id,
+            node_name,
+            old_manual,
+            new_manual: manual,
+        });
+        true
+    }
+
+    fn apply_node_manual_state(node: &mut GraphNode, manual: bool) {
+        node.evaluation.manual = manual;
+        node.evaluation.state = if manual {
+            EvaluationState::Manual
+        } else {
+            EvaluationState::Stale
+        };
+        node.evaluation.message = None;
     }
 
     pub fn demand_output_evaluation(&mut self) {
@@ -7266,6 +7302,12 @@ pub(crate) enum ProjectCommand {
         old_show_comment: bool,
         new_show_comment: bool,
     },
+    NodeManualCookEdit {
+        node_id: String,
+        node_name: String,
+        old_manual: bool,
+        new_manual: bool,
+    },
     NodeLayoutEdit {
         node_id: String,
         node_name: String,
@@ -7345,6 +7387,9 @@ impl ProjectCommand {
             }
             Self::NodeCommentVisibilityEdit { node_name, .. } => {
                 format!("Set {node_name} comment visibility")
+            }
+            Self::NodeManualCookEdit { node_name, .. } => {
+                format!("Set {node_name} manual cook")
             }
             Self::NodeLayoutEdit { node_name, .. } => format!("Move {node_name}"),
             Self::AnnotationMoveEdit {
@@ -11266,6 +11311,60 @@ mod tests {
     }
 
     #[test]
+    fn node_manual_cook_flag_records_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+        assert!(!graph.nodes[filter_index].evaluation.manual);
+
+        assert!(graph.set_node_manual(filter_index, true));
+
+        assert!(graph.nodes[filter_index].evaluation.manual);
+        assert_eq!(
+            graph.nodes[filter_index].evaluation.state,
+            EvaluationState::Manual
+        );
+        assert!(graph.nodes[filter_index].evaluation.message.is_none());
+        assert!(graph.command_history.redo_stack.is_empty());
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodeManualCookEdit {
+                node_name,
+                old_manual: false,
+                new_manual: true,
+                ..
+            }) if node_name == "Filter"
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Set Filter manual cook")
+        );
+
+        assert!(graph.undo_project_command());
+        assert!(!graph.nodes[filter_index].evaluation.manual);
+        assert_eq!(
+            graph.nodes[filter_index].evaluation.state,
+            EvaluationState::Stale
+        );
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Set Filter manual cook")
+        );
+
+        assert!(graph.redo_project_command());
+        assert!(graph.nodes[filter_index].evaluation.manual);
+        assert_eq!(
+            graph.nodes[filter_index].evaluation.state,
+            EvaluationState::Manual
+        );
+        assert!(!graph.set_node_manual(filter_index, true));
+        assert!(!graph.set_node_manual(graph.nodes.len(), false));
+    }
+
+    #[test]
     fn node_duplicate_records_undoable_project_command_with_new_stable_id() {
         let mut graph = GraphDocument::sample();
         let output_index = graph
@@ -11704,6 +11803,7 @@ mod tests {
         assert!(graph.set_layer_order(1, 42));
         assert!(graph.set_node_output_participation(1, false));
         assert!(graph.set_node_comment_visibility(1, true));
+        assert!(graph.set_node_manual(1, true));
         graph.set_node_layout_position(1, GraphPoint::new(0.25, 0.75));
         assert!(graph.finish_node_layout_drag(1, original_position));
         assert!(graph.translate_annotation(0, GraphPoint::new(0.04, 0.04)));
