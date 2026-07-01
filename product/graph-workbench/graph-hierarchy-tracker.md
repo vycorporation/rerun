@@ -40,6 +40,7 @@ for the graph hierarchy lane.
 | `#148` | complete | Graph container collapse manifests | Records selected connected node sets and typed external edge crossings as graph container collapse metadata without moving nodes yet. |
 | `#164` | complete | Graph-local node name policy | Adds durable parent graph metadata to nodes and scopes create, rename, duplicate, readable paths, and name collision inspection to the parent graph while preserving stable node IDs. |
 | `#166` | complete | Selected graph navigation model seam | Adds graph navigation targets plus safe selected-graph and graph-container enter model actions without moving nodes between graphs. |
+| `#168` | complete | Selected graph storage layout scope | Scopes graph-local node index helpers, generated default data-flow edges, and graph layout to selected graph storage while retaining loaded cross-graph diagnostics. |
 
 ## Next implementation candidates
 
@@ -55,6 +56,9 @@ for the graph hierarchy lane.
      graph.
    - `#148` records collapse manifests for selected connected node sets without
      moving nodes before graph-local node storage lands.
+   - `#168` scopes layout and generated default data-flow edges to graph-local
+     node storage, which gives selected graph navigation an honest model view
+     before physical collapse moves nodes.
    - Keep selected-node collapse separate from network box organization.
 
 3. Typed graph boundary inputs and outputs.

@@ -358,6 +358,27 @@ impl GraphDocument {
         self.select_graph_by_id(&internal_graph_id)
     }
 
+    #[allow(dead_code)]
+    pub fn graph_local_node_indices(&self, graph_id: &str) -> Vec<usize> {
+        let graph_id = if graph_id.is_empty() {
+            MAIN_GRAPH_ID
+        } else {
+            graph_id
+        };
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                (self.node_parent_graph_id(node) == graph_id).then_some(index)
+            })
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn current_graph_node_indices(&self) -> Vec<usize> {
+        self.graph_local_node_indices(self.current_graph_id())
+    }
+
     fn graph_container_metadata_for_node(&self, node_id: &str) -> Option<&GraphContainerMetadata> {
         self.graph_containers
             .iter()
@@ -521,14 +542,6 @@ impl GraphDocument {
         )
     }
 
-    fn readable_node_path_for_name(&self, node_name: &str) -> String {
-        format!(
-            "{}/{}",
-            self.current_graph_path().trim_end_matches('/'),
-            node_name
-        )
-    }
-
     fn with_default_data_flow_edges(mut self) -> Self {
         self.rebuild_default_data_flow_edges();
         self
@@ -539,24 +552,33 @@ impl GraphDocument {
     }
 
     fn default_data_flow_edges_for_nodes(nodes: &[GraphNode]) -> Vec<GraphDataFlowEdge> {
-        nodes
-            .iter()
-            .filter(|node| node.participates_in_output)
-            .collect::<Vec<_>>()
-            .windows(2)
-            .map(|nodes| {
-                let from_node = nodes[0];
-                let to_node = nodes[1];
-                GraphDataFlowEdge {
-                    edge_id: format!(
-                        "{}:{PRIMARY_GEOMETRY_OUTPUT}->{}:{PRIMARY_GEOMETRY_OUTPUT}",
-                        from_node.node_id, to_node.node_id
-                    ),
-                    from_node_id: from_node.node_id.clone(),
-                    from_output: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
-                    to_node_id: to_node.node_id.clone(),
-                    to_input: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
-                }
+        let mut nodes_by_graph = std::collections::BTreeMap::<&str, Vec<&GraphNode>>::new();
+        for node in nodes.iter().filter(|node| node.participates_in_output) {
+            let graph_id = if node.parent_graph_id.is_empty() {
+                MAIN_GRAPH_ID
+            } else {
+                node.parent_graph_id.as_str()
+            };
+            nodes_by_graph.entry(graph_id).or_default().push(node);
+        }
+
+        nodes_by_graph
+            .values()
+            .flat_map(|nodes| {
+                nodes.windows(2).map(|nodes| {
+                    let from_node = nodes[0];
+                    let to_node = nodes[1];
+                    GraphDataFlowEdge {
+                        edge_id: format!(
+                            "{}:{PRIMARY_GEOMETRY_OUTPUT}->{}:{PRIMARY_GEOMETRY_OUTPUT}",
+                            from_node.node_id, to_node.node_id
+                        ),
+                        from_node_id: from_node.node_id.clone(),
+                        from_output: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                        to_node_id: to_node.node_id.clone(),
+                        to_input: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                    }
+                })
             })
             .collect()
     }
@@ -753,7 +775,7 @@ impl GraphDocument {
         self.nodes
             .iter()
             .find(|node| node.node_id == node_id)
-            .map(|node| self.readable_node_path_for_name(&node.name))
+            .map(|node| self.readable_node_path_for_node(node))
             .unwrap_or_else(|| format!("{}/<missing:{node_id}>", self.current_graph_path()))
     }
 
@@ -5124,22 +5146,30 @@ impl GraphDocument {
     }
 
     pub fn graph_layout(&self) -> GraphLayout {
-        let nodes = self
-            .nodes
+        self.graph_layout_for_graph(self.current_graph_id())
+    }
+
+    #[allow(dead_code)]
+    pub fn graph_layout_for_graph(&self, graph_id: &str) -> GraphLayout {
+        let graph_node_indices = self.graph_local_node_indices(graph_id);
+        let nodes = graph_node_indices
             .iter()
-            .enumerate()
-            .map(|(index, node)| GraphLayoutNode {
-                node_index: index,
-                name: node.name.clone(),
-                position: node.layout_position,
+            .filter_map(|index| {
+                let node = self.nodes.get(*index)?;
+                Some(GraphLayoutNode {
+                    node_index: *index,
+                    name: node.name.clone(),
+                    position: node.layout_position,
+                })
             })
             .collect();
 
-        let node_indices_by_id = self
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(index, node)| (node.node_id.as_str(), index))
+        let node_indices_by_id = graph_node_indices
+            .into_iter()
+            .filter_map(|index| {
+                let node = self.nodes.get(index)?;
+                Some((node.node_id.as_str(), index))
+            })
             .collect::<std::collections::BTreeMap<_, _>>();
         let edges = self
             .data_flow_edges
@@ -15258,6 +15288,107 @@ mod tests {
         assert_eq!(layout.edges[0].to_node, 1);
         assert_eq!(layout.edges[2].from_node, 2);
         assert_eq!(layout.edges[2].to_node, 3);
+    }
+
+    #[test]
+    fn graph_layout_scopes_nodes_and_edges_to_selected_graph() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry.graphs.push(ProjectGraphMetadata {
+            graph_id: "analysis".to_owned(),
+            name: "Analysis".to_owned(),
+            path: "/obj/analysis".to_owned(),
+            role: ProjectGraphRole::Subgraph,
+        });
+        graph
+            .select_graph_by_id("analysis")
+            .expect("analysis graph should be selectable");
+        let first_analysis_index = graph.add_null_operator_node("OUT_A");
+        let second_analysis_index = graph.add_null_operator_node("OUT_B");
+
+        assert_eq!(
+            graph.graph_local_node_indices("analysis"),
+            vec![first_analysis_index, second_analysis_index]
+        );
+        assert_eq!(
+            graph.current_graph_node_indices(),
+            vec![first_analysis_index, second_analysis_index]
+        );
+        assert!(graph.data_flow_edges.iter().all(|edge| {
+            graph.node_parent_graph_id(
+                graph
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_id == edge.from_node_id)
+                    .expect("source node should exist"),
+            ) == graph.node_parent_graph_id(
+                graph
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_id == edge.to_node_id)
+                    .expect("target node should exist"),
+            )
+        }));
+
+        let analysis_layout = graph.graph_layout();
+        assert_eq!(analysis_layout.nodes.len(), 2);
+        assert_eq!(analysis_layout.nodes[0].node_index, first_analysis_index);
+        assert_eq!(analysis_layout.nodes[1].node_index, second_analysis_index);
+        assert_eq!(analysis_layout.edges.len(), 1);
+        assert_eq!(analysis_layout.edges[0].from_node, first_analysis_index);
+        assert_eq!(analysis_layout.edges[0].to_node, second_analysis_index);
+
+        let main_layout = graph.graph_layout_for_graph("main");
+        assert_eq!(main_layout.nodes.len(), 4);
+        assert_eq!(main_layout.edges.len(), 3);
+    }
+
+    #[test]
+    fn graph_layout_hides_loaded_cross_graph_edges_but_diagnostics_keep_readable_paths() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry.graphs.push(ProjectGraphMetadata {
+            graph_id: "analysis".to_owned(),
+            name: "Analysis".to_owned(),
+            path: "/obj/analysis".to_owned(),
+            role: ProjectGraphRole::Subgraph,
+        });
+        graph
+            .select_graph_by_id("analysis")
+            .expect("analysis graph should be selectable");
+        let analysis_index = graph.add_null_operator_node("OUT_A");
+        graph.data_flow_edges.push(GraphDataFlowEdge {
+            edge_id: "cross-graph-broken".to_owned(),
+            from_node_id: "source.main".to_owned(),
+            from_output: "missing".to_owned(),
+            to_node_id: graph.nodes[analysis_index].node_id.clone(),
+            to_input: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+        });
+
+        let layout = graph.graph_layout();
+        assert_eq!(layout.nodes.len(), 1);
+        assert!(
+            layout
+                .edges
+                .iter()
+                .all(|edge| edge.from_node != 0 && edge.to_node != 0)
+        );
+
+        let diagnostic = graph
+            .data_flow_edge_diagnostic(
+                graph
+                    .data_flow_edges
+                    .iter()
+                    .find(|edge| edge.edge_id == "cross-graph-broken")
+                    .expect("cross-graph edge should remain loaded"),
+            )
+            .expect("broken loaded edge should remain diagnostic");
+        assert_eq!(
+            diagnostic.status,
+            GraphDataFlowEdgeDiagnosticStatus::MissingSourcePort
+        );
+        assert_eq!(
+            diagnostic.readable_path,
+            "/obj/main/Source:missing -> /obj/analysis/OUT_A:geometry"
+        );
     }
 
     #[test]
