@@ -2277,6 +2277,8 @@ impl GraphDocument {
             ProjectCommand::NodeDelete {
                 deleted_node,
                 remove_index,
+                data_flow_edges_before,
+                data_flow_edges_after,
             } => match direction {
                 ProjectCommandDirection::Undo => {
                     if self
@@ -2288,6 +2290,7 @@ impl GraphDocument {
                     }
                     let insert_index = (*remove_index).min(self.nodes.len());
                     self.nodes.insert(insert_index, (**deleted_node).clone());
+                    self.data_flow_edges = data_flow_edges_before.clone();
                     true
                 }
                 ProjectCommandDirection::Redo => {
@@ -2299,6 +2302,7 @@ impl GraphDocument {
                         return false;
                     };
                     self.nodes.remove(node_index);
+                    self.data_flow_edges = data_flow_edges_after.clone();
                     true
                 }
             },
@@ -3701,11 +3705,17 @@ impl GraphDocument {
         if self.nodes.get(index)?.kind == NodeKind::Output {
             return None;
         }
+        let data_flow_edges_before = self.data_flow_edges.clone();
         let deleted_node = self.nodes.remove(index);
-        self.rebuild_default_data_flow_edges();
+        self.data_flow_edges.retain(|edge| {
+            edge.from_node_id != deleted_node.node_id && edge.to_node_id != deleted_node.node_id
+        });
+        let data_flow_edges_after = self.data_flow_edges.clone();
         self.record_project_command(ProjectCommand::NodeDelete {
             deleted_node: Box::new(deleted_node.clone()),
             remove_index: index,
+            data_flow_edges_before,
+            data_flow_edges_after,
         });
         Some(deleted_node)
     }
@@ -9800,6 +9810,8 @@ pub(crate) enum ProjectCommand {
     NodeDelete {
         deleted_node: Box<GraphNode>,
         remove_index: usize,
+        data_flow_edges_before: Vec<GraphDataFlowEdge>,
+        data_flow_edges_after: Vec<GraphDataFlowEdge>,
     },
     ReferenceInputCreate {
         reference_node: Box<GraphNode>,
@@ -10100,7 +10112,6 @@ impl ProjectCommand {
         matches!(
             self,
             Self::NodeDuplicate { .. }
-                | Self::NodeDelete { .. }
                 | Self::ReferenceInputCreate { .. }
                 | Self::NodeOutputParticipationEdit { .. }
         )
@@ -13344,6 +13355,7 @@ mod tests {
             Some(ProjectCommand::NodeDelete {
                 deleted_node,
                 remove_index,
+                ..
             }) if deleted_node.node_id == deleted_node_id && *remove_index == null_index
         ));
         assert_eq!(
@@ -13376,6 +13388,100 @@ mod tests {
             .expect("sample graph should include output node");
         assert!(graph.remove_node(output_index).is_none());
         assert!(graph.remove_node(graph.nodes.len()).is_none());
+    }
+
+    #[test]
+    fn node_delete_preserves_unrelated_explicit_data_flow_edges() {
+        let mut graph = GraphDocument::sample();
+        let source_node_id = graph.nodes[0].node_id.clone();
+        let filter_node_id = graph.nodes[1].node_id.clone();
+        let style_node_id = graph.nodes[2].node_id.clone();
+        let output_node_id = graph.nodes[3].node_id.clone();
+        let source_to_filter_edge_id = GraphDocument::data_flow_edge_id(
+            &source_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+            &filter_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+        );
+        let filter_to_style_edge_id = GraphDocument::data_flow_edge_id(
+            &filter_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+            &style_node_id,
+            PRIMARY_GEOMETRY_OUTPUT,
+        );
+        let explicit_edge_id = graph
+            .add_data_flow_edge(
+                &source_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+                &output_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+            )
+            .expect("source to output should be a valid explicit edge");
+        let edge_count_before_delete = graph.data_flow_edges.len();
+
+        graph
+            .remove_node(1)
+            .expect("ordinary filter node should be removable");
+
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == explicit_edge_id)
+        );
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == source_to_filter_edge_id)
+        );
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == filter_to_style_edge_id)
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.data_flow_edges.len(), edge_count_before_delete);
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == explicit_edge_id)
+        );
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == source_to_filter_edge_id)
+        );
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == filter_to_style_edge_id)
+        );
+
+        assert!(graph.redo_project_command());
+        assert!(
+            graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == explicit_edge_id)
+        );
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == source_to_filter_edge_id)
+        );
+        assert!(
+            !graph
+                .data_flow_edges
+                .iter()
+                .any(|edge| edge.edge_id == filter_to_style_edge_id)
+        );
     }
 
     #[test]
