@@ -43,6 +43,7 @@ for the graph hierarchy lane.
 | `#168` | complete | Selected graph storage layout scope | Scopes graph-local node index helpers, generated default data-flow edges, and graph layout to selected graph storage while retaining loaded cross-graph diagnostics. |
 | `#170` | complete | Physical graph container collapse storage | Moves captured nodes into the new internal graph and rewires external crossings through typed graph-container boundary edges. |
 | `#172` | complete | Graph container enter inspector action | Adds a workbench node-info Enter action for resolved navigable graph containers using the selected-graph navigation seam. |
+| `#174` | complete | Selected graph data-flow diagnostics | Adds graph-scoped data-flow diagnostic queries and surfaces selected-graph invalid/cyclic connection diagnostics in the workbench Info pane. |
 
 ## Next implementation candidates
 
@@ -78,6 +79,8 @@ for the graph hierarchy lane.
    - Block obvious cyclic connection attempts once explicit editable edges are
      implemented.
    - Preserve loaded invalid topology as visible diagnostics.
+   - `#174` surfaces selected-graph invalid/cyclic diagnostics in the workbench
+     Info pane without deleting or normalizing loaded edges.
 
 5. Cross-graph readable paths.
    - Use readable graph/node paths for navigation, search, node info, and delete
