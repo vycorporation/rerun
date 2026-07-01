@@ -37,6 +37,7 @@ pub(crate) struct GraphDocument {
     pub native_operator_trust: NativeOperatorTrustPolicy,
     pub python_environment: PythonEnvironmentDescriptor,
     pub evaluation_mode: GraphEvaluationMode,
+    pub command_history: ProjectCommandHistory,
     pub work_items: Vec<GraphWorkItem>,
 }
 
@@ -263,6 +264,7 @@ impl GraphDocument {
             native_operator_trust: NativeOperatorTrustPolicy::default(),
             python_environment: PythonEnvironmentDescriptor::default(),
             evaluation_mode: GraphEvaluationMode::default(),
+            command_history: ProjectCommandHistory::default(),
             work_items: Vec::new(),
         }
     }
@@ -573,6 +575,7 @@ impl GraphDocument {
             native_operator_trust: NativeOperatorTrustPolicy::default(),
             python_environment: PythonEnvironmentDescriptor::default(),
             evaluation_mode: GraphEvaluationMode::default(),
+            command_history: ProjectCommandHistory::default(),
             work_items: Vec::new(),
         }
     }
@@ -965,15 +968,109 @@ impl GraphDocument {
     }
 
     pub fn set_node_parameter_value(&mut self, node_index: usize, value: f32) -> bool {
-        let Some(node) = self.nodes.get_mut(node_index) else {
+        let Some(command) = self.set_node_parameter_value_without_history(node_index, value) else {
             return false;
         };
+        self.record_project_command(command);
+        self.mark_node_stale(node_index);
+        true
+    }
+
+    fn set_node_parameter_value_without_history(
+        &mut self,
+        node_index: usize,
+        value: f32,
+    ) -> Option<ProjectCommand> {
+        let node = self.nodes.get_mut(node_index)?;
         let clamped_value = value.clamp(*node.parameter.range.start(), *node.parameter.range.end());
         if (node.parameter.value - clamped_value).abs() <= f32::EPSILON {
-            return false;
+            return None;
         }
+        let old_value = node.parameter.value;
         node.parameter.value = clamped_value;
-        true
+        Some(ProjectCommand::NodeParameterEdit {
+            node_id: node.node_id.clone(),
+            node_name: node.name.clone(),
+            parameter_name: node.parameter.name.to_owned(),
+            old_value,
+            new_value: clamped_value,
+        })
+    }
+
+    fn record_project_command(&mut self, command: ProjectCommand) {
+        self.command_history.undo_stack.push(command);
+        self.command_history.redo_stack.clear();
+    }
+
+    pub fn undo_project_command(&mut self) -> bool {
+        let Some(command) = self.command_history.undo_stack.pop() else {
+            return false;
+        };
+        if self.apply_project_command(&command, ProjectCommandDirection::Undo) {
+            self.command_history.redo_stack.push(command);
+            true
+        } else {
+            self.command_history.undo_stack.push(command);
+            false
+        }
+    }
+
+    pub fn redo_project_command(&mut self) -> bool {
+        let Some(command) = self.command_history.redo_stack.pop() else {
+            return false;
+        };
+        if self.apply_project_command(&command, ProjectCommandDirection::Redo) {
+            self.command_history.undo_stack.push(command);
+            true
+        } else {
+            self.command_history.redo_stack.push(command);
+            false
+        }
+    }
+
+    pub fn undo_project_command_label(&self) -> Option<String> {
+        self.command_history
+            .undo_stack
+            .last()
+            .map(ProjectCommand::summary)
+    }
+
+    pub fn redo_project_command_label(&self) -> Option<String> {
+        self.command_history
+            .redo_stack
+            .last()
+            .map(ProjectCommand::summary)
+    }
+
+    fn apply_project_command(
+        &mut self,
+        command: &ProjectCommand,
+        direction: ProjectCommandDirection,
+    ) -> bool {
+        match command {
+            ProjectCommand::NodeParameterEdit {
+                node_id,
+                old_value,
+                new_value,
+                ..
+            } => {
+                let Some(node_index) = self.nodes.iter().position(|node| node.node_id == *node_id)
+                else {
+                    return false;
+                };
+                let value = match direction {
+                    ProjectCommandDirection::Undo => *old_value,
+                    ProjectCommandDirection::Redo => *new_value,
+                };
+                let Some(node) = self.nodes.get_mut(node_index) else {
+                    return false;
+                };
+                node.parameter.value =
+                    value.clamp(*node.parameter.range.start(), *node.parameter.range.end());
+                self.mark_node_stale(node_index);
+                true
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -4745,6 +4842,7 @@ impl HoudiniGraphSidecar {
         graph.native_operator_trust = self.native_operator_trust;
         graph.python_environment = self.python_environment;
         graph.evaluation_mode = self.evaluation_mode;
+        graph.command_history = ProjectCommandHistory::default();
         graph.work_items.clear();
 
         let mut matched_node_indices = vec![false; graph.nodes.len()];
@@ -6459,6 +6557,41 @@ impl GraphEvaluationMode {
             Self::Manual => "Manual",
         }
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ProjectCommandHistory {
+    pub undo_stack: Vec<ProjectCommand>,
+    pub redo_stack: Vec<ProjectCommand>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ProjectCommand {
+    NodeParameterEdit {
+        node_id: String,
+        node_name: String,
+        parameter_name: String,
+        old_value: f32,
+        new_value: f32,
+    },
+}
+
+impl ProjectCommand {
+    fn summary(&self) -> String {
+        match self {
+            Self::NodeParameterEdit {
+                node_name,
+                parameter_name,
+                ..
+            } => format!("Edit {node_name} {parameter_name}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectCommandDirection {
+    Undo,
+    Redo,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -8303,12 +8436,12 @@ mod tests {
         OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode,
         OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
         ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
-        PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
-        PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
-        PythonEnvironmentResolver, PythonEnvironmentStatus, PythonOperatorCapability,
-        PythonOperatorDataKind, PythonOperatorDeclaration, PythonOperatorDependencies,
-        PythonOperatorDependencyStatus, PythonOperatorEntryPoint, PythonOperatorNumericRange,
-        PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
+        ProjectCommand, PythonDependencyHealth, PythonEnvironmentDescriptor,
+        PythonEnvironmentPathMode, PythonEnvironmentPaths, PythonEnvironmentResolveState,
+        PythonEnvironmentResolveTrigger, PythonEnvironmentResolver, PythonEnvironmentStatus,
+        PythonOperatorCapability, PythonOperatorDataKind, PythonOperatorDeclaration,
+        PythonOperatorDependencies, PythonOperatorDependencyStatus, PythonOperatorEntryPoint,
+        PythonOperatorNumericRange, PythonOperatorOutputCounts, PythonOperatorParameterDeclaration,
         PythonOperatorParameterKind, PythonOperatorParameterValue, PythonOperatorPort,
         PythonOperatorSource, PythonProjectRequirements, PythonRequirementSource,
         PythonRequirementsSource, ReferenceDiagnosticStatus, ReferenceTargetEntry,
@@ -9916,6 +10049,95 @@ mod tests {
                 .as_f32(),
             Some(0.6)
         );
+    }
+
+    #[test]
+    fn parameter_edits_record_undoable_project_commands() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+        let old_value = graph.nodes[filter_index].parameter.value;
+
+        assert!(graph.set_node_parameter_value(filter_index, 0.72));
+
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+        assert!(graph.command_history.redo_stack.is_empty());
+        assert_eq!(
+            graph.nodes[filter_index].evaluation.state,
+            EvaluationState::Stale
+        );
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodeParameterEdit {
+                node_name,
+                parameter_name,
+                old_value: recorded_old_value,
+                new_value,
+                ..
+            }) if node_name == "Filter"
+                && parameter_name == "Minimum score"
+                && (*recorded_old_value - old_value).abs() <= f32::EPSILON
+                && (*new_value - 0.72).abs() <= f32::EPSILON
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Edit Filter Minimum score")
+        );
+    }
+
+    #[test]
+    fn parameter_project_commands_undo_redo_and_clear_redo_on_new_edit() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Filter)
+            .expect("sample graph should include filter node");
+        let original_value = graph.nodes[filter_index].parameter.value;
+
+        assert!(graph.set_node_parameter_value(filter_index, 0.72));
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes[filter_index].parameter.value, original_value);
+        assert_eq!(
+            graph.nodes[filter_index].evaluation.state,
+            EvaluationState::Stale
+        );
+        assert_eq!(graph.command_history.undo_stack.len(), 0);
+        assert_eq!(graph.command_history.redo_stack.len(), 1);
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Edit Filter Minimum score")
+        );
+
+        assert!(graph.redo_project_command());
+        assert!((graph.nodes[filter_index].parameter.value - 0.72).abs() <= f32::EPSILON);
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+        assert!(graph.command_history.redo_stack.is_empty());
+
+        assert!(graph.undo_project_command());
+        assert!(graph.set_node_parameter_value(filter_index, 0.42));
+        assert!(graph.command_history.redo_stack.is_empty());
+        assert!((graph.nodes[filter_index].parameter.value - 0.42).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn command_history_is_runtime_state_not_sidecar_state() {
+        let mut graph = GraphDocument::sample();
+        assert!(graph.set_node_parameter_value(1, 0.72));
+        assert!(!graph.command_history.undo_stack.is_empty());
+
+        let json = graph.to_sidecar_json().unwrap();
+        assert!(!json.contains("command_history"));
+        assert!(!json.contains("undo_stack"));
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert!(restored.command_history.undo_stack.is_empty());
+        assert!(restored.command_history.redo_stack.is_empty());
     }
 
     #[test]

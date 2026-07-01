@@ -1074,12 +1074,50 @@ impl HoudiniGraphPanel {
             return;
         };
 
+        self.project_command_history_ui(ui, graph);
         self.selected_node_identity_ui(ui, graph, &info);
         self.selected_node_parameter_ui(ui, graph, &info);
         self.selected_node_flags_ui(ui, graph, &info);
         self.selected_node_evaluation_ui(ui, graph, &info);
         self.selected_node_comment_ui(ui, graph);
         self.selected_node_operator_settings_ui(ui, &info);
+    }
+
+    fn project_command_history_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        egui::CollapsingHeader::new("Command History")
+            .id_salt("houdini_graph_parms_command_history")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let undo_label = graph
+                        .undo_project_command_label()
+                        .unwrap_or_else(|| "Nothing to undo".to_owned());
+                    let redo_label = graph
+                        .redo_project_command_label()
+                        .unwrap_or_else(|| "Nothing to redo".to_owned());
+                    if ui
+                        .add_enabled(
+                            graph.undo_project_command_label().is_some(),
+                            egui::Button::new("Undo"),
+                        )
+                        .on_hover_text(&undo_label)
+                        .clicked()
+                    {
+                        graph.undo_project_command();
+                    }
+                    if ui
+                        .add_enabled(
+                            graph.redo_project_command_label().is_some(),
+                            egui::Button::new("Redo"),
+                        )
+                        .on_hover_text(&redo_label)
+                        .clicked()
+                    {
+                        graph.redo_project_command();
+                    }
+                });
+                ui.weak("Restores project intent; runtime work items and caches are not restored.");
+            });
     }
 
     fn selected_node_identity_ui(
