@@ -1,0 +1,20 @@
+# Houdini project command history tracker
+
+This note maps the undo/redo and project-command PRD lane to implementation issues in the `vycorporation/rerun` product fork.
+
+## Source PRD
+
+- `product-prd/source/docs/adr/0002-node-graph-is-the-source-of-truth.md`
+- `product-prd/source/docs/adr/0025-undo-redo-operates-on-project-commands.md`
+- `product-prd/source/docs/adr/0051-build-the-project-model-and-persistence-spine-first.md`
+
+## Issue slices
+
+- Issue `#88`: add the first project-command history slice for undo/redo of graph-owned node parameter edits.
+
+## Implementation notes
+
+- Project command history restores graph/project intent and marks affected outputs stale.
+- Runtime evaluation state, work items, running work, and cached outputs are not restored by undo/redo.
+- The first slice records node parameter edits with stable node identity, parameter label, old value, and new value.
+- Sidecar save/load intentionally omits the undo and redo stacks so history does not become a second persistence format.
