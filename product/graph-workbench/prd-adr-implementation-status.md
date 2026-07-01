@@ -29,7 +29,7 @@ This ledger tracks how PRD/ADR material maps to issue-backed implementation in t
 | Native cubic and renderer-native preview path | partial | `specialized-renderer-path.md` | `#29`, `#36`, `#37`, `#38` |
 | Python operator and project environment lane | partial | `python-operator-surface.md`, `python-environment-status.md` | `#31`, `#32`, `#39`, `#40`, `#41`, `#42`, `#43`, `#44`, `#45`, `#46`, `#55` |
 | Native plugin operator lane | partial | `native-plugin-operator-lane.md` | `#34`, `#51`, `#52`, `#53`, `#54` |
-| Procedural asset interface | partial | `procedural-asset-interface.md` | `#33`, `#47`, `#48`, `#49`, `#50`, `#61`, `#152` planned |
+| Procedural asset interface | partial | `procedural-asset-interface.md` | `#33`, `#47`, `#48`, `#49`, `#50`, `#61`, `#152` |
 | Graph hierarchy and named graph registry | partial | `graph-hierarchy-tracker.md` | `#130`, `#131`, `#132`, `#142`, `#144`, `#146`, `#148` |
 | Reference inputs, stable IDs, diagnostics, and target sets | complete for current v1 reference-input spine | PRD ADRs plus command-history tracker | `#57`, `#58`, `#59`, `#60`, `#62`, `#98`, `#113`, `#114`, `#121`, `#122` |
 | Workbench layout presets and browser | complete for current v1 workbench slice | `workbench-layout-presets.md` | `#64`, `#68`, `#72`, `#74` |
@@ -67,7 +67,7 @@ issue-backed implementation slices next.
 
 2. Procedural asset authoring depth.
    - Source ADRs: `0009`, `0010`, `0011`, `0077`, `0078`.
-   - Issue-backed slices: `#152` promoted parameter binding metadata planned.
+   - Issue-backed slices: `#152` promoted parameter binding metadata.
    - Later likely slices: typed asset input/output boundary editing, instance upgrade/match-definition actions, and artifact-reference warnings.
 
 3. Connection editing semantics.
