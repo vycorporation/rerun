@@ -692,9 +692,7 @@ impl HoudiniGraphPanel {
     }
 
     fn set_all_annotation_collapsed(&mut self, graph: &mut GraphDocument, collapsed: bool) {
-        for annotation in &mut graph.annotations {
-            annotation.collapsed = collapsed;
-        }
+        graph.set_all_annotations_collapsed(collapsed);
     }
 
     fn open_operator_chooser_at(&mut self, anchor: Pos2) {
@@ -1822,93 +1820,96 @@ impl HoudiniGraphPanel {
                     .collect::<Vec<_>>();
                 for annotation_index in 0..graph.annotations.len() {
                     let mut resize_to_contents = false;
-                    let mut position_update = None;
-                    {
-                        let annotation = &mut graph.annotations[annotation_index];
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.weak(annotation.kind.as_str());
-                            ui.re_checkbox(&mut annotation.collapsed, "Collapsed");
-                        });
-                        ui.add(
-                            egui::TextEdit::singleline(&mut annotation.title)
+                    let Some(annotation) = graph.annotations.get(annotation_index).cloned() else {
+                        continue;
+                    };
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.weak(annotation.kind.as_str());
+                        let mut collapsed = annotation.collapsed;
+                        if ui.re_checkbox(&mut collapsed, "Collapsed").changed() {
+                            graph.set_annotation_collapsed(annotation_index, collapsed);
+                        }
+                    });
+
+                    let mut title = annotation.title.clone();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut title)
                                 .desired_width(ui.available_width().max(80.0))
                                 .hint_text("title"),
-                        );
-                        if annotation.kind == GraphAnnotationKind::StickyNote {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut annotation.text)
+                        )
+                        .changed()
+                    {
+                        graph.set_annotation_title(annotation_index, title);
+                    }
+
+                    if annotation.kind == GraphAnnotationKind::StickyNote {
+                        let mut text = annotation.text.clone();
+                        if ui
+                            .add(
+                                egui::TextEdit::multiline(&mut text)
                                     .desired_rows(2)
                                     .hint_text("note"),
-                            );
-                        } else {
-                            let member_names = annotation
-                                .member_node_ids
-                                .iter()
-                                .filter_map(|member_id| {
-                                    node_names
-                                        .iter()
-                                        .find(|(node_id, _)| node_id == member_id)
-                                        .map(|(_, name)| name.as_str())
-                                })
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            ui.weak(format!(
-                                "{} member node{}",
-                                annotation.member_node_ids.len(),
-                                if annotation.member_node_ids.len() == 1 {
-                                    ""
-                                } else {
-                                    "s"
-                                }
-                            ));
-                            if !member_names.is_empty() {
-                                ui.weak(member_names);
-                            }
-                            if ui.button("Resize to Contents").clicked() {
-                                resize_to_contents = true;
-                            }
+                            )
+                            .changed()
+                        {
+                            graph.set_annotation_text(annotation_index, text);
                         }
-
-                        ui.horizontal(|ui| {
-                            ui.weak("Size");
-                            ui.add(
-                                DragValue::new(&mut annotation.size.x)
-                                    .speed(0.01)
-                                    .range(0.08..=0.95),
-                            );
-                            ui.add(
-                                DragValue::new(&mut annotation.size.y)
-                                    .speed(0.01)
-                                    .range(0.08..=0.95),
-                            );
-                        });
-                        let original_position = annotation.position;
-                        let mut next_position = annotation.position;
-                        ui.horizontal(|ui| {
-                            ui.weak("Pos");
-                            ui.add(DragValue::new(&mut next_position.x).speed(0.01));
-                            ui.add(DragValue::new(&mut next_position.y).speed(0.01));
-                        });
-                        if next_position != original_position {
-                            position_update =
-                                Some((annotation.kind, original_position, next_position));
+                    } else {
+                        let member_names = annotation
+                            .member_node_ids
+                            .iter()
+                            .filter_map(|member_id| {
+                                node_names
+                                    .iter()
+                                    .find(|(node_id, _)| node_id == member_id)
+                                    .map(|(_, name)| name.as_str())
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        ui.weak(format!(
+                            "{} member node{}",
+                            annotation.member_node_ids.len(),
+                            if annotation.member_node_ids.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        ));
+                        if !member_names.is_empty() {
+                            ui.weak(member_names);
+                        }
+                        if ui.button("Resize to Contents").clicked() {
+                            resize_to_contents = true;
                         }
                     }
 
-                    if let Some((kind, original_position, next_position)) = position_update {
-                        if kind == GraphAnnotationKind::NetworkBox {
-                            graph.translate_annotation(
-                                annotation_index,
-                                GraphPoint {
-                                    x: next_position.x - original_position.x,
-                                    y: next_position.y - original_position.y,
-                                },
-                            );
-                        } else if let Some(annotation) = graph.annotations.get_mut(annotation_index)
-                        {
-                            annotation.position = next_position;
-                        }
+                    let mut size = annotation.size;
+                    ui.horizontal(|ui| {
+                        ui.weak("Size");
+                        ui.add(DragValue::new(&mut size.x).speed(0.01).range(0.08..=0.95));
+                        ui.add(DragValue::new(&mut size.y).speed(0.01).range(0.08..=0.95));
+                    });
+                    if size != annotation.size {
+                        graph.set_annotation_size(annotation_index, size);
+                    }
+
+                    let mut next_position = annotation.position;
+                    ui.horizontal(|ui| {
+                        ui.weak("Pos");
+                        ui.add(DragValue::new(&mut next_position.x).speed(0.01));
+                        ui.add(DragValue::new(&mut next_position.y).speed(0.01));
+                    });
+                    if next_position != annotation.position {
+                        graph.translate_annotation(
+                            annotation_index,
+                            GraphPoint {
+                                x: next_position.x - annotation.position.x,
+                                y: next_position.y - annotation.position.y,
+                            },
+                        );
                     }
                     if resize_to_contents {
                         graph.resize_network_box_to_contents(annotation_index);
@@ -3134,8 +3135,8 @@ impl HoudiniGraphPanel {
                 if !hit_node {
                     for (index, annotation_rect) in annotation_rects.iter().enumerate().rev() {
                         if annotation_collapse_toggle_rect(*annotation_rect).contains(pointer_pos) {
-                            if let Some(annotation) = graph.annotations.get_mut(index) {
-                                annotation.collapsed = !annotation.collapsed;
+                            if let Some(annotation) = graph.annotations.get(index) {
+                                graph.set_annotation_collapsed(index, !annotation.collapsed);
                             }
                             self.selected_annotation = Some(index);
                             hit_annotation = true;
@@ -3736,54 +3737,64 @@ impl HoudiniGraphPanel {
         }
 
         let mut resize_to_contents = false;
-        {
-            let annotation = &mut graph.annotations[annotation_index];
-            ui.strong(&annotation.title);
-            ui.weak(annotation.kind.as_str());
-            ui.separator();
+        let annotation = graph.annotations[annotation_index].clone();
+        ui.strong(&annotation.title);
+        ui.weak(annotation.kind.as_str());
+        ui.separator();
 
-            ui.weak("Title");
-            ui.add(
-                egui::TextEdit::singleline(&mut annotation.title)
+        ui.weak("Title");
+        let mut title = annotation.title.clone();
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut title)
                     .desired_width(190.0)
                     .hint_text("title"),
-            );
+            )
+            .changed()
+        {
+            graph.set_annotation_title(annotation_index, title);
+        }
 
-            if annotation.kind == GraphAnnotationKind::StickyNote {
-                ui.weak("Note");
-                ui.add(
-                    egui::TextEdit::multiline(&mut annotation.text)
+        if annotation.kind == GraphAnnotationKind::StickyNote {
+            ui.weak("Note");
+            let mut text = annotation.text.clone();
+            if ui
+                .add(
+                    egui::TextEdit::multiline(&mut text)
                         .desired_width(190.0)
                         .desired_rows(3)
                         .hint_text("note"),
-                );
+                )
+                .changed()
+            {
+                graph.set_annotation_text(annotation_index, text);
             }
+        }
 
-            ui.separator();
-            let collapse_label = if annotation.collapsed {
-                "Expand"
-            } else {
-                "Collapse"
-            };
-            if ui.button(collapse_label).clicked() {
-                annotation.collapsed = !annotation.collapsed;
-                ui.close();
-            }
+        ui.separator();
+        let collapse_label = if annotation.collapsed {
+            "Expand"
+        } else {
+            "Collapse"
+        };
+        if ui.button(collapse_label).clicked() {
+            graph.set_annotation_collapsed(annotation_index, !annotation.collapsed);
+            ui.close();
+        }
 
-            if annotation.kind == GraphAnnotationKind::NetworkBox {
-                ui.weak(format!(
-                    "{} member node{}",
-                    annotation.member_node_ids.len(),
-                    if annotation.member_node_ids.len() == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
-                ));
-                if ui.button("Resize to Contents    Shift+M").clicked() {
-                    resize_to_contents = true;
-                    ui.close();
+        if annotation.kind == GraphAnnotationKind::NetworkBox {
+            ui.weak(format!(
+                "{} member node{}",
+                annotation.member_node_ids.len(),
+                if annotation.member_node_ids.len() == 1 {
+                    ""
+                } else {
+                    "s"
                 }
+            ));
+            if ui.button("Resize to Contents    Shift+M").clicked() {
+                resize_to_contents = true;
+                ui.close();
             }
         }
 
