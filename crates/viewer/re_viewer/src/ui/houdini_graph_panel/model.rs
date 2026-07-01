@@ -24,6 +24,7 @@ impl GraphPoint {
 pub(crate) struct GraphDocument {
     pub source: GraphSource,
     pub graph_registry: ProjectGraphRegistry,
+    pub graph_containers: Vec<GraphContainerMetadata>,
     pub data_flow_edges: Vec<GraphDataFlowEdge>,
     pub nodes: Vec<GraphNode>,
     pub annotations: Vec<GraphAnnotation>,
@@ -91,6 +92,10 @@ impl ProjectGraphRegistry {
             .iter()
             .find(|graph| graph.graph_id == self.selected_graph_id)
     }
+
+    pub fn graph(&self, graph_id: &str) -> Option<&ProjectGraphMetadata> {
+        self.graphs.iter().find(|graph| graph.graph_id == graph_id)
+    }
 }
 
 impl Default for ProjectGraphRegistry {
@@ -115,6 +120,28 @@ pub(crate) enum ProjectGraphRole {
     Main,
     Subgraph,
     AssetInternal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct GraphContainerMetadata {
+    pub container_node_id: String,
+    pub internal_graph_id: String,
+    pub kind: GraphContainerKind,
+    pub navigable: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum GraphContainerKind {
+    Subnet,
+}
+
+impl GraphContainerKind {
+    #[allow(dead_code)]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Subnet => "Subnet",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -170,6 +197,64 @@ impl GraphDocument {
             .selected_graph()
             .map(|graph| graph.path.as_str())
             .unwrap_or("/obj/main")
+    }
+
+    fn graph_container_metadata_for_node(&self, node_id: &str) -> Option<&GraphContainerMetadata> {
+        self.graph_containers
+            .iter()
+            .find(|container| container.container_node_id == node_id)
+    }
+
+    fn graph_container_info_for_node(&self, node: &GraphNode) -> GraphContainerNodeInfo {
+        let Some(container) = self.graph_container_metadata_for_node(&node.node_id) else {
+            return GraphContainerNodeInfo {
+                kind: GraphContainerKind::Subnet,
+                internal_graph_id: String::new(),
+                internal_graph_name: None,
+                internal_graph_path: None,
+                navigable: false,
+                status: GraphContainerStatus::MissingContainerMetadata,
+            };
+        };
+        let graph = self.graph_registry.graph(&container.internal_graph_id);
+        GraphContainerNodeInfo {
+            kind: container.kind,
+            internal_graph_id: container.internal_graph_id.clone(),
+            internal_graph_name: graph.map(|graph| graph.name.clone()),
+            internal_graph_path: graph.map(|graph| graph.path.clone()),
+            navigable: container.navigable && graph.is_some(),
+            status: if graph.is_some() {
+                GraphContainerStatus::Resolved
+            } else {
+                GraphContainerStatus::MissingInternalGraph
+            },
+        }
+    }
+
+    fn normalize_graph_containers(&mut self) {
+        let graph_container_node_ids = self
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::GraphContainer)
+            .map(|node| node.node_id.clone())
+            .collect::<Vec<_>>();
+        let mut seen_container_node_ids = Vec::new();
+        self.graph_containers.retain(|container| {
+            if container.container_node_id.is_empty()
+                || seen_container_node_ids
+                    .iter()
+                    .any(|node_id| node_id == &container.container_node_id)
+            {
+                return false;
+            }
+            let node_exists = graph_container_node_ids
+                .iter()
+                .any(|node_id| node_id == &container.container_node_id);
+            if node_exists {
+                seen_container_node_ids.push(container.container_node_id.clone());
+            }
+            node_exists
+        });
     }
 
     pub fn readable_node_path(&self, node_index: usize) -> Option<String> {
@@ -448,6 +533,7 @@ impl GraphDocument {
                 Vec::new(),
             )),
             graph_registry: ProjectGraphRegistry::default(),
+            graph_containers: Vec::new(),
             data_flow_edges: Vec::new(),
             nodes: vec![
                 GraphNode {
@@ -692,6 +778,7 @@ impl GraphDocument {
         Self {
             source: GraphSource::malware_starter(metadata),
             graph_registry: ProjectGraphRegistry::default(),
+            graph_containers: Vec::new(),
             data_flow_edges: Vec::new(),
             nodes: vec![
                 GraphNode {
@@ -2773,7 +2860,7 @@ impl GraphDocument {
             | NodeKind::PythonOperator
             | NodeKind::ProceduralAsset
             | NodeKind::NativeOperator => Some(HoudiniDataKind::GeometryTable),
-            NodeKind::ReferenceInput | NodeKind::Output => None,
+            NodeKind::ReferenceInput | NodeKind::GraphContainer | NodeKind::Output => None,
         }
     }
 
@@ -3224,7 +3311,7 @@ impl GraphDocument {
             | NodeKind::PythonOperator
             | NodeKind::ProceduralAsset
             | NodeKind::NativeOperator => filtered_count,
-            NodeKind::ReferenceInput => 0,
+            NodeKind::ReferenceInput | NodeKind::GraphContainer => 0,
             NodeKind::Output => self.visible_output_count(),
         }
     }
@@ -3247,6 +3334,37 @@ impl GraphDocument {
             .unwrap_or(self.nodes.len());
         let node = GraphNode::python_operator(instance_id, declaration_id);
         self.nodes.insert(insert_index, node);
+        self.rebuild_default_data_flow_edges();
+        insert_index
+    }
+
+    #[allow(dead_code)]
+    pub fn add_graph_container_node(
+        &mut self,
+        name: impl Into<String>,
+        internal_graph: ProjectGraphMetadata,
+    ) -> usize {
+        let internal_graph_id = internal_graph.graph_id.clone();
+        if self.graph_registry.graph(&internal_graph_id).is_none() {
+            self.graph_registry.graphs.push(internal_graph);
+        }
+
+        let instance_id = self.unique_node_id("graph_container");
+        let insert_index = self
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .unwrap_or(self.nodes.len());
+        let mut node =
+            GraphNode::graph_container(instance_id.clone(), self.unique_node_name(&name.into()));
+        node.layout_position = GraphPoint::new(0.74, 0.24);
+        self.nodes.insert(insert_index, node);
+        self.graph_containers.push(GraphContainerMetadata {
+            container_node_id: instance_id,
+            internal_graph_id,
+            kind: GraphContainerKind::Subnet,
+            navigable: true,
+        });
         self.rebuild_default_data_flow_edges();
         insert_index
     }
@@ -4185,6 +4303,9 @@ impl GraphDocument {
                     "Visible substrate coordinate projection; reference inputs do not hide transforms."
                         .to_owned()
                 }
+                NodeKind::GraphContainer => {
+                    "Subnet-like container points to an internal named graph.".to_owned()
+                }
                 NodeKind::PythonOperator => "Deferred graph-visible Python operator.".to_owned(),
                 NodeKind::ProceduralAsset => {
                     "Graph-backed procedural asset instance.".to_owned()
@@ -4561,6 +4682,7 @@ impl GraphDocument {
                 output_operator: None,
                 null_operator: None,
                 reference_input: None,
+                graph_container: None,
                 python_operator: None,
                 procedural_asset: None,
                 native_operator: None,
@@ -4597,6 +4719,7 @@ impl GraphDocument {
                 output_operator: None,
                 null_operator: None,
                 reference_input: None,
+                graph_container: None,
                 python_operator: None,
                 procedural_asset: None,
                 native_operator: None,
@@ -4633,6 +4756,7 @@ impl GraphDocument {
                 output_operator: None,
                 null_operator: None,
                 reference_input: None,
+                graph_container: None,
                 python_operator: None,
                 procedural_asset: None,
                 native_operator: None,
@@ -4673,6 +4797,7 @@ impl GraphDocument {
                         preserves_source_provenance: contract.preserves_source_provenance,
                     }),
                     reference_input: None,
+                    graph_container: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -4753,6 +4878,7 @@ impl GraphDocument {
                         preserves_source_data: true,
                         applies_hidden_transform: false,
                     }),
+                    graph_container: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -4794,6 +4920,52 @@ impl GraphDocument {
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
+                    graph_container: None,
+                    python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
+                }
+            }
+            NodeKind::GraphContainer => {
+                let container = self.graph_container_info_for_node(node);
+                let warnings = if container.status == GraphContainerStatus::Resolved {
+                    Vec::new()
+                } else {
+                    vec![container.status.as_str().to_owned()]
+                };
+                NodeInfo {
+                    kind: node.kind,
+                    role: node.kind.role(),
+                    graph_location: graph_location.clone(),
+                    data_flow: data_flow.clone(),
+                    input_count: 0,
+                    output_count: 0,
+                    status: if warnings.is_empty() {
+                        NodeStatus::Healthy
+                    } else {
+                        NodeStatus::Failed
+                    },
+                    data_kind: "Graph container",
+                    record_count: 0,
+                    bounds: None,
+                    provenance: Some(self.source.metadata.provenance),
+                    attributes: Vec::new(),
+                    parameter: node.parameter.clone(),
+                    summary: "Graph container points to an internal named graph; typed boundary ports are not declared yet.",
+                    source_metadata: None,
+                    coordinate_contract: None,
+                    substrate_raster: None,
+                    source_error: None,
+                    style: None,
+                    generated: node.generated,
+                    evaluation: node.evaluation.clone(),
+                    warnings,
+                    reference_consumers: reference_consumers.clone(),
+                    reference_output_warning: reference_output_warning.clone(),
+                    output_operator: None,
+                    null_operator: None,
+                    reference_input: None,
+                    graph_container: Some(container),
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: None,
@@ -4847,6 +5019,7 @@ impl GraphDocument {
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
+                    graph_container: None,
                     python_operator: Some(PythonOperatorNodeInfo {
                         declaration_id: python_operator.declaration_id.clone(),
                         display_name: declaration
@@ -4918,6 +5091,7 @@ impl GraphDocument {
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
+                    graph_container: None,
                     python_operator: None,
                     procedural_asset: Some(ProceduralAssetNodeInfo {
                         asset_id: asset_node.asset_id.clone(),
@@ -5003,6 +5177,7 @@ impl GraphDocument {
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
+                    graph_container: None,
                     python_operator: None,
                     procedural_asset: None,
                     native_operator: Some(NativeOperatorNodeInfo {
@@ -5110,6 +5285,7 @@ impl GraphDocument {
                 }),
                 null_operator: None,
                 reference_input: None,
+                graph_container: None,
                 python_operator: None,
                 procedural_asset: None,
                 native_operator: None,
@@ -6226,6 +6402,8 @@ struct HoudiniGraphSidecar {
     #[serde(default)]
     graph_registry: ProjectGraphRegistry,
     #[serde(default)]
+    graph_containers: Vec<GraphContainerMetadata>,
+    #[serde(default)]
     data_flow_edges: Vec<GraphDataFlowEdge>,
     nodes: Vec<NodeSidecar>,
     #[serde(default)]
@@ -6268,6 +6446,7 @@ impl HoudiniGraphSidecar {
                 import_error: graph.source.import_error.clone(),
             },
             graph_registry: graph.graph_registry.clone(),
+            graph_containers: graph.graph_containers.clone(),
             data_flow_edges: graph.data_flow_edges.clone(),
             nodes: graph
                 .nodes
@@ -6336,6 +6515,7 @@ impl HoudiniGraphSidecar {
             import_error: self.source.import_error,
         };
         graph.graph_registry = self.graph_registry.normalize();
+        graph.graph_containers = self.graph_containers;
         graph.data_flow_edges = self.data_flow_edges;
         graph.geometry = self.demo_geometry;
         graph.recording_geometry = self.recording_geometry;
@@ -6406,6 +6586,7 @@ impl HoudiniGraphSidecar {
         if graph.data_flow_edges.is_empty() {
             graph.rebuild_default_data_flow_edges();
         }
+        graph.normalize_graph_containers();
 
         if !self.layers.is_empty() {
             graph.layers = self
@@ -6477,6 +6658,7 @@ impl NodeSidecar {
                 | NodeKind::Null
                 | NodeKind::ReferenceInput
                 | NodeKind::SubstrateProjection
+                | NodeKind::GraphContainer
                 | NodeKind::PythonOperator
                 | NodeKind::ProceduralAsset
                 | NodeKind::NativeOperator
@@ -6509,6 +6691,10 @@ impl NodeSidecar {
                 "Substrate Projection",
                 "Converts substrate coordinates as a visible graph operator.",
             ),
+            NodeKind::GraphContainer => (
+                "Graph Container",
+                "Navigates to an internal named graph without moving nodes yet.",
+            ),
             _ => ("Graph Node", "Restored graph node."),
         };
         GraphNode {
@@ -6540,7 +6726,7 @@ impl NodeSidecar {
             procedural_asset: self.procedural_asset,
             native_operator: self.native_operator,
             evaluation: NodeEvaluation::clean(),
-            participates_in_output: true,
+            participates_in_output: self.kind != NodeKind::GraphContainer,
             comment: self.comment,
             show_comment_in_network: self.show_comment_in_network,
             parameter: NodeParameter::scalar(
@@ -6556,7 +6742,10 @@ impl NodeSidecar {
 
 fn node_matches_snapshot_identity(node: &GraphNode, snapshot: &NodeSidecar) -> bool {
     match node.kind {
-        NodeKind::Null | NodeKind::ReferenceInput | NodeKind::SubstrateProjection => {
+        NodeKind::Null
+        | NodeKind::ReferenceInput
+        | NodeKind::SubstrateProjection
+        | NodeKind::GraphContainer => {
             if snapshot.node_id.is_empty() {
                 node.name == snapshot.name
             } else {
@@ -7028,6 +7217,35 @@ impl GraphNode {
                 "Visible assisted substrate projection; no reference input transform is hidden.",
             ),
             info: "Converts a referenced substrate coordinate contract through a visible graph node.",
+        }
+    }
+
+    fn graph_container(node_id: String, name: String) -> Self {
+        Self {
+            node_id,
+            name,
+            kind: NodeKind::GraphContainer,
+            layout_position: GraphPoint::new(0.5, 0.5),
+            generated: None,
+            coordinate_contract: None,
+            output_operator: None,
+            null_operator: None,
+            reference_input: None,
+            substrate_projection: None,
+            python_operator: None,
+            procedural_asset: None,
+            native_operator: None,
+            evaluation: NodeEvaluation::clean(),
+            participates_in_output: false,
+            comment: String::new(),
+            show_comment_in_network: false,
+            parameter: NodeParameter::scalar(
+                "Boundary",
+                0.0,
+                0.0..=1.0,
+                "Graph container boundary placeholder; typed ports land in a later slice.",
+            ),
+            info: "Subnet-like graph container that points to an internal named graph without moving nodes yet.",
         }
     }
 
@@ -9382,6 +9600,7 @@ pub(crate) enum NodeKind {
     Null,
     ReferenceInput,
     SubstrateProjection,
+    GraphContainer,
     PythonOperator,
     ProceduralAsset,
     NativeOperator,
@@ -9397,6 +9616,7 @@ impl NodeKind {
             Self::Null => "Null",
             Self::ReferenceInput => "Reference Input",
             Self::SubstrateProjection => "Substrate Projection",
+            Self::GraphContainer => "Graph Container",
             Self::PythonOperator => "Python Operator",
             Self::ProceduralAsset => "Asset",
             Self::NativeOperator => "Native Operator",
@@ -9412,6 +9632,7 @@ impl NodeKind {
             Self::Null => "Anchor",
             Self::ReferenceInput => "Reference",
             Self::SubstrateProjection => "Project",
+            Self::GraphContainer => "Container",
             Self::PythonOperator => "Compute",
             Self::ProceduralAsset => "Asset",
             Self::NativeOperator => "Native",
@@ -9427,6 +9648,7 @@ impl NodeKind {
             Self::Null => "null_copy",
             Self::ReferenceInput => "reference_input_copy",
             Self::SubstrateProjection => "substrate_projection_copy",
+            Self::GraphContainer => "graph_container_copy",
             Self::PythonOperator => "python_operator_copy",
             Self::ProceduralAsset => "asset_copy",
             Self::NativeOperator => "native_operator_copy",
@@ -9485,6 +9707,8 @@ pub(crate) struct NodeInfo {
     pub output_operator: Option<OutputOperatorNodeInfo>,
     pub null_operator: Option<NullOperatorNodeInfo>,
     pub reference_input: Option<ReferenceInputNodeInfo>,
+    #[allow(dead_code)]
+    pub graph_container: Option<GraphContainerNodeInfo>,
     pub python_operator: Option<PythonOperatorNodeInfo>,
     pub procedural_asset: Option<ProceduralAssetNodeInfo>,
     pub native_operator: Option<NativeOperatorNodeInfo>,
@@ -9554,6 +9778,33 @@ pub(crate) struct ReferenceTargetNodeInfo {
     pub source_provenance: Option<SourceProvenance>,
     pub diagnostic: Option<String>,
     pub provenance: ReferenceTargetProvenance,
+}
+
+#[allow(dead_code)]
+pub(crate) struct GraphContainerNodeInfo {
+    pub kind: GraphContainerKind,
+    pub internal_graph_id: String,
+    pub internal_graph_name: Option<String>,
+    pub internal_graph_path: Option<String>,
+    pub navigable: bool,
+    pub status: GraphContainerStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GraphContainerStatus {
+    Resolved,
+    MissingContainerMetadata,
+    MissingInternalGraph,
+}
+
+impl GraphContainerStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolved => "Resolved",
+            Self::MissingContainerMetadata => "Missing container metadata",
+            Self::MissingInternalGraph => "Missing internal graph",
+        }
+    }
 }
 
 pub(crate) struct PythonOperatorNodeInfo {
@@ -10353,9 +10604,9 @@ mod tests {
     use super::{
         AttributeTableQuery, AttributeTableSort, EvaluationState, ExportGeometry,
         GeneratedNodeBindingState, GeneratedNodeInfo, GeneratedNodeSource, Geometry,
-        GeometryBounds, GeometryKind, GraphAnnotationKind, GraphColor, GraphDataFlowEdge,
-        GraphDataFlowEdgeDiagnosticStatus, GraphDocument, GraphEvaluationMode, GraphNode,
-        GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniCubicBezierParquetSchema,
+        GeometryBounds, GeometryKind, GraphAnnotationKind, GraphColor, GraphContainerStatus,
+        GraphDataFlowEdge, GraphDataFlowEdgeDiagnosticStatus, GraphDocument, GraphEvaluationMode,
+        GraphNode, GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniCubicBezierParquetSchema,
         HoudiniDataKind, HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange,
         HoudiniOperatorPort, HoudiniParameterDeclaration, HoudiniParameterKind,
         HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
@@ -15101,6 +15352,121 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(
             restored.resolve_reference_target(&target).readable_path,
             "analysis/OUT_ANALYSIS:geometry"
+        );
+    }
+
+    #[test]
+    fn graph_container_node_points_to_internal_named_graph() {
+        let mut graph = GraphDocument::sample();
+        let node_index = graph.add_graph_container_node(
+            "Cleanup Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.cleanup".to_owned(),
+                name: "Cleanup".to_owned(),
+                path: "/obj/main/cleanup".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+
+        let node = &graph.nodes[node_index];
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("graph container info should exist");
+        let container = info
+            .graph_container
+            .expect("container inspector info should exist");
+
+        assert_eq!(node.kind, NodeKind::GraphContainer);
+        assert_eq!(node.name, "Cleanup Subnet");
+        assert!(!node.participates_in_output);
+        assert_eq!(info.status, NodeStatus::Healthy);
+        assert_eq!(info.input_count, 0);
+        assert_eq!(info.output_count, 0);
+        assert_eq!(container.status, GraphContainerStatus::Resolved);
+        assert_eq!(container.kind.as_str(), "Subnet");
+        assert_eq!(container.internal_graph_id, "graph.cleanup");
+        assert_eq!(container.internal_graph_name.as_deref(), Some("Cleanup"));
+        assert_eq!(
+            container.internal_graph_path.as_deref(),
+            Some("/obj/main/cleanup")
+        );
+        assert!(container.navigable);
+        assert_eq!(
+            graph.graph_containers[0].container_node_id,
+            graph.nodes[node_index].node_id
+        );
+    }
+
+    #[test]
+    fn graph_container_metadata_round_trips_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        let node_index = graph.add_graph_container_node(
+            "Branch Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.branch".to_owned(),
+                name: "Branch".to_owned(),
+                path: "/obj/main/branch".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        let restored_node_index = restored
+            .nodes
+            .iter()
+            .position(|node| node.node_id == graph.nodes[node_index].node_id)
+            .expect("container node should restore");
+        let restored_info = restored
+            .selected_node_info(restored_node_index)
+            .expect("container info should restore");
+        let restored_container = restored_info
+            .graph_container
+            .expect("container metadata should restore");
+
+        assert_eq!(restored.graph_containers, graph.graph_containers);
+        assert!(json.contains("graph_containers"));
+        assert_eq!(restored_container.status, GraphContainerStatus::Resolved);
+        assert_eq!(restored_container.internal_graph_id, "graph.branch");
+        assert_eq!(
+            restored_container.internal_graph_path.as_deref(),
+            Some("/obj/main/branch")
+        );
+    }
+
+    #[test]
+    fn graph_container_reports_missing_internal_graph() {
+        let mut graph = GraphDocument::sample();
+        let node_index = graph.add_graph_container_node(
+            "Missing Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.deleted".to_owned(),
+                name: "Deleted".to_owned(),
+                path: "/obj/main/deleted".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+        graph
+            .graph_registry
+            .graphs
+            .retain(|metadata| metadata.graph_id != "graph.deleted");
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("container info should exist");
+        let container = info
+            .graph_container
+            .expect("container inspector info should exist");
+
+        assert_eq!(info.status, NodeStatus::Failed);
+        assert_eq!(container.status, GraphContainerStatus::MissingInternalGraph);
+        assert_eq!(container.internal_graph_id, "graph.deleted");
+        assert!(!container.navigable);
+        assert!(
+            info.warnings
+                .iter()
+                .any(|warning| warning.contains("Missing internal graph"))
         );
     }
 
