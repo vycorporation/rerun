@@ -36,6 +36,7 @@ pub(crate) struct GraphDocument {
     pub native_operator_declarations: Vec<NativeOperatorDeclaration>,
     pub native_operator_trust: NativeOperatorTrustPolicy,
     pub python_environment: PythonEnvironmentDescriptor,
+    pub evaluation_mode: GraphEvaluationMode,
     pub work_items: Vec<GraphWorkItem>,
 }
 
@@ -261,6 +262,7 @@ impl GraphDocument {
             native_operator_declarations: Vec::new(),
             native_operator_trust: NativeOperatorTrustPolicy::default(),
             python_environment: PythonEnvironmentDescriptor::default(),
+            evaluation_mode: GraphEvaluationMode::default(),
             work_items: Vec::new(),
         }
     }
@@ -570,6 +572,7 @@ impl GraphDocument {
             native_operator_declarations: Vec::new(),
             native_operator_trust: NativeOperatorTrustPolicy::default(),
             python_environment: PythonEnvironmentDescriptor::default(),
+            evaluation_mode: GraphEvaluationMode::default(),
             work_items: Vec::new(),
         }
     }
@@ -2765,9 +2768,22 @@ impl GraphDocument {
                 node.evaluation.state,
                 EvaluationState::Stale | EvaluationState::Running
             ) {
-                node.evaluation.state = EvaluationState::Cached;
-                node.evaluation.message = None;
-                self.record_work_item(index, GraphWorkItemStatus::Cached, "Cached output reused");
+                let work_item_status = if self.evaluation_mode == GraphEvaluationMode::Manual {
+                    node.evaluation.state = EvaluationState::Manual;
+                    node.evaluation.manual = true;
+                    node.evaluation.message = Some("Waiting for manual evaluation".to_owned());
+                    Some((
+                        GraphWorkItemStatus::Waiting,
+                        "Manual evaluation mode is waiting for an explicit run",
+                    ))
+                } else {
+                    node.evaluation.state = EvaluationState::Cached;
+                    node.evaluation.message = None;
+                    Some((GraphWorkItemStatus::Cached, "Cached output reused"))
+                };
+                if let Some((status, summary)) = work_item_status {
+                    self.record_work_item(index, status, summary);
+                }
             }
         }
     }
@@ -4630,6 +4646,8 @@ struct HoudiniGraphSidecar {
     native_operator_trust: NativeOperatorTrustPolicy,
     #[serde(default)]
     python_environment: PythonEnvironmentDescriptor,
+    #[serde(default)]
+    evaluation_mode: GraphEvaluationMode,
 }
 
 impl HoudiniGraphSidecar {
@@ -4691,6 +4709,7 @@ impl HoudiniGraphSidecar {
             native_operator_declarations: graph.native_operator_declarations.clone(),
             native_operator_trust: graph.native_operator_trust.clone(),
             python_environment: graph.python_environment.clone(),
+            evaluation_mode: graph.evaluation_mode,
         }
     }
 
@@ -4725,6 +4744,7 @@ impl HoudiniGraphSidecar {
         graph.native_operator_declarations = self.native_operator_declarations;
         graph.native_operator_trust = self.native_operator_trust;
         graph.python_environment = self.python_environment;
+        graph.evaluation_mode = self.evaluation_mode;
         graph.work_items.clear();
 
         let mut matched_node_indices = vec![false; graph.nodes.len()];
@@ -6418,6 +6438,24 @@ impl EvaluationState {
             Self::Stale => "Stale",
             Self::Running => "Running",
             Self::Failed => "Failed",
+            Self::Manual => "Manual",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum GraphEvaluationMode {
+    Automatic,
+    #[default]
+    OnInteractionComplete,
+    Manual,
+}
+
+impl GraphEvaluationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "Automatic",
+            Self::OnInteractionComplete => "On interaction complete",
             Self::Manual => "Manual",
         }
     }
@@ -8253,16 +8291,17 @@ mod tests {
     use super::{
         AttributeTableQuery, AttributeTableSort, EvaluationState, ExportGeometry,
         GeneratedNodeBindingState, GeneratedNodeInfo, GeneratedNodeSource, Geometry,
-        GeometryBounds, GeometryKind, GraphAnnotationKind, GraphColor, GraphDocument, GraphNode,
-        GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniCubicBezierParquetSchema,
-        HoudiniDataKind, HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange,
-        HoudiniOperatorPort, HoudiniParameterDeclaration, HoudiniParameterKind,
-        HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
-        NativeOperatorFailureMode, NativeOperatorImplementation, NativeOperatorLoadStatus,
-        NativeOperatorOutputCounts, NativeOperatorProvenance, NetworkBadgeVisibility,
-        NetworkNodeRingVisibility, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
-        NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
-        OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
+        GeometryBounds, GeometryKind, GraphAnnotationKind, GraphColor, GraphDocument,
+        GraphEvaluationMode, GraphNode, GraphPoint, GraphStyle, GraphWorkItemStatus,
+        HoudiniCubicBezierParquetSchema, HoudiniDataKind, HoudiniGeometryRecord,
+        HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
+        HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
+        NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
+        NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
+        NativeOperatorProvenance, NetworkBadgeVisibility, NetworkNodeRingVisibility,
+        NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind, NodeStatus,
+        OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode,
+        OutputTargetId, PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetDeclaration,
         ProceduralAssetGraphSnapshot, ProceduralAssetSource, ProceduralAssetSubgraphReference,
         PythonDependencyHealth, PythonEnvironmentDescriptor, PythonEnvironmentPathMode,
         PythonEnvironmentPaths, PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger,
@@ -10103,6 +10142,31 @@ mod tests {
     }
 
     #[test]
+    fn evaluation_mode_defaults_to_on_interaction_complete() {
+        let graph = GraphDocument::sample();
+
+        assert_eq!(
+            graph.evaluation_mode,
+            GraphEvaluationMode::OnInteractionComplete
+        );
+        assert_eq!(graph.evaluation_mode.as_str(), "On interaction complete");
+    }
+
+    #[test]
+    fn evaluation_mode_round_trips_through_sidecar_as_project_intent() {
+        let mut graph = GraphDocument::sample();
+        graph.evaluation_mode = GraphEvaluationMode::Manual;
+        graph.request_node_run(1);
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(restored.evaluation_mode, GraphEvaluationMode::Manual);
+        assert!(restored.work_items.is_empty());
+    }
+
+    #[test]
     fn output_demand_evaluates_stale_connected_nodes_only() {
         let mut graph = GraphDocument::sample();
         graph.nodes.push(GraphNode {
@@ -10152,6 +10216,27 @@ mod tests {
             EvaluationState::Stale
         );
         assert_eq!(graph.graph_layout().edges.len(), graph.nodes.len() - 2);
+    }
+
+    #[test]
+    fn manual_evaluation_mode_queues_stale_output_instead_of_caching() {
+        let mut graph = GraphDocument::sample();
+        graph.evaluation_mode = GraphEvaluationMode::Manual;
+        graph.mark_node_stale(1);
+
+        graph.demand_output_evaluation();
+
+        assert_eq!(graph.nodes[1].evaluation.state, EvaluationState::Manual);
+        assert!(graph.nodes[1].evaluation.manual);
+        assert_eq!(
+            graph.nodes[1].evaluation.message.as_deref(),
+            Some("Waiting for manual evaluation")
+        );
+        assert!(graph.work_items.iter().any(|item| {
+            item.node_index == 1
+                && item.status == GraphWorkItemStatus::Waiting
+                && item.summary == "Manual evaluation mode is waiting for an explicit run"
+        }));
     }
 
     #[test]
