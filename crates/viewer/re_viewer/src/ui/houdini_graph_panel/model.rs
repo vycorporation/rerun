@@ -2825,6 +2825,7 @@ impl GraphDocument {
         let style_warnings = self.style_warnings();
         let reference_consumers = self.reference_consumers_for_node(index);
         let reference_output_warning = self.reference_output_change_warning_for_node(index);
+        let coordinate_warnings = self.coordinate_contract_warnings(node);
 
         Some(match node.kind {
             NodeKind::Source => NodeInfo {
@@ -2850,7 +2851,7 @@ impl GraphDocument {
                 style: None,
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
-                warnings: Vec::new(),
+                warnings: with_coordinate_warnings(Vec::new(), &coordinate_warnings),
                 reference_consumers: reference_consumers.clone(),
                 reference_output_warning: reference_output_warning.clone(),
                 output_operator: None,
@@ -2883,7 +2884,7 @@ impl GraphDocument {
                 style: None,
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
-                warnings: filter_warnings,
+                warnings: with_coordinate_warnings(filter_warnings, &coordinate_warnings),
                 reference_consumers: reference_consumers.clone(),
                 reference_output_warning: reference_output_warning.clone(),
                 output_operator: None,
@@ -2916,7 +2917,7 @@ impl GraphDocument {
                 style: Some(self.resolved_style()),
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
-                warnings: style_warnings,
+                warnings: with_coordinate_warnings(style_warnings, &coordinate_warnings),
                 reference_consumers: reference_consumers.clone(),
                 reference_output_warning: reference_output_warning.clone(),
                 output_operator: None,
@@ -2947,7 +2948,7 @@ impl GraphDocument {
                     style: Some(self.resolved_style()),
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
-                    warnings: Vec::new(),
+                    warnings: with_coordinate_warnings(Vec::new(), &coordinate_warnings),
                     reference_consumers: reference_consumers.clone(),
                     reference_output_warning: reference_output_warning.clone(),
                     output_operator: None,
@@ -3004,7 +3005,7 @@ impl GraphDocument {
                     style: None,
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
-                    warnings,
+                    warnings: with_coordinate_warnings(warnings, &coordinate_warnings),
                     reference_consumers: reference_consumers.clone(),
                     reference_output_warning: reference_output_warning.clone(),
                     output_operator: None,
@@ -3062,10 +3063,13 @@ impl GraphDocument {
                     style: None,
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
-                    warnings: vec![format!(
-                        "Projection contract: {}",
-                        projection.repair_summary
-                    )],
+                    warnings: with_coordinate_warnings(
+                        vec![format!(
+                            "Projection contract: {}",
+                            projection.repair_summary
+                        )],
+                        &coordinate_warnings,
+                    ),
                     reference_consumers: reference_consumers.clone(),
                     reference_output_warning: reference_output_warning.clone(),
                     output_operator: None,
@@ -3115,7 +3119,7 @@ impl GraphDocument {
                     style: None,
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
-                    warnings,
+                    warnings: with_coordinate_warnings(warnings, &coordinate_warnings),
                     reference_consumers: reference_consumers.clone(),
                     reference_output_warning: reference_output_warning.clone(),
                     output_operator: None,
@@ -3183,7 +3187,7 @@ impl GraphDocument {
                     style: None,
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
-                    warnings,
+                    warnings: with_coordinate_warnings(warnings, &coordinate_warnings),
                     reference_consumers: reference_consumers.clone(),
                     reference_output_warning: reference_output_warning.clone(),
                     output_operator: None,
@@ -3265,7 +3269,7 @@ impl GraphDocument {
                     style: None,
                     generated: node.generated,
                     evaluation: node.evaluation.clone(),
-                    warnings,
+                    warnings: with_coordinate_warnings(warnings, &coordinate_warnings),
                     reference_consumers: reference_consumers.clone(),
                     reference_output_warning: reference_output_warning.clone(),
                     output_operator: None,
@@ -3351,7 +3355,7 @@ impl GraphDocument {
                 style: None,
                 generated: node.generated,
                 evaluation: node.evaluation.clone(),
-                warnings: Vec::new(),
+                warnings: with_coordinate_warnings(Vec::new(), &coordinate_warnings),
                 reference_consumers,
                 reference_output_warning,
                 output_operator: node.output_operator.as_ref().map(|output_operator| {
@@ -3922,10 +3926,49 @@ impl GraphDocument {
 
         warnings
     }
+
+    fn coordinate_contract_warnings(&self, node: &GraphNode) -> Vec<String> {
+        if self.source.metadata.provenance != SourceProvenance::SyntheticMalware {
+            return Vec::new();
+        }
+        let Some(contract) = &node.coordinate_contract else {
+            return Vec::new();
+        };
+        let Some(bounds) = self.source.metadata.bounds else {
+            return Vec::new();
+        };
+
+        let exceeds_x = bounds.min.x < 0.0 || bounds.max.x > contract.width as f32;
+        let exceeds_y = bounds.min.y < 0.0 || bounds.max.y > contract.height as f32;
+        if !exceeds_x && !exceeds_y {
+            return Vec::new();
+        }
+
+        vec![format!(
+            "Overlay bounds [{:.1}, {:.1}]..[{:.1}, {:.1}] exceed substrate {} {}x{} {:?}/{:?}.",
+            bounds.min.x,
+            bounds.min.y,
+            bounds.max.x,
+            bounds.max.y,
+            contract.substrate_id,
+            contract.width,
+            contract.height,
+            contract.origin,
+            contract.y_axis,
+        )]
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 const CUBIC_RECORDING_LIMITATION: &str = "Rerun recordings preserve cubic Bezier semantics as graph-owned control-point metadata. The current replay path visualizes cubic curves as native control points plus a control-polygon preview; dense polyline tessellation remains an adaptive boundary/export representation only.";
+
+fn with_coordinate_warnings(
+    mut warnings: Vec<String>,
+    coordinate_warnings: &[String],
+) -> Vec<String> {
+    warnings.extend(coordinate_warnings.iter().cloned());
+    warnings
+}
 
 #[allow(dead_code)]
 pub(crate) struct HoudiniGeometrySchema;
@@ -7904,10 +7947,10 @@ fn sanitize_entity_path_part(value: &str) -> String {
 mod tests {
     use super::{
         AttributeTableQuery, AttributeTableSort, EvaluationState, ExportGeometry,
-        GeneratedNodeBindingState, GeneratedNodeInfo, GeneratedNodeSource, Geometry, GeometryKind,
-        GraphAnnotationKind, GraphColor, GraphDocument, GraphNode, GraphPoint, GraphStyle,
-        HoudiniCubicBezierParquetSchema, HoudiniDataKind, HoudiniGeometryRecord,
-        HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
+        GeneratedNodeBindingState, GeneratedNodeInfo, GeneratedNodeSource, Geometry,
+        GeometryBounds, GeometryKind, GraphAnnotationKind, GraphColor, GraphDocument, GraphNode,
+        GraphPoint, GraphStyle, HoudiniCubicBezierParquetSchema, HoudiniDataKind,
+        HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
         HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
         NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
         NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
@@ -8467,6 +8510,27 @@ mod tests {
         assert_eq!(contract.height, 256);
         assert_eq!(contract.origin, SubstrateOrigin::TopLeft);
         assert_eq!(contract.y_axis, SubstrateYAxis::Down);
+    }
+
+    #[test]
+    fn malware_starter_node_info_warns_on_substrate_bounds_mismatch() {
+        let mut graph = GraphDocument::malware_starter();
+        graph.source.metadata.bounds = Some(GeometryBounds {
+            min: GraphPoint::new(-4.0, 18.0),
+            max: GraphPoint::new(280.0, 220.0),
+        });
+
+        let source_info = graph
+            .selected_node_info(0)
+            .expect("malware starter should include source node info");
+
+        assert_eq!(source_info.status, NodeStatus::Healthy);
+        assert!(
+            source_info
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("exceed substrate malware-byteplot-pixel-space"))
+        );
     }
 
     #[test]
