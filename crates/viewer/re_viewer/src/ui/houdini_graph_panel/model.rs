@@ -3467,6 +3467,7 @@ impl GraphDocument {
             target_node_index,
             target_node_id: target_node.node_id.clone(),
             target_node_name: target_node.name.clone(),
+            target_node_path: self.readable_node_path_for_node(target_node),
             output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
             affected_references,
         })
@@ -11111,6 +11112,7 @@ pub(crate) struct ReferenceOutputChangeWarning {
     pub target_node_index: usize,
     pub target_node_id: String,
     pub target_node_name: String,
+    pub target_node_path: String,
     pub output_name: String,
     pub affected_references: Vec<ReferenceConsumerInfo>,
 }
@@ -13383,6 +13385,40 @@ mod tests {
             ReferenceDiagnosticStatus::Resolved
         );
         assert_eq!(warning.target_node_name, "OUT_A");
+        assert_eq!(warning.target_node_path, "/obj/main/OUT_A");
+        assert_eq!(warning.affected_references.len(), 1);
+        assert_eq!(
+            warning.affected_references[0].reference_node_index,
+            reference_index
+        );
+    }
+
+    #[test]
+    fn reference_output_change_warning_uses_readable_graph_path() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry.graphs.push(ProjectGraphMetadata {
+            graph_id: "analysis".to_owned(),
+            name: "Analysis".to_owned(),
+            path: "/obj/analysis".to_owned(),
+            role: ProjectGraphRole::Subgraph,
+        });
+        graph
+            .select_graph_by_id("analysis")
+            .expect("analysis graph should be selectable");
+        let analysis_output_index = graph.add_null_operator_node("OUT_A");
+        graph
+            .select_graph_by_id("main")
+            .expect("main graph should be selectable");
+        let reference_index = graph
+            .add_reference_input_node(analysis_output_index)
+            .expect("analysis output should be referenceable from main graph");
+
+        let warning = graph
+            .reference_output_change_warning_for_node(analysis_output_index)
+            .expect("cross-graph referenced output should warn before output changes");
+
+        assert_eq!(warning.target_node_name, "OUT_A");
+        assert_eq!(warning.target_node_path, "/obj/analysis/OUT_A");
         assert_eq!(warning.affected_references.len(), 1);
         assert_eq!(
             warning.affected_references[0].reference_node_index,

@@ -2213,7 +2213,7 @@ impl HoudiniGraphPanel {
                 ui.visuals().warn_fg_color,
                 format!(
                     "Changing or deleting {}:{} affects {} reference(s)",
-                    warning.target_node_name,
+                    warning.target_node_path,
                     warning.output_name,
                     warning.affected_references.len()
                 ),
@@ -4374,7 +4374,7 @@ impl HoudiniGraphPanel {
                             ui.visuals().warn_fg_color,
                             format!(
                                 "Changing or deleting {}:{} affects {} reference(s)",
-                                warning.target_node_name,
+                                warning.target_node_path,
                                 warning.output_name,
                                 warning.affected_references.len()
                             ),
