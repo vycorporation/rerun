@@ -32,8 +32,8 @@ for the graph hierarchy lane.
 | Issue | Status | Slice | Outcome |
 | --- | --- | --- | --- |
 | `#130` | complete | Graph registry metadata | `GraphDocument` owns durable graph registry metadata, sidecar JSON round-trips it, and older sidecars default to the main graph. |
-| `#131` | planned | Current graph path and graph-local inspection | Show selected graph path and graph-local node path context in node inspection while preserving stable ID references. |
-| `#132` | complete when merged | Focused graph hierarchy tracker | Adds this tracker and points the main PRD/ADR status ledger at it. |
+| `#131` | complete when merged | Current graph path and graph-local inspection | Shows selected graph path, readable node path, and graph-local name uniqueness in node inspection while preserving stable ID references. |
+| `#132` | complete | Focused graph hierarchy tracker | Adds this tracker and points the main PRD/ADR status ledger at it. |
 
 ## Next implementation candidates
 
@@ -43,9 +43,10 @@ for the graph hierarchy lane.
    - Keep the operator type visible separately from the editable node name.
 
 2. Graph path inspection and navigation.
-   - Surface the current graph path as user-facing inspection context.
-   - Keep path display derived from graph metadata rather than as a second
-     durable identity.
+   - Current graph path and readable node path inspection are covered by
+     `#131`.
+   - Later navigation work should add selected graph switching without turning
+     path display into a second durable identity.
 
 3. Graph container storage.
    - Add graph container metadata that can point to an internal named graph.

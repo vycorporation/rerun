@@ -1684,9 +1684,7 @@ impl HoudiniGraphPanel {
 
     fn selected_node_path(&self, graph: &GraphDocument) -> String {
         graph
-            .nodes
-            .get(self.selected_node)
-            .map(|node| format!("/obj/main/{}", node.name))
+            .readable_node_path(self.selected_node)
             .unwrap_or_else(|| "/obj/main/<none>".to_owned())
     }
 
@@ -1959,6 +1957,16 @@ impl HoudiniGraphPanel {
             "{} record(s), {} input(s), {} output(s)",
             info.record_count, info.input_count, info.output_count
         ));
+        ui.weak(format!("Graph {}", info.graph_location.graph_path));
+        ui.weak(format!("Node path {}", info.graph_location.node_path));
+        ui.weak(if info.graph_location.name_is_unique_in_graph() {
+            "Name unique in current graph".to_owned()
+        } else {
+            format!(
+                "Name shared by {} nodes in current graph",
+                info.graph_location.name_collision_count
+            )
+        });
         ui.weak(info.summary);
         ui.horizontal_wrapped(|ui| {
             ui.weak("Time dependent");
@@ -3932,6 +3940,32 @@ impl HoudiniGraphPanel {
 
                     ui.weak("Role");
                     ui.label(info.role);
+                    ui.end_row();
+
+                    ui.weak("Graph");
+                    ui.label(&info.graph_location.graph_path);
+                    ui.end_row();
+
+                    ui.weak("Graph id");
+                    ui.label(&info.graph_location.graph_id);
+                    ui.end_row();
+
+                    ui.weak("Node path");
+                    ui.label(&info.graph_location.node_path);
+                    ui.end_row();
+
+                    ui.weak("Name scope");
+                    if info.graph_location.name_is_unique_in_graph() {
+                        ui.label("unique in graph");
+                    } else {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            format!(
+                                "shared by {} nodes in graph",
+                                info.graph_location.name_collision_count
+                            ),
+                        );
+                    }
                     ui.end_row();
 
                     ui.weak("Inputs");
