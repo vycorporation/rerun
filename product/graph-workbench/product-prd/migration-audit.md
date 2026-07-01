@@ -18,6 +18,7 @@ The old local folder should no longer be treated as an active product source.
 - GitHub issues `#1` and later track the implementation backlog in `vycorporation/rerun`.
 - `product/graph-workbench/rerun-native-spike-decision.md` records the Rerun-native product-fork decision.
 - `product/graph-workbench/workbench-layout-presets.md` records the Houdini-style workbench layout preset requirement.
+- `product/graph-workbench/malware-byteplot-workflow.md` tracks the malware byteplot workflow slices from the imported ADRs.
 - `product/graph-workbench/python-operator-surface.md`, `python-environment-status.md`, `procedural-asset-interface.md`, `native-plugin-operator-lane.md`, and `specialized-renderer-path.md` distill the larger follow-up lanes.
 
 ## Missing item found during migration
