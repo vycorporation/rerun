@@ -49,6 +49,7 @@ for the graph hierarchy lane.
 | `#216` | complete | Selected-node graph container collapse UI | Adds workbench and node context-menu commands that collapse the current non-output, non-container node into a navigable typed graph container using the physical graph-container storage path without faking multi-selection. |
 | `#220` | complete | Graph container asset draft promotion | Creates project-local procedural asset drafts from resolved graph containers, preserving typed boundaries, internal graph references, and graph-scoped promoted parameters. |
 | `#222` | complete | Drag marquee multi-select for subnet creation | Adds empty-canvas marquee selection for graph nodes and a Collapse Selection to Subnet command that routes multi-node selections through the existing graph-owned physical collapse path. |
+| `#224` | complete | Tab palette subnet collapse action | Adds a Tab/operator-palette Subnet from Selection action that is only available for multi-node collapsible selections and reuses the graph-owned subnet collapse path. |
 
 ## Next implementation candidates
 
@@ -78,6 +79,8 @@ for the graph hierarchy lane.
      without treating network boxes or viewport selection as asset boundaries.
    - `#222` adds graph-node marquee multi-selection and routes multi-node
      selected sets into the same physical graph container collapse path.
+   - `#224` exposes selected-set subnet creation through the Tab/operator
+     palette so the operation behaves like a network-editor command.
    - Keep selected-node collapse separate from network box organization.
 
 3. Typed graph boundary inputs and outputs.
