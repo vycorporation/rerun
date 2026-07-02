@@ -11,11 +11,11 @@ pub(crate) mod model;
 use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState,
     GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphContainerAssetDraftError,
-    GraphContainerCollapseError, GraphDocument, GraphEvaluationMode, GraphPoint, GraphStyle,
-    GraphWorkItemStatus, HoudiniNodeBinding, LayerKind, NativeOperatorLoadStatus,
-    NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot, NetworkCommentDisplayMode,
-    NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeKind, NodeStatus,
-    PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
+    GraphContainerCollapseError, GraphDocument, GraphEvaluationMode, GraphNavigationError,
+    GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding, LayerKind,
+    NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot,
+    NetworkCommentDisplayMode, NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeKind,
+    NodeStatus, PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
     PythonOperatorDependencyStatus, ReferenceDiagnosticStatus, SourceMetadata,
     SubstrateCoordinateContract,
 };
@@ -272,6 +272,8 @@ enum OperatorPaletteAction {
     AddRepairProjection,
     DuplicateSelected,
     CollapseSelectionToSubnet,
+    EnterSelectedSubnet,
+    GoUpOneGraph,
     AddNetworkBox,
     AddStickyNote,
     DuplicatePolygons,
@@ -281,16 +283,23 @@ enum OperatorPaletteAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OperatorPaletteCategory {
     Create,
+    Navigate,
     Organize,
     LayerActions,
 }
 
 impl OperatorPaletteCategory {
-    const ALL: [Self; 3] = [Self::Create, Self::Organize, Self::LayerActions];
+    const ALL: [Self; 4] = [
+        Self::Create,
+        Self::Navigate,
+        Self::Organize,
+        Self::LayerActions,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Create => "Create",
+            Self::Navigate => "Navigate",
             Self::Organize => "Organize",
             Self::LayerActions => "Layer Actions",
         }
@@ -299,13 +308,14 @@ impl OperatorPaletteCategory {
     fn id(self) -> &'static str {
         match self {
             Self::Create => "create",
+            Self::Navigate => "navigate",
             Self::Organize => "organize",
             Self::LayerActions => "layer_actions",
         }
     }
 
     fn default_open(self, filter_is_empty: bool) -> bool {
-        !filter_is_empty || matches!(self, Self::Create)
+        !filter_is_empty || matches!(self, Self::Create | Self::Navigate)
     }
 }
 
@@ -1001,6 +1011,10 @@ impl HoudiniGraphPanel {
             OperatorPaletteAction::CollapseSelectionToSubnet => {
                 self.collapse_selected_nodes_to_graph_container(graph)
             }
+            OperatorPaletteAction::EnterSelectedSubnet => {
+                self.enter_selected_graph_container(graph)
+            }
+            OperatorPaletteAction::GoUpOneGraph => self.exit_current_graph_to_parent(graph),
             OperatorPaletteAction::AddNetworkBox => {
                 self.selected_annotation = graph.add_network_box_for_node(self.selected_node);
                 self.show_graph_workbench_pane(GraphWorkbenchPane::Operators);
@@ -1407,6 +1421,60 @@ impl HoudiniGraphPanel {
             node.parent_graph_id == graph.current_graph_id()
                 && !matches!(node.kind, NodeKind::Output | NodeKind::GraphContainer)
         })
+    }
+
+    fn selected_node_can_enter_graph_container(&self, graph: &GraphDocument) -> bool {
+        graph
+            .selected_node_info(self.selected_node)
+            .and_then(|info| info.graph_container)
+            .is_some_and(|container| container.navigable)
+    }
+
+    fn enter_selected_graph_container(&mut self, graph: &mut GraphDocument) -> bool {
+        match graph.enter_graph_container_node(self.selected_node) {
+            Ok(_) => {
+                let node_index = graph
+                    .current_graph_node_indices()
+                    .first()
+                    .copied()
+                    .unwrap_or(graph.nodes.len());
+                self.select_single_node(node_index);
+                self.selected_annotation = None;
+                self.selected_edge = None;
+                self.node_info_open = true;
+                self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
+                self.reset_graph_view();
+                self.graph_container_status =
+                    Some(format!("Entered {}.", graph.current_graph_path()));
+                true
+            }
+            Err(err) => {
+                self.graph_container_status = Some(format!(
+                    "Enter subnet failed: {}.",
+                    graph_navigation_error_message(&err)
+                ));
+                false
+            }
+        }
+    }
+
+    fn exit_current_graph_to_parent(&mut self, graph: &mut GraphDocument) -> bool {
+        let Some(change) = graph.exit_current_graph_to_parent_container() else {
+            self.graph_container_status = Some("Already at the top-level graph.".to_owned());
+            return false;
+        };
+
+        self.select_single_node(change.container_node_index);
+        self.selected_annotation = None;
+        self.selected_edge = None;
+        self.node_info_open = true;
+        self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
+        self.reset_graph_view();
+        self.graph_container_status = Some(format!(
+            "Returned to {}.",
+            change.navigation.selected_graph.path
+        ));
+        true
     }
 
     fn collapse_selected_node_to_graph_container(&mut self, graph: &mut GraphDocument) -> bool {
@@ -2299,22 +2367,14 @@ impl HoudiniGraphPanel {
                 ui.colored_label(ui.visuals().warn_fg_color, "missing internal graph");
             }
 
-            if container.navigable
-                && ui
-                    .button("Enter")
-                    .on_hover_text("Open this container's internal graph.")
-                    .clicked()
-                && graph.enter_graph_container_node(self.selected_node).is_ok()
-            {
-                let node_index = graph
-                    .current_graph_node_indices()
-                    .first()
-                    .copied()
-                    .unwrap_or(graph.nodes.len());
-                self.select_single_node(node_index);
-                self.selected_annotation = None;
-                self.node_info_open = true;
-                self.reset_graph_view();
+            if container.navigable {
+                let enter_clicked = ui
+                    .button("Enter Subnet")
+                    .on_hover_text("Open this container's internal graph. Shortcut: Enter.")
+                    .clicked();
+                if enter_clicked {
+                    self.enter_selected_graph_container(graph);
+                }
             }
         });
     }
@@ -3438,6 +3498,8 @@ impl HoudiniGraphPanel {
                     input.key_pressed(egui::Key::Q) && input.modifiers.is_none(),
                     input.key_pressed(egui::Key::M) && input.modifiers.is_none(),
                     input.key_pressed(egui::Key::R) && input.modifiers.is_none(),
+                    input.key_pressed(egui::Key::Enter) && input.modifiers.is_none(),
+                    input.key_pressed(egui::Key::U) && input.modifiers.is_none(),
                 )
             });
             let (
@@ -3454,6 +3516,8 @@ impl HoudiniGraphPanel {
                 display_flag_pressed,
                 manual_flag_pressed,
                 run_node_pressed,
+                enter_subnet_pressed,
+                go_up_pressed,
             ) = shortcut;
 
             if display_options_pressed {
@@ -3495,6 +3559,12 @@ impl HoudiniGraphPanel {
             }
             if run_node_pressed {
                 self.apply_node_ring_action(graph, self.selected_node, NodeRingAction::Run);
+            }
+            if enter_subnet_pressed && self.selected_node_can_enter_graph_container(graph) {
+                layout_changed |= self.enter_selected_graph_container(graph);
+            }
+            if go_up_pressed {
+                layout_changed |= self.exit_current_graph_to_parent(graph);
             }
         }
         if layout_changed {
@@ -3634,6 +3704,13 @@ impl HoudiniGraphPanel {
                             self.selected_edge = None;
                             self.selected_annotation = None;
                             self.node_info_open = true;
+                            if response.double_clicked_by(egui::PointerButton::Primary)
+                                && self.selected_node_can_enter_graph_container(graph)
+                            {
+                                self.enter_selected_graph_container(graph);
+                                hit_node = true;
+                                break;
+                            }
                             self.dragging_node = Some(index);
                             self.node_drag_start_position =
                                 graph.nodes.get(index).map(|node| node.layout_position);
@@ -4335,6 +4412,18 @@ impl HoudiniGraphPanel {
             self.active_graph_pane = GraphWorkbenchPane::Info;
             ui.close();
         }
+        self.operator_menu_action_ui_with_label(
+            ui,
+            graph,
+            OperatorPaletteAction::EnterSelectedSubnet,
+            "Enter Subnet    Enter",
+        );
+        self.operator_menu_action_ui_with_label(
+            ui,
+            graph,
+            OperatorPaletteAction::GoUpOneGraph,
+            "Go Up    U",
+        );
         if ui.button("Run Selected").clicked() {
             graph.request_node_run(self.selected_node);
             graph.complete_node_run(self.selected_node);
@@ -4455,7 +4544,7 @@ impl HoudiniGraphPanel {
 
     fn canvas_context_menu_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         ui.strong("Network");
-        ui.weak("/obj/main");
+        ui.weak(graph.current_graph_path());
         ui.separator();
 
         if ui.button("TAB Menu...").clicked() {
@@ -4479,6 +4568,12 @@ impl HoudiniGraphPanel {
             graph,
             OperatorPaletteAction::AddStickyNote,
             "Sticky Note    Shift+P",
+        );
+        self.operator_menu_action_ui_with_label(
+            ui,
+            graph,
+            OperatorPaletteAction::GoUpOneGraph,
+            "Go Up    U",
         );
 
         ui.separator();
@@ -5740,6 +5835,24 @@ fn operator_palette_entries(
         graph,
         selected_node,
         selected_nodes,
+        OperatorPaletteAction::EnterSelectedSubnet,
+    ) {
+        entries.push(operator_palette_entry(
+            OperatorPaletteAction::EnterSelectedSubnet,
+        ));
+    }
+    if operator_palette_action_available(
+        graph,
+        selected_node,
+        selected_nodes,
+        OperatorPaletteAction::GoUpOneGraph,
+    ) {
+        entries.push(operator_palette_entry(OperatorPaletteAction::GoUpOneGraph));
+    }
+    if operator_palette_action_available(
+        graph,
+        selected_node,
+        selected_nodes,
         OperatorPaletteAction::CollapseSelectionToSubnet,
     ) {
         entries.push(operator_palette_entry(
@@ -5778,6 +5891,13 @@ fn operator_palette_action_available(
         OperatorPaletteAction::CollapseSelectionToSubnet => {
             collapsible_node_indices_for_selection(graph, selected_nodes).len() > 1
         }
+        OperatorPaletteAction::EnterSelectedSubnet => graph
+            .selected_node_info(selected_node)
+            .and_then(|info| info.graph_container)
+            .is_some_and(|container| container.navigable),
+        OperatorPaletteAction::GoUpOneGraph => {
+            graph.current_graph_parent_container_node_index().is_some()
+        }
         OperatorPaletteAction::AddOutNull
         | OperatorPaletteAction::AddReference
         | OperatorPaletteAction::AddNetworkBox
@@ -5794,6 +5914,7 @@ fn operator_palette_action_included(
 ) -> bool {
     match operator_palette_entry(action).category {
         OperatorPaletteCategory::Create => true,
+        OperatorPaletteCategory::Navigate => true,
         OperatorPaletteCategory::Organize => include_organization,
         OperatorPaletteCategory::LayerActions => include_layers,
     }
@@ -5841,6 +5962,20 @@ fn operator_palette_entry(action: OperatorPaletteAction) -> OperatorPaletteEntry
                 "digital asset",
                 "asset",
             ],
+        },
+        OperatorPaletteAction::EnterSelectedSubnet => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::Navigate,
+            label: "Enter Subnet",
+            detail: "Open the selected subnet's internal graph.",
+            aliases: &["enter", "dive", "inside", "subnet", "graph container"],
+        },
+        OperatorPaletteAction::GoUpOneGraph => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::Navigate,
+            label: "Go Up",
+            detail: "Return to the parent graph and select the containing subnet.",
+            aliases: &["up", "parent", "out", "back", "network"],
         },
         OperatorPaletteAction::AddNetworkBox => OperatorPaletteEntry {
             action,
@@ -6830,6 +6965,29 @@ fn graph_container_collapse_error_message(error: &GraphContainerCollapseError) -
     }
 }
 
+fn graph_navigation_error_message(error: &GraphNavigationError) -> String {
+    match error {
+        GraphNavigationError::MissingGraph { graph_id } => {
+            format!("graph {graph_id} is missing")
+        }
+        GraphNavigationError::MissingNodeIndex(index) => {
+            format!("node index {index} is missing")
+        }
+        GraphNavigationError::NodeIsNotGraphContainer { node_name, .. } => {
+            format!("{node_name} is not a graph container")
+        }
+        GraphNavigationError::MissingContainerMetadata { node_id } => {
+            format!("container metadata for {node_id} is missing")
+        }
+        GraphNavigationError::MissingInternalGraph { graph_id } => {
+            format!("internal graph {graph_id} is missing")
+        }
+        GraphNavigationError::ContainerNotNavigable { node_id, .. } => {
+            format!("container {node_id} is not navigable")
+        }
+    }
+}
+
 fn graph_container_asset_draft_error_message(error: &GraphContainerAssetDraftError) -> String {
     match error {
         GraphContainerAssetDraftError::MissingNodeIndex(index) => {
@@ -7239,6 +7397,47 @@ mod tests {
             panel.operator_history.first(),
             Some(&OperatorPaletteAction::CollapseSelectionToSubnet)
         );
+    }
+
+    #[test]
+    fn operator_palette_enters_and_exits_selected_subnet() {
+        let mut graph = GraphDocument::sample();
+        let mut panel = HoudiniGraphPanel::default();
+        panel.set_selected_node_set(vec![1, 2]);
+        assert!(panel.apply_operator_palette_action(
+            &mut graph,
+            OperatorPaletteAction::CollapseSelectionToSubnet,
+        ));
+        let container_index = panel.selected_node;
+
+        assert!(operator_palette_action_available(
+            &graph,
+            container_index,
+            &panel.selected_nodes,
+            OperatorPaletteAction::EnterSelectedSubnet,
+        ));
+        assert!(
+            panel.apply_operator_palette_action(
+                &mut graph,
+                OperatorPaletteAction::EnterSelectedSubnet,
+            )
+        );
+
+        assert_ne!(graph.current_graph_id(), "main");
+        assert_ne!(panel.selected_node, container_index);
+        assert!(operator_palette_action_available(
+            &graph,
+            panel.selected_node,
+            &panel.selected_nodes,
+            OperatorPaletteAction::GoUpOneGraph,
+        ));
+        assert!(
+            panel.apply_operator_palette_action(&mut graph, OperatorPaletteAction::GoUpOneGraph,)
+        );
+
+        assert_eq!(graph.current_graph_id(), "main");
+        assert_eq!(panel.selected_node, container_index);
+        assert_eq!(panel.selected_nodes, vec![container_index]);
     }
 
     #[test]
