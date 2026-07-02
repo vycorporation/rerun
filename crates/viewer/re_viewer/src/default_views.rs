@@ -81,6 +81,11 @@ fn populate_view_class_registry_with_builtin(
         app_options,
         fallback_registry,
     )?;
+    view_class_registry.add_class::<crate::ui::HoudiniAssetsView>(
+        reflection,
+        app_options,
+        fallback_registry,
+    )?;
     view_class_registry.add_class::<crate::ui::HoudiniDataView>(
         reflection,
         app_options,

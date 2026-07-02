@@ -25,8 +25,8 @@ pub(crate) use self::houdini_graph_panel::{
     install_shared_houdini_graph_panel, new_shared_houdini_graph, new_shared_houdini_graph_panel,
 };
 pub(crate) use self::houdini_graph_view::{
-    HoudiniDataView, HoudiniDisplayView, HoudiniExecutionView, HoudiniFindView, HoudiniGraphView,
-    HoudiniInfoView, HoudiniLayersView, HoudiniNetworkView, HoudiniOperatorsView,
+    HoudiniAssetsView, HoudiniDataView, HoudiniDisplayView, HoudiniExecutionView, HoudiniFindView,
+    HoudiniGraphView, HoudiniInfoView, HoudiniLayersView, HoudiniNetworkView, HoudiniOperatorsView,
     HoudiniOutputsView, HoudiniParametersView, HoudiniProjectView, HoudiniShelfView,
 };
 pub(crate) use self::houdini_workbench_layout::houdini_workbench_toolbar_ui;

@@ -395,6 +395,10 @@ impl HoudiniGraphPanel {
         self.show_workbench_view(ui, shared_graph, GraphWorkbenchPane::Layers);
     }
 
+    pub(crate) fn show_assets_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
+        self.show_workbench_view(ui, shared_graph, GraphWorkbenchPane::Assets);
+    }
+
     pub(crate) fn show_data_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
         install_shared_houdini_graph(ui.ctx(), shared_graph);
         let mut graph = lock_houdini_graph(shared_graph);
@@ -1193,9 +1197,17 @@ impl HoudiniGraphPanel {
                     );
                     self.select_single_node(node_index);
                     self.selected_annotation = None;
-                    self.active_graph_pane = GraphWorkbenchPane::Info;
+                    self.active_graph_pane = GraphWorkbenchPane::Assets;
                     self.asset_status = Some(format!("Created project asset: {asset_id}"));
                     self.shelf_status = Some(format!("Created asset node: {asset_id}"));
+                }
+
+                if ui
+                    .button("Asset Gallery")
+                    .on_hover_text("Open the project-local asset gallery.")
+                    .clicked()
+                {
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Assets);
                 }
 
                 if let Some(status) = &self.shelf_status {
@@ -1318,6 +1330,13 @@ impl HoudiniGraphPanel {
         ui.add_space(8.0);
         ui.strong("Asset");
         self.asset_authoring_ui(ui, graph);
+        if ui
+            .button("Open Asset Gallery")
+            .on_hover_text("Show project-local asset definitions and all graph usages.")
+            .clicked()
+        {
+            self.show_graph_workbench_pane(GraphWorkbenchPane::Assets);
+        }
 
         ui.add_space(8.0);
         self.asset_gallery_ui(ui, graph);
@@ -2999,6 +3018,7 @@ impl HoudiniGraphPanel {
             );
             let asset_id = graph.commit_asset_draft(draft);
             self.asset_status = Some(format!("Created project asset: {asset_id}"));
+            self.show_graph_workbench_pane(GraphWorkbenchPane::Assets);
         }
         let selected_graph_container =
             self.selected_node_can_create_asset_from_graph_container(graph);
@@ -3368,7 +3388,7 @@ impl HoudiniGraphPanel {
                 self.asset_status = Some(format!(
                     "Created project asset from selected subnet: {asset_id}"
                 ));
-                self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
+                self.show_graph_workbench_pane(GraphWorkbenchPane::Assets);
                 true
             }
             Err(err) => {
