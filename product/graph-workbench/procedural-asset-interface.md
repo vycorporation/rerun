@@ -125,3 +125,4 @@ Python-backed assets are deferred until the Python operator lane is implemented.
 15. #236 - Complete: expose match-definition and upgrade-to-current-definition actions from the selected asset panel and asset gallery usage rows while preserving exact-version pins.
 16. #238 - Complete: add project asset gallery filtering by asset metadata, labels, wrapped graph ids, and usage paths with an explicit no-match state.
 17. #240 - Complete: group project asset gallery usages by readable graph path while keeping per-instance Go, Match, and Upgrade actions.
+18. #242 - Complete: make the project asset gallery discoverable as a registered Assets workbench view, default preset tab, and direct asset-authoring/shelf entry point.
