@@ -24,6 +24,7 @@ pub(crate) struct GraphDocument {
     pub graph_registry: ProjectGraphRegistry,
     pub graph_containers: Vec<GraphContainerMetadata>,
     pub data_flow_edges: Vec<GraphDataFlowEdge>,
+    pub connection_routing_dots: Vec<ConnectionRoutingDot>,
     pub nodes: Vec<GraphNode>,
     pub annotations: Vec<GraphAnnotation>,
     pub network_view: NetworkViewDisplayOptions,
@@ -231,6 +232,15 @@ pub(crate) struct GraphDataFlowEdge {
     pub from_output: String,
     pub to_node_id: String,
     pub to_input: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ConnectionRoutingDot {
+    pub dot_id: String,
+    pub parent_graph_id: String,
+    pub position: GraphPoint,
+    pub edge_ids: Vec<String>,
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1275,6 +1285,83 @@ impl GraphDocument {
     }
 
     #[allow(dead_code)]
+    pub fn add_connection_routing_dot(
+        &mut self,
+        parent_graph_id: impl Into<String>,
+        position: GraphPoint,
+        edge_ids: impl IntoIterator<Item = String>,
+        pinned: bool,
+    ) -> String {
+        let parent_graph_id = parent_graph_id.into();
+        let dot_id = self.next_connection_routing_dot_id(&parent_graph_id);
+        let mut edge_ids = edge_ids
+            .into_iter()
+            .filter(|edge_id| !edge_id.trim().is_empty())
+            .collect::<Vec<_>>();
+        edge_ids.sort();
+        edge_ids.dedup();
+        self.connection_routing_dots.push(ConnectionRoutingDot {
+            dot_id: dot_id.clone(),
+            parent_graph_id,
+            position,
+            edge_ids,
+            pinned,
+        });
+        dot_id
+    }
+
+    #[allow(dead_code)]
+    pub fn move_connection_routing_dot(&mut self, dot_id: &str, position: GraphPoint) -> bool {
+        let Some(dot) = self
+            .connection_routing_dots
+            .iter_mut()
+            .find(|dot| dot.dot_id == dot_id)
+        else {
+            return false;
+        };
+        dot.position = position;
+        true
+    }
+
+    #[allow(dead_code)]
+    pub fn set_connection_routing_dot_pinned(&mut self, dot_id: &str, pinned: bool) -> bool {
+        let Some(dot) = self
+            .connection_routing_dots
+            .iter_mut()
+            .find(|dot| dot.dot_id == dot_id)
+        else {
+            return false;
+        };
+        dot.pinned = pinned;
+        true
+    }
+
+    #[allow(dead_code)]
+    pub fn remove_connection_routing_dot(&mut self, dot_id: &str) -> Option<ConnectionRoutingDot> {
+        let dot_index = self
+            .connection_routing_dots
+            .iter()
+            .position(|dot| dot.dot_id == dot_id)?;
+        Some(self.connection_routing_dots.remove(dot_index))
+    }
+
+    fn next_connection_routing_dot_id(&self, parent_graph_id: &str) -> String {
+        let graph_id = sanitize_asset_id_part(parent_graph_id);
+        let mut index = self.connection_routing_dots.len() + 1;
+        loop {
+            let dot_id = format!("route.{graph_id}.{index}");
+            if !self
+                .connection_routing_dots
+                .iter()
+                .any(|dot| dot.dot_id == dot_id)
+            {
+                return dot_id;
+            }
+            index += 1;
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn node_has_primary_geometry_output(&self, node_index: usize) -> bool {
         self.nodes.get(node_index).is_some_and(|node| {
             self.node_output_kind_for_name(node, PRIMARY_GEOMETRY_OUTPUT)
@@ -1904,6 +1991,7 @@ impl GraphDocument {
             graph_registry: ProjectGraphRegistry::default(),
             graph_containers: Vec::new(),
             data_flow_edges: Vec::new(),
+            connection_routing_dots: Vec::new(),
             nodes: vec![
                 GraphNode {
                     node_id: "source.main".to_owned(),
@@ -2163,6 +2251,7 @@ impl GraphDocument {
             graph_registry: ProjectGraphRegistry::default(),
             graph_containers: Vec::new(),
             data_flow_edges: Vec::new(),
+            connection_routing_dots: Vec::new(),
             nodes: vec![
                 GraphNode {
                     node_id: "source.byteplot".to_owned(),
@@ -11687,6 +11776,8 @@ struct HoudiniGraphSidecar {
     graph_containers: Vec<GraphContainerMetadata>,
     #[serde(default)]
     data_flow_edges: Vec<GraphDataFlowEdge>,
+    #[serde(default)]
+    connection_routing_dots: Vec<ConnectionRoutingDot>,
     nodes: Vec<NodeSidecar>,
     #[serde(default)]
     annotations: Vec<GraphAnnotation>,
@@ -11730,6 +11821,7 @@ impl HoudiniGraphSidecar {
             graph_registry: graph.graph_registry.clone(),
             graph_containers: graph.graph_containers.clone(),
             data_flow_edges: graph.data_flow_edges.clone(),
+            connection_routing_dots: graph.connection_routing_dots.clone(),
             nodes: graph
                 .nodes
                 .iter()
@@ -11802,6 +11894,7 @@ impl HoudiniGraphSidecar {
         graph.graph_registry = self.graph_registry.normalize();
         graph.graph_containers = self.graph_containers;
         graph.data_flow_edges = self.data_flow_edges;
+        graph.connection_routing_dots = self.connection_routing_dots;
         graph.geometry = self.demo_geometry;
         graph.recording_geometry = self.recording_geometry;
         graph.annotations = self.annotations;
@@ -22330,6 +22423,53 @@ mod tests {
 
         assert_eq!(restored.data_flow_edges, graph.data_flow_edges);
         assert_eq!(restored.graph_layout().edges.len(), graph.nodes.len() - 1);
+    }
+
+    #[test]
+    fn connection_routing_dots_round_trip_without_changing_data_flow() {
+        let mut graph = GraphDocument::sample();
+        let data_flow_edges_before = graph.data_flow_edges.clone();
+        let diagnostics_before = graph.data_flow_edge_diagnostics();
+        let edge_id = graph
+            .data_flow_edges
+            .first()
+            .expect("sample graph should have data-flow edges")
+            .edge_id
+            .clone();
+        let selected_graph_id = graph.graph_registry.selected_graph_id.clone();
+        let dot_id = graph.add_connection_routing_dot(
+            selected_graph_id,
+            GraphPoint::new(0.42, 0.37),
+            vec![edge_id.clone(), edge_id],
+            false,
+        );
+
+        assert!(graph.move_connection_routing_dot(&dot_id, GraphPoint::new(0.48, 0.41)));
+        assert!(graph.set_connection_routing_dot_pinned(&dot_id, true));
+        assert_eq!(graph.data_flow_edges, data_flow_edges_before);
+        assert_eq!(graph.data_flow_edge_diagnostics(), diagnostics_before);
+        assert_eq!(graph.connection_routing_dots.len(), 1);
+        assert_eq!(graph.connection_routing_dots[0].edge_ids.len(), 1);
+        assert!(graph.connection_routing_dots[0].pinned);
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.connection_routing_dots.clear();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert_eq!(
+            restored.connection_routing_dots,
+            graph.connection_routing_dots
+        );
+        assert_eq!(restored.data_flow_edges, data_flow_edges_before);
+        assert_eq!(restored.data_flow_edge_diagnostics(), diagnostics_before);
+
+        let removed = restored
+            .remove_connection_routing_dot(&dot_id)
+            .expect("routing dot should be removable by stable id");
+        assert_eq!(removed.dot_id, dot_id);
+        assert!(restored.connection_routing_dots.is_empty());
+        assert_eq!(restored.data_flow_edges, data_flow_edges_before);
     }
 
     #[test]
