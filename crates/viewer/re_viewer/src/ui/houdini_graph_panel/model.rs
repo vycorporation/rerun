@@ -1317,6 +1317,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.0, 0.5),
                     generated: None,
                     coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+                    source_node: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1344,6 +1345,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.33, 0.5),
                     generated: None,
                     coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+                    source_node: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1373,6 +1375,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.66, 0.5),
                     generated: None,
                     coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+                    source_node: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1400,6 +1403,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(1.0, 0.5),
                     generated: None,
                     coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+                    source_node: None,
                     output_operator: Some(OutputOperatorNode::rerun_scene()),
                     null_operator: None,
                     reference_input: None,
@@ -1568,6 +1572,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.0, 0.28),
                     generated: None,
                     coordinate_contract: Some(coordinate_contract.clone()),
+                    source_node: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1595,6 +1600,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.0, 0.56),
                     generated: None,
                     coordinate_contract: Some(coordinate_contract.clone()),
+                    source_node: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1622,6 +1628,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.0, 0.84),
                     generated: None,
                     coordinate_contract: Some(coordinate_contract.clone()),
+                    source_node: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1651,6 +1658,7 @@ impl GraphDocument {
                         GeneratedNodeSource::AttributeTableCommit,
                     )),
                     coordinate_contract: Some(coordinate_contract.clone()),
+                    source_node: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1680,6 +1688,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(0.64, 0.56),
                     generated: None,
                     coordinate_contract: Some(coordinate_contract.clone()),
+                    source_node: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1707,6 +1716,7 @@ impl GraphDocument {
                     layout_position: GraphPoint::new(1.0, 0.56),
                     generated: None,
                     coordinate_contract: Some(coordinate_contract),
+                    source_node: None,
                     output_operator: Some(OutputOperatorNode::rerun_scene()),
                     null_operator: None,
                     reference_input: None,
@@ -2658,6 +2668,34 @@ impl GraphDocument {
                     true
                 }
             },
+            ProjectCommand::SourceNodeCreate {
+                source_node,
+                insert_index,
+            } => match direction {
+                ProjectCommandDirection::Undo => {
+                    let Some(node_index) = self
+                        .nodes
+                        .iter()
+                        .position(|node| node.node_id == source_node.node_id)
+                    else {
+                        return false;
+                    };
+                    self.nodes.remove(node_index);
+                    true
+                }
+                ProjectCommandDirection::Redo => {
+                    if self
+                        .nodes
+                        .iter()
+                        .any(|node| node.node_id == source_node.node_id)
+                    {
+                        return false;
+                    }
+                    let insert_index = (*insert_index).min(self.nodes.len());
+                    self.nodes.insert(insert_index, (**source_node).clone());
+                    true
+                }
+            },
             ProjectCommand::NodeDelete {
                 deleted_node,
                 remove_index,
@@ -3274,6 +3312,61 @@ impl GraphDocument {
         self.nodes.insert(insert_index, node);
         self.rebuild_default_data_flow_edges();
         insert_index
+    }
+
+    pub fn add_source_gallery_item_node(&mut self, item: &SourceGalleryItem) -> usize {
+        let name = self.unique_node_name_in_graph(
+            &format!("Source {}", item.display_name),
+            self.current_graph_id(),
+            None,
+        );
+        let insert_index = self
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .unwrap_or(self.nodes.len());
+        let mut node = GraphNode::source_node(
+            self.unique_node_id("source"),
+            name,
+            SourceNode::from_gallery_item(item),
+        );
+        node.parent_graph_id = self.current_graph_id().to_owned();
+        node.layout_position = GraphPoint::new(0.12, 0.7);
+        let source_node = node.clone();
+        self.nodes.insert(insert_index, node);
+        self.record_project_command(ProjectCommand::SourceNodeCreate {
+            source_node: Box::new(source_node),
+            insert_index,
+        });
+        insert_index
+    }
+
+    pub fn add_source_gallery_collection_node(
+        &mut self,
+        items: &[SourceGalleryItem],
+    ) -> Option<usize> {
+        let source_node = SourceNode::from_gallery_items(items)?;
+        let name = self.unique_node_name_in_graph(
+            &format!("Source Collection {}", source_node.source_count()),
+            self.current_graph_id(),
+            None,
+        );
+        let insert_index = self
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .unwrap_or(self.nodes.len());
+        let mut node =
+            GraphNode::source_node(self.unique_node_id("source_collection"), name, source_node);
+        node.parent_graph_id = self.current_graph_id().to_owned();
+        node.layout_position = GraphPoint::new(0.12, 0.82);
+        let created_node = node.clone();
+        self.nodes.insert(insert_index, node);
+        self.record_project_command(ProjectCommand::SourceNodeCreate {
+            source_node: Box::new(created_node),
+            insert_index,
+        });
+        Some(insert_index)
     }
 
     #[allow(dead_code)]
@@ -6382,7 +6475,11 @@ impl GraphDocument {
     pub fn selected_node_info(&self, index: usize) -> Option<NodeInfo> {
         let node = self.nodes.get(index)?;
         let stage = self.pipeline_stage_for_node(index, node);
-        let source_metadata = self.source.metadata.clone();
+        let source_metadata = node
+            .source_node
+            .as_ref()
+            .and_then(SourceNode::primary_metadata)
+            .unwrap_or_else(|| self.source.metadata.clone());
         let filter_warnings = self.filter_rule_warning().into_iter().collect::<Vec<_>>();
         let style_warnings = self.style_warnings();
         let reference_consumers = self.reference_consumers_for_node(index);
@@ -6409,10 +6506,10 @@ impl GraphDocument {
                 record_count: source_metadata.record_count,
                 bounds: source_metadata.bounds,
                 provenance: Some(source_metadata.provenance),
-                attributes: source_metadata.attribute_names,
+                attributes: source_metadata.attribute_names.clone(),
                 parameter: node.parameter.clone(),
                 summary: "Source geometry lives in the graph model before any viewer adaptation.",
-                source_metadata: Some(self.source.metadata.clone()),
+                source_metadata: Some(source_metadata.clone()),
                 coordinate_contract: node.coordinate_contract.clone(),
                 substrate_raster: substrate_raster.clone(),
                 source_error: self.source.import_error.clone(),
@@ -8428,7 +8525,7 @@ pub(crate) enum SourceGalleryOpenActionKind {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum SourceGalleryItemKind {
     Image,
     Table,
@@ -8911,7 +9008,7 @@ impl SourceExternalReferenceReport {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum SourceExternalReferenceStatus {
     NotExternal,
     LocalAvailable,
@@ -9823,6 +9920,7 @@ impl HoudiniGraphSidecar {
                     parameter_rule: node.parameter.rule_spec.clone(),
                     generated: node.generated,
                     coordinate_contract: Some(node.coordinate_contract.clone()),
+                    source_node: node.source_node.clone(),
                     output_operator: node.output_operator.clone(),
                     null_operator: node.null_operator.clone(),
                     reference_input: node.reference_input.clone(),
@@ -9929,6 +10027,7 @@ impl HoudiniGraphSidecar {
                 node.coordinate_contract = node_snapshot.coordinate_contract.unwrap_or_else(|| {
                     GraphDocument::default_coordinate_contract_for_kind(node.kind)
                 });
+                node.source_node = node_snapshot.source_node;
                 node.output_operator = node_snapshot.output_operator.or_else(|| {
                     (node.kind == NodeKind::Output).then(OutputOperatorNode::rerun_scene)
                 });
@@ -9997,6 +10096,8 @@ struct NodeSidecar {
     generated: Option<GeneratedNodeInfo>,
     #[serde(default)]
     coordinate_contract: Option<Option<SubstrateCoordinateContract>>,
+    #[serde(default)]
+    source_node: Option<SourceNode>,
     #[serde(default)]
     output_operator: Option<OutputOperatorNode>,
     #[serde(default)]
@@ -10095,6 +10196,7 @@ impl NodeSidecar {
             coordinate_contract: self
                 .coordinate_contract
                 .unwrap_or_else(|| GraphDocument::default_coordinate_contract_for_kind(self.kind)),
+            source_node: self.source_node,
             output_operator: self.output_operator,
             null_operator: self.null_operator,
             reference_input: self.reference_input,
@@ -10224,6 +10326,7 @@ pub(crate) struct GraphNode {
     pub layout_position: GraphPoint,
     pub generated: Option<GeneratedNodeInfo>,
     pub coordinate_contract: Option<SubstrateCoordinateContract>,
+    pub source_node: Option<SourceNode>,
     pub output_operator: Option<OutputOperatorNode>,
     pub null_operator: Option<NullOperatorNode>,
     pub reference_input: Option<ReferenceInputNode>,
@@ -10516,6 +10619,37 @@ fn network_box_bounds_for_positions(positions: &[GraphPoint]) -> Option<(GraphPo
 }
 
 impl GraphNode {
+    fn source_node(node_id: String, name: String, source_node: SourceNode) -> Self {
+        Self {
+            node_id,
+            parent_graph_id: MAIN_GRAPH_ID.to_owned(),
+            name,
+            kind: NodeKind::Source,
+            layout_position: GraphPoint::new(0.5, 0.5),
+            generated: None,
+            coordinate_contract: None,
+            source_node: Some(source_node),
+            output_operator: None,
+            null_operator: None,
+            reference_input: None,
+            substrate_projection: None,
+            python_operator: None,
+            procedural_asset: None,
+            native_operator: None,
+            evaluation: NodeEvaluation::clean(),
+            participates_in_output: false,
+            comment: String::new(),
+            show_comment_in_network: false,
+            parameter: NodeParameter::scalar(
+                "Available",
+                1.0,
+                0.0..=1.0,
+                "External source locator placeholder; contents remain referenced, not embedded.",
+            ),
+            info: "References one or more external source locators without copying data into the graph.",
+        }
+    }
+
     fn null_operator(name: String) -> Self {
         Self {
             node_id: String::new(),
@@ -10525,6 +10659,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+            source_node: None,
             output_operator: None,
             null_operator: Some(NullOperatorNode {
                 input_kind: HoudiniDataKind::GeometryTable,
@@ -10558,6 +10693,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+            source_node: None,
             output_operator: None,
             null_operator: None,
             reference_input: Some(ReferenceInputNode {
@@ -10590,6 +10726,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: Some(projection.to_contract.clone()),
+            source_node: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,
@@ -10620,6 +10757,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: None,
+            source_node: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,
@@ -10650,6 +10788,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+            source_node: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,
@@ -10691,6 +10830,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+            source_node: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,
@@ -10732,6 +10872,7 @@ impl GraphNode {
             layout_position: GraphPoint::new(0.5, 0.5),
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+            source_node: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,
@@ -10760,6 +10901,69 @@ impl GraphNode {
             ),
             info: "Runs a trusted native operator once a loader is available.",
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SourceNode {
+    pub entries: Vec<SourceNodeEntry>,
+}
+
+impl SourceNode {
+    fn from_gallery_item(item: &SourceGalleryItem) -> Self {
+        Self {
+            entries: vec![SourceNodeEntry::from_gallery_item(item)],
+        }
+    }
+
+    fn from_gallery_items(items: &[SourceGalleryItem]) -> Option<Self> {
+        (!items.is_empty()).then(|| Self {
+            entries: items
+                .iter()
+                .map(SourceNodeEntry::from_gallery_item)
+                .collect(),
+        })
+    }
+
+    fn primary_metadata(&self) -> Option<SourceMetadata> {
+        self.entries.first().map(SourceNodeEntry::source_metadata)
+    }
+
+    fn source_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SourceNodeEntry {
+    pub display_name: String,
+    pub locator: SourceLocator,
+    pub kind: SourceGalleryItemKind,
+    pub external_reference_status: SourceExternalReferenceStatus,
+    pub format_kind: Option<SourceFormatKind>,
+    pub format_support_status: Option<SourceFormatSupportStatus>,
+}
+
+impl SourceNodeEntry {
+    fn from_gallery_item(item: &SourceGalleryItem) -> Self {
+        Self {
+            display_name: item.display_name.clone(),
+            locator: item.locator.clone(),
+            kind: item.kind,
+            external_reference_status: item.external_reference_status,
+            format_kind: item.format_kind,
+            format_support_status: item.format_support_status,
+        }
+    }
+
+    fn source_metadata(&self) -> SourceMetadata {
+        SourceMetadata {
+            provenance: SourceProvenance::ParquetImport,
+            source_path: self.locator.location.clone(),
+            locator: self.locator.clone(),
+            ..Default::default()
+        }
+        .normalized()
     }
 }
 
@@ -12127,6 +12331,10 @@ pub(crate) enum ProjectCommand {
         duplicated_node: Box<GraphNode>,
         insert_index: usize,
     },
+    SourceNodeCreate {
+        source_node: Box<GraphNode>,
+        insert_index: usize,
+    },
     NodeDelete {
         deleted_node: Box<GraphNode>,
         remove_index: usize,
@@ -12284,6 +12492,9 @@ impl ProjectCommand {
             }
             Self::NodeDelete { deleted_node, .. } => {
                 format!("Delete {}", deleted_node.name)
+            }
+            Self::SourceNodeCreate { source_node, .. } => {
+                format!("Create {}", source_node.name)
             }
             Self::ReferenceInputCreate { reference_node, .. } => {
                 format!("Create {}", reference_node.name)
@@ -19155,6 +19366,7 @@ mod tests {
             layout_position: GraphPoint::new(0.5, 0.1),
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
+            source_node: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,
@@ -22017,6 +22229,106 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             SourceGalleryOpenActionKind::Unavailable
         );
         assert!(generated_action.status.contains("external locator"));
+    }
+
+    #[test]
+    fn source_gallery_single_entry_creates_undoable_source_node() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let image_path = temp_dir.path().join("frame.png");
+        std::fs::write(&image_path, b"image bytes stay outside sidecar").unwrap();
+        let index = SourceGalleryIndex::from_locator(
+            SourceLocator::from_location(&image_path.display().to_string()),
+            16,
+        );
+        let item = index.items.first().unwrap();
+        let mut graph = GraphDocument::sample();
+        let initial_node_count = graph.nodes.len();
+
+        let node_index = graph.add_source_gallery_item_node(item);
+
+        assert_eq!(graph.nodes.len(), initial_node_count + 1);
+        let node = &graph.nodes[node_index];
+        assert_eq!(node.kind, NodeKind::Source);
+        assert!(!node.participates_in_output);
+        let source_node = node.source_node.as_ref().expect("source payload");
+        assert_eq!(source_node.entries.len(), 1);
+        assert_eq!(source_node.entries[0].display_name, "frame.png");
+        assert_eq!(
+            source_node.entries[0].locator.kind,
+            SourceLocatorKind::LocalPath
+        );
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Create Source frame.png")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes.len(), initial_node_count);
+
+        assert!(graph.redo_project_command());
+        assert_eq!(graph.nodes.len(), initial_node_count + 1);
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|node| node.source_node.as_ref().is_some_and(|source| {
+                    source.entries[0].locator.readable() == image_path.display().to_string()
+                }))
+        );
+    }
+
+    #[test]
+    fn source_gallery_collection_node_round_trips_without_embedded_contents_or_thumbnails() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let image_path = temp_dir.path().join("frame.png");
+        let table_path = temp_dir.path().join("polygons.geoparquet");
+        std::fs::write(&image_path, b"image bytes stay outside sidecar").unwrap();
+        std::fs::write(&table_path, b"polygon bytes stay outside sidecar").unwrap();
+        let index = SourceGalleryIndex::from_locations(
+            SourceLocator::from_location("inline-gallery"),
+            vec![
+                SourceLocator::from_location(&image_path.display().to_string()),
+                SourceLocator::from_location(&table_path.display().to_string()),
+            ],
+            16,
+        );
+        let mut graph = GraphDocument::sample();
+
+        let node_index = graph
+            .add_source_gallery_collection_node(&index.items)
+            .expect("non-empty collection should create source node");
+        let source_node = graph.nodes[node_index].source_node.as_ref().unwrap();
+        assert_eq!(source_node.entries.len(), 2);
+        assert_eq!(
+            source_node.entries[1].kind,
+            SourceGalleryItemKind::PolygonTable
+        );
+
+        let json = graph.to_sidecar_json().unwrap();
+        assert!(json.contains("polygons.geoparquet"));
+        assert!(!json.contains("image bytes stay outside sidecar"));
+        assert!(!json.contains("polygon bytes stay outside sidecar"));
+        assert!(!json.contains("thumbnail"));
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        let restored_source = restored
+            .nodes
+            .iter()
+            .find_map(|node| {
+                node.source_node
+                    .as_ref()
+                    .filter(|source| source.entries.len() == 2)
+            })
+            .expect("collection source should round trip");
+        assert_eq!(
+            restored_source.entries[0].locator.readable(),
+            image_path.display().to_string()
+        );
+        assert_eq!(
+            restored_source.entries[1].external_reference_status,
+            SourceExternalReferenceStatus::LocalAvailable
+        );
     }
 
     #[test]
