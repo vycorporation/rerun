@@ -2600,6 +2600,9 @@ impl HoudiniGraphPanel {
             "{} record(s), {} input(s), {} output(s)",
             info.record_count, info.input_count, info.output_count
         ));
+        if let Some(port_info) = graph.selected_node_port_info(self.selected_node) {
+            self.graph_workbench_node_ports_ui(ui, &port_info);
+        }
         ui.weak(format!(
             "Connections {} in, {} out",
             info.data_flow.incoming_edge_count, info.data_flow.outgoing_edge_count
@@ -2652,6 +2655,44 @@ impl HoudiniGraphPanel {
                 .show(ui, |ui| {
                     self.node_info_ui(ui, graph);
                 });
+        }
+    }
+
+    fn graph_workbench_node_ports_ui(&self, ui: &mut Ui, port_info: &self::model::NodePortInfo) {
+        egui::CollapsingHeader::new("Ports")
+            .default_open(true)
+            .show(ui, |ui| {
+                self.node_port_group_ui(ui, "Inputs", &port_info.inputs);
+                self.node_port_group_ui(ui, "Outputs", &port_info.outputs);
+            });
+    }
+
+    fn node_port_group_ui(&self, ui: &mut Ui, label: &str, ports: &[self::model::NodePortSummary]) {
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(label);
+            if ports.is_empty() {
+                ui.weak("none");
+            }
+        });
+        for port in ports {
+            ui.horizontal_wrapped(|ui| {
+                ui.monospace(&port.name);
+                ui.weak(port.data_kind.as_str());
+                ui.weak(if port.required {
+                    "required"
+                } else {
+                    "optional"
+                });
+                if port.primary_quick_wire {
+                    ui.label("quick-wire");
+                }
+            })
+            .response
+            .on_hover_text(if port.help.is_empty() {
+                "No port help text."
+            } else {
+                port.help.as_str()
+            });
         }
     }
 
