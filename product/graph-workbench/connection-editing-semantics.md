@@ -46,12 +46,11 @@ for the connection editing lane.
 | `#298` | complete | Typed node port inspection | Surfaces selected-node input/output port summaries from existing typed declarations while leaving primary quick-wire behavior unchanged. |
 | `#300` | complete | Multi-port hit testing and drawing | Draws stable per-port hit regions for typed ports while preserving primary quick-wire behavior. |
 | `#302` | complete | Multi-port drag-to-connect | Lets compatible non-primary typed ports connect through graph-owned edge validation. |
+| `#304` | complete | Connection routing-dot metadata | Persists graph-scoped routing dots as layout-only organization metadata separate from semantic data-flow edges. |
 
 ## Next implementation candidates
 
-1. Connection organization polish.
-   - Track connection routing-dot or bend-point work separately from semantic
-     data-flow edges so organization affordances do not change evaluation.
+No focused connection editing candidates remain in this tracker.
 
 ## Maintenance
 
