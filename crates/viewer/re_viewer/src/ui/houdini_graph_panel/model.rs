@@ -6301,6 +6301,15 @@ impl GraphDocument {
     }
 
     #[allow(dead_code)]
+    pub fn set_python_environment_project_trusted(&mut self, trusted: bool) -> bool {
+        if self.python_environment.project_trusted == trusted {
+            return false;
+        }
+        self.python_environment.project_trusted = trusted;
+        true
+    }
+
+    #[allow(dead_code)]
     pub fn configure_python_uv_executable_path(&mut self, path: impl Into<String>) {
         let path = path.into();
         self.python_environment.resolver.executable_path =
@@ -6709,9 +6718,14 @@ impl GraphDocument {
         {
             return PythonOperatorDependencyStatus::DeclarationMissing;
         }
-
         match self.python_environment.lock_status {
             PythonEnvironmentStatus::Missing => PythonOperatorDependencyStatus::MissingEnvironment,
+            PythonEnvironmentStatus::Disabled => {
+                PythonOperatorDependencyStatus::DisabledEnvironment
+            }
+            _ if !self.python_environment.project_trusted => {
+                PythonOperatorDependencyStatus::UntrustedEnvironment
+            }
             PythonEnvironmentStatus::Unlocked => PythonOperatorDependencyStatus::StaleEnvironment,
             PythonEnvironmentStatus::Resolving | PythonEnvironmentStatus::Locked => {
                 PythonOperatorDependencyStatus::ResolvingEnvironment
@@ -6725,9 +6739,6 @@ impl GraphDocument {
                 PythonOperatorDependencyStatus::FailedEnvironment
             }
             PythonEnvironmentStatus::Stale => PythonOperatorDependencyStatus::StaleEnvironment,
-            PythonEnvironmentStatus::Disabled => {
-                PythonOperatorDependencyStatus::DisabledEnvironment
-            }
         }
     }
 
@@ -14217,6 +14228,8 @@ pub(crate) enum PythonOperatorCapability {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct PythonEnvironmentDescriptor {
     pub environment_id: String,
+    #[serde(default)]
+    pub project_trusted: bool,
     pub python_version_requirement: String,
     pub requirements_source: PythonRequirementsSource,
     pub project_requirements: PythonProjectRequirements,
@@ -14236,6 +14249,7 @@ impl Default for PythonEnvironmentDescriptor {
     fn default() -> Self {
         Self {
             environment_id: "project-python".to_owned(),
+            project_trusted: false,
             python_version_requirement: ">=3.11,<3.13".to_owned(),
             requirements_source: PythonRequirementsSource::ProjectLocal,
             project_requirements: PythonProjectRequirements::default(),
@@ -14258,6 +14272,16 @@ impl Default for PythonEnvironmentDescriptor {
 
 impl PythonEnvironmentDescriptor {
     pub fn status_summary(&self) -> String {
+        if !self.project_trusted
+            && !matches!(
+                self.lock_status,
+                PythonEnvironmentStatus::Missing | PythonEnvironmentStatus::Disabled
+            )
+        {
+            return "Project Python requires trust before resolving or running operators."
+                .to_owned();
+        }
+
         match self.lock_status {
             PythonEnvironmentStatus::Missing => {
                 "Project Python environment is not configured.".to_owned()
@@ -15502,6 +15526,7 @@ pub(crate) struct NativeOperatorTrustPolicy {
 pub(crate) enum PythonOperatorDependencyStatus {
     DeclarationMissing,
     MissingEnvironment,
+    UntrustedEnvironment,
     ResolvingEnvironment,
     Ready,
     StaleEnvironment,
@@ -15514,6 +15539,7 @@ impl PythonOperatorDependencyStatus {
         match self {
             Self::DeclarationMissing => "Declaration missing",
             Self::MissingEnvironment => "Environment missing",
+            Self::UntrustedEnvironment => "Environment untrusted",
             Self::ResolvingEnvironment => "Environment resolving",
             Self::Ready => "Ready",
             Self::StaleEnvironment => "Environment stale",
@@ -15526,6 +15552,7 @@ impl PythonOperatorDependencyStatus {
         match self {
             Self::DeclarationMissing => "Python operator declaration is missing.",
             Self::MissingEnvironment => "Project Python environment is not configured.",
+            Self::UntrustedEnvironment => "Project Python must be trusted before execution.",
             Self::ResolvingEnvironment => {
                 "Project Python environment is resolving or locked but unverified."
             }
@@ -21398,6 +21425,19 @@ mod tests {
             .expect("python operator info should exist")
             .dependency_status;
         assert_eq!(missing, PythonOperatorDependencyStatus::MissingEnvironment);
+
+        graph.python_environment = sample_python_environment_descriptor();
+        graph.python_environment.project_trusted = false;
+        let untrusted = graph
+            .selected_node_info(node_index)
+            .expect("python node info should exist")
+            .python_operator
+            .expect("python operator info should exist")
+            .dependency_status;
+        assert_eq!(
+            untrusted,
+            PythonOperatorDependencyStatus::UntrustedEnvironment
+        );
 
         graph.python_environment = sample_python_environment_descriptor();
         graph
@@ -28016,6 +28056,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             restored.python_environment.lock_status,
             PythonEnvironmentStatus::Missing
         );
+        assert!(!restored.python_environment.project_trusted);
         assert_eq!(
             restored.python_environment.environment_path.as_deref(),
             Some(".houdini/python/envs/project-python")
@@ -28062,10 +28103,24 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             graph.python_environment.status_summary(),
             "Project Python environment is not configured."
         );
+        assert!(!graph.python_environment.project_trusted);
         assert_eq!(
             graph.python_environment.requirements_source,
             PythonRequirementsSource::ProjectLocal
         );
+    }
+
+    #[test]
+    fn python_environment_project_trust_round_trips_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        assert!(graph.set_python_environment_project_trusted(true));
+        assert!(!graph.set_python_environment_project_trusted(true));
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert!(restored.python_environment.project_trusted);
     }
 
     #[test]
@@ -28364,6 +28419,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
     fn sample_python_environment_descriptor() -> PythonEnvironmentDescriptor {
         PythonEnvironmentDescriptor {
             environment_id: "project-python".to_owned(),
+            project_trusted: true,
             python_version_requirement: ">=3.11,<3.13".to_owned(),
             requirements_source: PythonRequirementsSource::GeneratedFromOperators,
             project_requirements: PythonProjectRequirements {

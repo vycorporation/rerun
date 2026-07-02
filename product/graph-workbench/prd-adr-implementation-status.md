@@ -27,7 +27,7 @@ This ledger tracks how PRD/ADR material maps to issue-backed implementation in t
 | Graph source, typed nodes, filters, styles, layers, and output | complete | PRD ADRs plus implementation issues | `#19`, `#20`, `#21`, `#22`, `#23`, `#24`, `#25`, `#26`, `#56`, `#63` |
 | Demand-driven evaluation and work items | complete | `execution-work-items.md` | `#27`, `#84`, `#86` |
 | Native cubic and renderer-native preview path | partial | `specialized-renderer-path.md` | `#29`, `#36`, `#37`, `#38` |
-| Python operator and project environment lane | partial | `python-operator-surface.md`, `python-environment-status.md` | `#31`, `#32`, `#39`, `#40`, `#41`, `#42`, `#43`, `#44`, `#45`, `#46`, `#55` |
+| Python operator and project environment lane | partial | `python-operator-surface.md`, `python-environment-status.md` | `#31`, `#32`, `#39`, `#40`, `#41`, `#42`, `#43`, `#44`, `#45`, `#46`, `#55`, `#282` |
 | Native plugin operator lane | partial | `native-plugin-operator-lane.md` | `#34`, `#51`, `#52`, `#53`, `#54`, `#270`, `#272`, `#274`, `#276`, `#278`, `#280` |
 | Procedural asset interface | partial | `procedural-asset-interface.md` | `#33`, `#47`, `#48`, `#49`, `#50`, `#61`, `#152`, `#156`, `#158`, `#160`, `#162`, `#218`, `#220`, `#228`, `#232` |
 | Graph hierarchy and named graph registry | partial | `graph-hierarchy-tracker.md` | `#130`, `#131`, `#132`, `#142`, `#144`, `#146`, `#148`, `#164`, `#166`, `#168`, `#170`, `#172`, `#174`, `#176`, `#178`, `#216`, `#220`, `#222`, `#224`, `#226`, `#228`, `#230` |

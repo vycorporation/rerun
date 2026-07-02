@@ -33,6 +33,7 @@ const NETWORK_BOX_FAST_DRAG_PEAK_DELTA_PIXELS: f32 = 18.0;
 const NETWORK_DISPLAY_OPTIONS_ID: &str = "houdini_graph_network_display_options";
 const NATIVE_OPERATOR_PROJECT_TRUST_PROMPT_ID: &str =
     "houdini_native_operator_project_trust_prompt";
+const PYTHON_ENVIRONMENT_TRUST_PROMPT_ID: &str = "houdini_python_environment_trust_prompt";
 const SOURCE_GALLERY_INDEX_LIMIT: usize = 256;
 const DEFAULT_ASSET_NAME: &str = "Curve cleanup";
 const DEFAULT_ASSET_DESCRIPTION: &str = "Project-local graph asset.";
@@ -163,6 +164,7 @@ pub(crate) struct HoudiniGraphPanel {
     python_existing_environment_path: String,
     python_create_environment_path: String,
     pending_native_operator_project_trust: Option<PendingNativeOperatorProjectTrust>,
+    pending_python_environment_resolve_trust: bool,
 }
 
 impl Default for HoudiniGraphPanel {
@@ -236,6 +238,7 @@ impl Default for HoudiniGraphPanel {
             python_existing_environment_path: String::new(),
             python_create_environment_path: String::new(),
             pending_native_operator_project_trust: None,
+            pending_python_environment_resolve_trust: false,
         }
     }
 }
@@ -2910,6 +2913,14 @@ impl HoudiniGraphPanel {
                 ui.label(&environment.paths.create_environment_path);
                 ui.end_row();
 
+                ui.weak("Project trust");
+                ui.label(if environment.project_trusted {
+                    "trusted"
+                } else {
+                    "not trusted"
+                });
+                ui.end_row();
+
                 ui.weak("Packages");
                 ui.label(environment.dependency_health.package_count.to_string());
                 ui.end_row();
@@ -2994,9 +3005,13 @@ impl HoudiniGraphPanel {
                 .add_enabled(!resolving, egui::Button::new("Resolve with uv"))
                 .clicked()
             {
-                graph.begin_python_environment_resolve(
-                    PythonEnvironmentResolveTrigger::ExplicitUserAction,
-                );
+                if graph.python_environment.project_trusted {
+                    graph.begin_python_environment_resolve(
+                        PythonEnvironmentResolveTrigger::ExplicitUserAction,
+                    );
+                } else {
+                    self.pending_python_environment_resolve_trust = true;
+                }
             }
             if ui
                 .add_enabled(resolving, egui::Button::new("Cancel resolve"))
@@ -3005,6 +3020,61 @@ impl HoudiniGraphPanel {
                 graph.cancel_python_environment_resolve();
             }
         });
+        self.python_environment_trust_confirmation_ui(ui, graph);
+    }
+
+    fn python_environment_trust_confirmation_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        if !self.pending_python_environment_resolve_trust {
+            return;
+        }
+        if graph.python_environment.project_trusted {
+            self.pending_python_environment_resolve_trust = false;
+            return;
+        }
+
+        let mut open = true;
+        let mut close_prompt = false;
+        egui::Window::new("Project Python trust")
+            .id(egui::Id::new(PYTHON_ENVIRONMENT_TRUST_PROMPT_ID))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(360.0);
+                ui.strong("Trust project Python before resolving?");
+                ui.add_space(4.0);
+                ui.label(format!(
+                    "{} will resolve requirements into {}.",
+                    graph.python_environment.resolver.tool,
+                    graph
+                        .python_environment
+                        .environment_path
+                        .as_deref()
+                        .unwrap_or("the project Python environment")
+                ));
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Resolving can download and install trusted project code.",
+                );
+                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Trust and resolve").clicked() {
+                        graph.set_python_environment_project_trusted(true);
+                        graph.begin_python_environment_resolve(
+                            PythonEnvironmentResolveTrigger::ExplicitUserAction,
+                        );
+                        close_prompt = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close_prompt = true;
+                    }
+                });
+            });
+
+        if close_prompt || !open {
+            self.pending_python_environment_resolve_trust = false;
+        }
     }
 
     fn render_benchmark_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -6800,6 +6870,7 @@ fn python_operator_dependency_color(ui: &Ui, status: PythonOperatorDependencySta
         PythonOperatorDependencyStatus::DeclarationMissing
         | PythonOperatorDependencyStatus::FailedEnvironment => ui.visuals().error_fg_color,
         PythonOperatorDependencyStatus::MissingEnvironment
+        | PythonOperatorDependencyStatus::UntrustedEnvironment
         | PythonOperatorDependencyStatus::StaleEnvironment
         | PythonOperatorDependencyStatus::DisabledEnvironment => ui.visuals().warn_fg_color,
     }
