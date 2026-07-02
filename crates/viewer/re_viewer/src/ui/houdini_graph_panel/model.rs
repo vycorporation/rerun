@@ -8099,6 +8099,72 @@ impl GraphDocument {
         })
     }
 
+    pub fn save_source_package(
+        &self,
+        package_dir: impl AsRef<Path>,
+    ) -> anyhow::Result<SourcePackageWriteResult> {
+        self.save_source_package_with_choice(
+            package_dir,
+            SourcePackageManifestInclusionChoice::IncludeAvailable,
+        )
+    }
+
+    pub fn save_source_package_with_choice(
+        &self,
+        package_dir: impl AsRef<Path>,
+        choice: SourcePackageManifestInclusionChoice,
+    ) -> anyhow::Result<SourcePackageWriteResult> {
+        let package_dir = package_dir.as_ref();
+        std::fs::create_dir_all(package_dir)?;
+        let mut manifest = self
+            .source
+            .metadata
+            .package_manifest_preview_with_choice(choice);
+        let mut copied_artifact_count = 0;
+
+        for artifact in &mut manifest.artifacts {
+            if artifact.external_status != SourcePackageManifestExternalStatus::IncludedPendingWrite
+            {
+                continue;
+            }
+
+            let Some(bundled_path) = artifact.bundled_path.as_deref() else {
+                continue;
+            };
+            let destination = source_package_resolve_bundled_path(package_dir, bundled_path)?;
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&artifact.original_locator, &destination)?;
+            artifact.size_bytes = std::fs::metadata(&destination)
+                .ok()
+                .map(|metadata| metadata.len());
+            artifact.content_hash = Some(source_package_content_hash(&destination)?);
+            artifact.external_status = SourcePackageManifestExternalStatus::Included;
+            copied_artifact_count += 1;
+        }
+
+        if copied_artifact_count > 0 {
+            manifest
+                .reproducibility_warnings
+                .retain(|warning| !warning.contains("no content hash has been computed"));
+        }
+
+        let manifest_path = package_dir.join("houdini-source-package-manifest.json");
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+
+        Ok(SourcePackageWriteResult {
+            package_dir: package_dir.to_path_buf(),
+            manifest_path,
+            artifact_count: manifest.artifacts.len(),
+            copied_artifact_count,
+            expected_size_bytes: manifest.expected_size_bytes,
+            remaining_external_reference_count: manifest.remaining_external_reference_count,
+            missing_reference_count: manifest.missing_reference_count,
+            reproducibility_warning_count: manifest.reproducibility_warnings.len(),
+        })
+    }
+
     pub fn load_sidecar_json(&mut self, path: impl AsRef<Path>) -> anyhow::Result<()> {
         let json = std::fs::read_to_string(path)?;
         self.apply_sidecar_json(&json)
@@ -9833,6 +9899,18 @@ pub(crate) struct SourcePackageManifestWriteResult {
     pub reproducibility_warning_count: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourcePackageWriteResult {
+    pub package_dir: PathBuf,
+    pub manifest_path: PathBuf,
+    pub artifact_count: usize,
+    pub copied_artifact_count: usize,
+    pub expected_size_bytes: Option<u64>,
+    pub remaining_external_reference_count: usize,
+    pub missing_reference_count: usize,
+    pub reproducibility_warning_count: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct SourcePackageManifestArtifact {
     pub role: SourcePackageManifestArtifactRole,
@@ -9868,6 +9946,7 @@ impl SourcePackageManifestArtifactRole {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SourcePackageManifestExternalStatus {
     NotExternal,
+    Included,
     IncludedPendingWrite,
     ReferenceOnly,
     Missing,
@@ -9896,6 +9975,45 @@ fn source_package_manifest_bundled_path(locator: &str) -> String {
         "sources/{}",
         sanitize_package_manifest_path_component(file_name)
     )
+}
+
+fn source_package_resolve_bundled_path(
+    package_dir: &Path,
+    bundled_path: &str,
+) -> anyhow::Result<PathBuf> {
+    let relative = Path::new(bundled_path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        anyhow::bail!("source package bundled path must stay relative: {bundled_path}");
+    }
+    Ok(package_dir.join(relative))
+}
+
+fn source_package_content_hash(path: &Path) -> anyhow::Result<String> {
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = 0xcbf29ce484222325_u64;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        for byte in &buffer[..count] {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    Ok(format!("fnv1a64:{hash:016x}"))
 }
 
 fn sanitize_package_manifest_path_component(component: &str) -> String {
@@ -23948,6 +24066,150 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             SourcePackageManifestExternalStatus::ReferenceOnly
         );
         assert_eq!(written_manifest.artifacts[0].bundled_path, None);
+    }
+
+    #[test]
+    fn source_package_writer_copies_local_artifact_and_records_hash() {
+        let mut graph = GraphDocument::sample();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source_path = temp_dir.path().join("native cubic.parquet");
+        std::fs::write(&source_path, b"native cubic bytes").unwrap();
+        graph.source.metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(source_path.display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let package_dir = temp_dir.path().join("package");
+
+        let result = graph.save_source_package(&package_dir).unwrap();
+
+        assert_eq!(result.package_dir, package_dir);
+        assert_eq!(
+            result.manifest_path,
+            result
+                .package_dir
+                .join("houdini-source-package-manifest.json")
+        );
+        assert_eq!(result.artifact_count, 1);
+        assert_eq!(result.copied_artifact_count, 1);
+        assert_eq!(result.remaining_external_reference_count, 0);
+        assert_eq!(result.missing_reference_count, 0);
+        assert_eq!(result.reproducibility_warning_count, 0);
+
+        let written_json = std::fs::read_to_string(&result.manifest_path).unwrap();
+        let written_manifest: SourcePackageManifestPreview =
+            serde_json::from_str(&written_json).unwrap();
+        let artifact = &written_manifest.artifacts[0];
+        assert_eq!(
+            artifact.external_status,
+            SourcePackageManifestExternalStatus::Included
+        );
+        assert_eq!(artifact.size_bytes, Some("native cubic bytes".len() as u64));
+        assert!(
+            artifact
+                .content_hash
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("fnv1a64:"))
+        );
+        let copied_path = package_dir.join(
+            artifact
+                .bundled_path
+                .as_deref()
+                .expect("copied artifact should have bundled path"),
+        );
+        assert_eq!(
+            std::fs::read(copied_path).unwrap(),
+            b"native cubic bytes".to_vec()
+        );
+        assert!(
+            written_manifest
+                .reproducibility_warnings
+                .iter()
+                .all(|warning| !warning.contains("no content hash"))
+        );
+    }
+
+    #[test]
+    fn source_package_writer_honors_reference_only_without_copying() {
+        let mut graph = GraphDocument::sample();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source_path = temp_dir.path().join("native cubic.parquet");
+        std::fs::write(&source_path, b"native cubic bytes").unwrap();
+        graph.source.metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(source_path.display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let package_dir = temp_dir.path().join("reference-package");
+
+        let result = graph
+            .save_source_package_with_choice(
+                &package_dir,
+                SourcePackageManifestInclusionChoice::ReferenceOnly,
+            )
+            .unwrap();
+
+        assert_eq!(result.copied_artifact_count, 0);
+        assert_eq!(result.remaining_external_reference_count, 1);
+        assert!(!package_dir.join("sources").exists());
+        let written_json = std::fs::read_to_string(&result.manifest_path).unwrap();
+        let written_manifest: SourcePackageManifestPreview =
+            serde_json::from_str(&written_json).unwrap();
+        assert_eq!(
+            written_manifest.artifacts[0].external_status,
+            SourcePackageManifestExternalStatus::ReferenceOnly
+        );
+        assert_eq!(written_manifest.artifacts[0].bundled_path, None);
+        assert_eq!(written_manifest.artifacts[0].content_hash, None);
+    }
+
+    #[test]
+    fn source_package_writer_leaves_missing_artifacts_external() {
+        let mut graph = GraphDocument::sample();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing_path = temp_dir.path().join("missing-source.parquet");
+        graph.source.metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(missing_path.display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let package_dir = temp_dir.path().join("missing-package");
+
+        let result = graph.save_source_package(&package_dir).unwrap();
+
+        assert_eq!(result.copied_artifact_count, 0);
+        assert_eq!(result.missing_reference_count, 1);
+        assert!(!package_dir.join("sources").exists());
+        let written_json = std::fs::read_to_string(&result.manifest_path).unwrap();
+        let written_manifest: SourcePackageManifestPreview =
+            serde_json::from_str(&written_json).unwrap();
+        assert_eq!(
+            written_manifest.artifacts[0].external_status,
+            SourcePackageManifestExternalStatus::Missing
+        );
+        assert_eq!(written_manifest.artifacts[0].content_hash, None);
+    }
+
+    #[test]
+    fn source_package_writer_rejects_unsafe_bundled_paths() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        assert!(
+            super::source_package_resolve_bundled_path(temp_dir.path(), "../escape.parquet")
+                .is_err()
+        );
+        assert!(
+            super::source_package_resolve_bundled_path(temp_dir.path(), "/tmp/escape.parquet")
+                .is_err()
+        );
+        assert!(
+            super::source_package_resolve_bundled_path(temp_dir.path(), "sources/curves.parquet")
+                .unwrap()
+                .starts_with(temp_dir.path())
+        );
     }
 
     #[test]

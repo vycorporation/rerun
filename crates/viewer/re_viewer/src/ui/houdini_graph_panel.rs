@@ -3871,6 +3871,30 @@ impl HoudiniGraphPanel {
                         }
                     }
                 }
+
+                if ui.button("Save Source Package...").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .set_directory(".")
+                        .pick_folder()
+                {
+                    match graph.save_source_package(&path) {
+                        Ok(package) => {
+                            self.package_manifest_status = Some(format!(
+                                "Saved source package: {} ({} copied of {} artifacts, {} external references, {} missing, {} warnings).",
+                                package.package_dir.display(),
+                                package.copied_artifact_count,
+                                package.artifact_count,
+                                package.remaining_external_reference_count,
+                                package.missing_reference_count,
+                                package.reproducibility_warning_count
+                            ));
+                        }
+                        Err(err) => {
+                            self.package_manifest_status =
+                                Some(format!("Source package save failed: {err}"));
+                        }
+                    }
+                }
             });
         }
 
