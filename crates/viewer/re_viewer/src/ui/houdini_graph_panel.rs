@@ -4863,6 +4863,7 @@ impl HoudiniGraphPanel {
 
     fn source_metadata_ui(&self, ui: &mut Ui, metadata: &SourceMetadata, id_suffix: &'static str) {
         let external_reference = metadata.external_reference_report();
+        let bundle_preview = metadata.bundle_preview();
         egui::Grid::new(("houdini_graph_source_metadata", id_suffix))
             .num_columns(2)
             .spacing([12.0, 4.0])
@@ -4905,6 +4906,28 @@ impl HoudiniGraphPanel {
                 if let Some(warning) = &external_reference.warning {
                     ui.weak("Reference warning");
                     ui.colored_label(ui.visuals().warn_fg_color, warning);
+                    ui.end_row();
+                }
+
+                ui.weak("Bundle preview");
+                ui.label(bundle_preview.item.inclusion.as_str());
+                ui.end_row();
+
+                ui.weak("Bundle size");
+                ui.label(
+                    bundle_preview
+                        .expected_size_bytes
+                        .map(|size| format!("{size} bytes"))
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                );
+                ui.end_row();
+
+                if !bundle_preview.reproducibility_warnings.is_empty() {
+                    ui.weak("Bundle warning");
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format_list(&bundle_preview.reproducibility_warnings),
+                    );
                     ui.end_row();
                 }
 
