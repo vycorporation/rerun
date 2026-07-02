@@ -4038,6 +4038,7 @@ impl GraphDocument {
             native_operator.provenance_summary = None;
             native_operator.last_valid_cache_key = None;
             native_operator.last_failure_summary = None;
+            native_operator.last_failure_diagnostic = None;
         }
 
         let insert_index = (node_index + 1).min(self.nodes.len());
@@ -5964,9 +5965,40 @@ impl GraphDocument {
             native_operator.provenance_summary = Some(record.summary());
             native_operator.last_valid_cache_key = Some(cache_key.key_digest);
             native_operator.last_failure_summary = None;
+            native_operator.last_failure_diagnostic = None;
         }
 
         Some(record)
+    }
+
+    #[allow(dead_code)]
+    pub fn record_native_operator_failure(
+        &mut self,
+        node_index: usize,
+        status: NativeOperatorLoadStatus,
+        summary: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> bool {
+        if status == NativeOperatorLoadStatus::Ready {
+            return false;
+        }
+
+        let Some(node) = self.nodes.get_mut(node_index) else {
+            return false;
+        };
+        let Some(native_operator) = node.native_operator.as_mut() else {
+            return false;
+        };
+
+        let diagnostic =
+            NativeOperatorFailureDiagnostic::new(status, summary.into(), detail.into());
+        let summary = diagnostic.summary.clone();
+        node.evaluation.state = EvaluationState::Failed;
+        node.evaluation.message = Some(summary.clone());
+        native_operator.last_failure_summary = Some(summary.clone());
+        native_operator.last_failure_diagnostic = Some(diagnostic);
+        self.record_work_item(node_index, GraphWorkItemStatus::Failed, summary);
+        true
     }
 
     #[allow(dead_code)]
@@ -7652,6 +7684,14 @@ impl GraphDocument {
                 let load_status = self.native_operator_load_status(
                     declaration.map(|declaration| declaration.operator_id.as_str()),
                 );
+                let failure_diagnostic = native_node
+                    .last_failure_diagnostic
+                    .as_ref()
+                    .filter(|_| load_status == NativeOperatorLoadStatus::Ready)
+                    .filter(|_| node.evaluation.state == EvaluationState::Failed);
+                let effective_load_status = failure_diagnostic
+                    .map(|diagnostic| diagnostic.status)
+                    .unwrap_or(load_status);
                 let missing_capability_grants = declaration
                     .map(|declaration| self.missing_native_operator_capability_grants(declaration))
                     .unwrap_or_default();
@@ -7674,6 +7714,9 @@ impl GraphDocument {
                         warnings.push(load_status.summary().to_owned());
                     }
                 }
+                if let Some(diagnostic) = failure_diagnostic {
+                    warnings.push(diagnostic.warning());
+                }
                 NodeInfo {
                     kind: node.kind,
                     role: node.kind.role(),
@@ -7681,7 +7724,7 @@ impl GraphDocument {
                     data_flow: data_flow.clone(),
                     input_count: declaration.map_or(0, |declaration| declaration.inputs.len()),
                     output_count: declaration.map_or(0, |declaration| declaration.outputs.len()),
-                    status: native_operator_node_status(version_status, load_status),
+                    status: native_operator_node_status(version_status, effective_load_status),
                     data_kind: "Trusted native operator",
                     record_count: self.visible_output_count(),
                     bounds: self.output_bounds(),
@@ -7781,9 +7824,10 @@ impl GraphDocument {
                             })
                             .unwrap_or_default(),
                         version_status,
-                        load_status,
+                        load_status: effective_load_status,
                         last_valid_cache_key: native_node.last_valid_cache_key.clone(),
                         last_failure_summary: native_node.last_failure_summary.clone(),
+                        last_failure_diagnostic: native_node.last_failure_diagnostic.clone(),
                     }),
                 }
             }
@@ -12103,6 +12147,7 @@ impl GraphNode {
                 provenance_summary: None,
                 last_valid_cache_key: None,
                 last_failure_summary: None,
+                last_failure_diagnostic: None,
             }),
             evaluation: NodeEvaluation::clean(),
             participates_in_output: true,
@@ -12743,6 +12788,8 @@ pub(crate) struct NativeOperatorNode {
     pub provenance_summary: Option<String>,
     pub last_valid_cache_key: Option<String>,
     pub last_failure_summary: Option<String>,
+    #[serde(default)]
+    pub last_failure_diagnostic: Option<NativeOperatorFailureDiagnostic>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -15307,6 +15354,7 @@ pub(crate) struct NativeOperatorNodeInfo {
     pub load_status: NativeOperatorLoadStatus,
     pub last_valid_cache_key: Option<String>,
     pub last_failure_summary: Option<String>,
+    pub last_failure_diagnostic: Option<NativeOperatorFailureDiagnostic>,
 }
 
 pub(crate) struct NativeOperatorCapabilityGrantInfo {
@@ -15315,7 +15363,7 @@ pub(crate) struct NativeOperatorCapabilityGrantInfo {
     pub granted: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum NativeOperatorLoadStatus {
     DeclarationMissing,
     TrustRequired,
@@ -15373,6 +15421,50 @@ impl NativeOperatorLoadStatus {
             }
         }
     }
+}
+
+const NATIVE_OPERATOR_FAILURE_DETAIL_CHAR_LIMIT: usize = 1200;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct NativeOperatorFailureDiagnostic {
+    pub status: NativeOperatorLoadStatus,
+    pub summary: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+impl NativeOperatorFailureDiagnostic {
+    fn new(status: NativeOperatorLoadStatus, summary: String, detail: String) -> Self {
+        let summary = bounded_native_operator_diagnostic_text(&summary, 240);
+        let detail = bounded_native_operator_diagnostic_text(
+            &detail,
+            NATIVE_OPERATOR_FAILURE_DETAIL_CHAR_LIMIT,
+        );
+        Self {
+            status,
+            summary,
+            detail: (!detail.is_empty()).then_some(detail),
+        }
+    }
+
+    pub fn warning(&self) -> String {
+        if let Some(detail) = &self.detail {
+            format!("{}: {}", self.summary, detail)
+        } else {
+            self.summary.clone()
+        }
+    }
+}
+
+fn bounded_native_operator_diagnostic_text(value: &str, char_limit: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= char_limit {
+        return trimmed.to_owned();
+    }
+
+    let mut bounded = trimmed.chars().take(char_limit).collect::<String>();
+    bounded.push_str("...");
+    bounded
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -26949,6 +27041,144 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             Some("native-cache:ok")
         );
         assert_eq!(native.last_failure_summary, None);
+    }
+
+    #[test]
+    fn native_operator_failure_diagnostic_surfaces_bounded_detail() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        trust_sample_native_operator(&mut graph);
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        graph
+            .record_native_operator_output(
+                node_index,
+                NativeOperatorOutputCounts {
+                    geometry_records: 2,
+                    attribute_records: 0,
+                    layer_records: 0,
+                },
+            )
+            .expect("native output should record before failure");
+
+        let detail = format!("stderr tail: {}", "x".repeat(1400));
+        assert!(graph.record_native_operator_failure(
+            node_index,
+            NativeOperatorLoadStatus::RuntimeFailed,
+            "native simplify crashed while preserving cubic records",
+            detail
+        ));
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist");
+        assert_eq!(info.status, NodeStatus::Failed);
+        assert!(info.warnings.iter().any(|warning| {
+            warning.contains("native simplify crashed") && warning.contains("stderr tail")
+        }));
+
+        let native = info.native_operator.expect("native info should exist");
+        assert_eq!(native.load_status, NativeOperatorLoadStatus::RuntimeFailed);
+        assert_eq!(
+            native.last_valid_cache_key.as_deref(),
+            graph.nodes[node_index]
+                .native_operator
+                .as_ref()
+                .and_then(|node| node.cache_key.as_ref())
+                .map(|key| key.key_digest.as_str())
+        );
+        let diagnostic = native
+            .last_failure_diagnostic
+            .expect("failure diagnostic should be preserved");
+        assert_eq!(diagnostic.status, NativeOperatorLoadStatus::RuntimeFailed);
+        assert_eq!(
+            diagnostic.summary,
+            "native simplify crashed while preserving cubic records"
+        );
+        assert!(
+            diagnostic
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.ends_with("...") && detail.len() <= 1203)
+        );
+    }
+
+    #[test]
+    fn native_operator_failure_diagnostic_round_trips_in_sidecar() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        trust_sample_native_operator(&mut graph);
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        assert!(graph.record_native_operator_failure(
+            node_index,
+            NativeOperatorLoadStatus::OutputSchemaMismatch,
+            "native output columns did not match declaration",
+            "missing geometry column; previous cache remains inspectable"
+        ));
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        let native = restored
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::NativeOperator)
+            .and_then(|node| node.native_operator.as_ref())
+            .expect("native node should restore");
+        let diagnostic = native
+            .last_failure_diagnostic
+            .as_ref()
+            .expect("failure diagnostic should restore");
+        assert_eq!(
+            diagnostic.status,
+            NativeOperatorLoadStatus::OutputSchemaMismatch
+        );
+        assert_eq!(
+            diagnostic.detail.as_deref(),
+            Some("missing geometry column; previous cache remains inspectable")
+        );
+    }
+
+    #[test]
+    fn native_operator_readiness_blockers_override_stale_failure_diagnostic() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        graph.native_operator_trust.project_trusted = true;
+        graph.native_operator_trust.granted_capabilities =
+            sample_native_operator_declaration().capabilities;
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        assert!(graph.record_native_operator_failure(
+            node_index,
+            NativeOperatorLoadStatus::RuntimeFailed,
+            "previous native runtime failure",
+            "old stderr tail"
+        ));
+
+        graph.native_operator_trust.project_trusted = false;
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist");
+        let native = info.native_operator.expect("native info should exist");
+
+        assert_eq!(info.status, NodeStatus::Warning);
+        assert_eq!(native.load_status, NativeOperatorLoadStatus::TrustRequired);
+        assert!(
+            info.warnings
+                .iter()
+                .any(|warning| warning.contains("Project trust"))
+        );
+        assert!(
+            !info
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("old stderr tail"))
+        );
     }
 
     #[test]
