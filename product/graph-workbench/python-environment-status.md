@@ -109,3 +109,7 @@ Do not build a package manager UI beyond the status and repair surface needed fo
 2. #46 - Add graph panel and node inspector status surfaces for environment health.
 3. #43 - Prototype uv lock/resolve as an explicit trusted project action.
 4. #44 - Connect ready/stale/failed environment state to Python operator evaluation blocking.
+5. #282 - Complete: record explicit project Python trust in the environment
+   descriptor and confirm trust before starting the existing uv resolve
+   lifecycle from the workbench; untrusted configured environments block Python
+   operator readiness until explicitly trusted.
