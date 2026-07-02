@@ -150,6 +150,7 @@ pub(crate) struct HoudiniGraphPanel {
     source_gallery_manifest_json: String,
     source_gallery_filter: String,
     source_gallery_selected_id: Option<String>,
+    source_gallery_checked_ids: Vec<String>,
     source_gallery_index: Option<SourceGalleryIndex>,
     source_gallery_status: Option<String>,
     python_uv_executable_path: String,
@@ -218,6 +219,7 @@ impl Default for HoudiniGraphPanel {
             source_gallery_manifest_json: String::new(),
             source_gallery_filter: String::new(),
             source_gallery_selected_id: None,
+            source_gallery_checked_ids: Vec::new(),
             source_gallery_index: None,
             source_gallery_status: None,
             python_uv_executable_path: String::new(),
@@ -3325,7 +3327,7 @@ impl HoudiniGraphPanel {
     fn source_gallery_ui(
         &mut self,
         ui: &mut Ui,
-        _graph: &mut GraphDocument,
+        graph: &mut GraphDocument,
         viewer_ctx: Option<&ViewerContext<'_>>,
     ) {
         ui.strong("Source Gallery");
@@ -3360,6 +3362,7 @@ impl HoudiniGraphPanel {
             if ui.button("Clear").clicked() {
                 self.source_gallery_index = None;
                 self.source_gallery_selected_id = None;
+                self.source_gallery_checked_ids.clear();
                 self.source_gallery_status = None;
             }
             if let Some(status) = &self.source_gallery_status {
@@ -3377,7 +3380,7 @@ impl HoudiniGraphPanel {
         });
         ui.add_space(6.0);
 
-        let Some(index) = self.source_gallery_index.as_ref() else {
+        let Some(index) = self.source_gallery_index.clone() else {
             ui.weak("No source gallery indexed.");
             return;
         };
@@ -3386,7 +3389,7 @@ impl HoudiniGraphPanel {
             ui.weak(warning);
         }
 
-        let filtered_items = source_gallery_filtered_items(index, &self.source_gallery_filter)
+        let filtered_items = source_gallery_filtered_items(&index, &self.source_gallery_filter)
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
@@ -3423,6 +3426,13 @@ impl HoudiniGraphPanel {
                             {
                                 self.source_gallery_selected_id = Some(item.stable_id.clone());
                             }
+                            let mut checked = self
+                                .source_gallery_checked_ids
+                                .iter()
+                                .any(|id| id == &item.stable_id);
+                            if ui.checkbox(&mut checked, "Collection").changed() {
+                                self.set_source_gallery_item_checked(&item.stable_id, checked);
+                            }
                             ui.label(&item.display_name);
                             ui.weak(source_gallery_tile_detail(item));
                         },
@@ -3437,10 +3447,19 @@ impl HoudiniGraphPanel {
             .source_gallery_selected_id
             .as_deref()
             .or_else(|| filtered_items.first().map(|item| item.stable_id.as_str()));
-        if let Some(selected_item) = source_gallery_selected_item(index, selected_id) {
+        if let Some(selected_item) = source_gallery_selected_item(&index, selected_id) {
             let selected_item = selected_item.clone();
+            let checked_items = filtered_items
+                .iter()
+                .filter(|item| {
+                    self.source_gallery_checked_ids
+                        .iter()
+                        .any(|id| id == &item.stable_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             ui.add_space(8.0);
-            self.source_gallery_actions_ui(ui, &selected_item, viewer_ctx);
+            self.source_gallery_actions_ui(ui, graph, &selected_item, &checked_items, viewer_ctx);
             ui.add_space(4.0);
             self.source_gallery_metadata_ui(ui, &selected_item);
         }
@@ -3449,7 +3468,9 @@ impl HoudiniGraphPanel {
     fn source_gallery_actions_ui(
         &mut self,
         ui: &mut Ui,
+        graph: &mut GraphDocument,
         item: &SourceGalleryItem,
+        checked_items: &[SourceGalleryItem],
         viewer_ctx: Option<&ViewerContext<'_>>,
     ) {
         let action = item.open_action_report();
@@ -3463,6 +3484,50 @@ impl HoudiniGraphPanel {
             }
             ui.weak(&action.status);
         });
+        ui.horizontal(|ui| {
+            if ui.button("Create Source Node").clicked() {
+                let node_index = graph.add_source_gallery_item_node(item);
+                self.selected_node = node_index;
+                self.selected_nodes = vec![node_index];
+                self.source_gallery_status =
+                    Some(format!("Created source node for {}.", item.display_name));
+            }
+
+            let collection_enabled = checked_items.len() >= 2;
+            if ui
+                .add_enabled(
+                    collection_enabled,
+                    egui::Button::new("Create Source Collection"),
+                )
+                .on_hover_text("Create a graph-owned source collection from checked gallery items.")
+                .clicked()
+                && let Some(node_index) = graph.add_source_gallery_collection_node(checked_items)
+            {
+                self.selected_node = node_index;
+                self.selected_nodes = vec![node_index];
+                self.source_gallery_status = Some(format!(
+                    "Created source collection with {} item(s).",
+                    checked_items.len()
+                ));
+            }
+            if !collection_enabled {
+                ui.weak("Check at least two gallery items for a collection.");
+            }
+        });
+    }
+
+    fn set_source_gallery_item_checked(&mut self, stable_id: &str, checked: bool) {
+        if checked {
+            if !self
+                .source_gallery_checked_ids
+                .iter()
+                .any(|id| id == stable_id)
+            {
+                self.source_gallery_checked_ids.push(stable_id.to_owned());
+            }
+        } else {
+            self.source_gallery_checked_ids.retain(|id| id != stable_id);
+        }
     }
 
     fn execute_source_gallery_open_action(

@@ -46,7 +46,7 @@ for the dataset/source breadth lane.
 | `#246` | complete | Source gallery thumbnail intents | Distinguishes image thumbnail intents from generic typed thumbnails for tables, polygon tables, recordings, point clouds, manifests, missing entries, unknown sources, and runtime-only thumbnail cache state. |
 | `#247` | complete | Source Gallery workbench view | Registers a movable Gallery workbench view that presents source entry controls, manifest input, filtered thumbnail tiles, selection, and selected-item metadata. |
 | `#248` | complete | Source-gallery open-in-Rerun actions | Adds explicit selected-item actions that route image and recording sources through Rerun's native file/URL loader while leaving missing, live, generated, manifest, and unsupported data sources disabled with explanatory status. |
-| `#249` | planned | Source-gallery source-node actions | Add explicit graph-owned source node and source collection node creation actions from selected gallery entries. |
+| `#249` | complete | Source-gallery source-node actions | Adds explicit selected-entry and checked-entry actions that create graph-owned source nodes or source collections with durable locator metadata, undo/redo support, and sidecar persistence without embedding source contents or thumbnails. |
 
 ## Next implementation candidates
 
