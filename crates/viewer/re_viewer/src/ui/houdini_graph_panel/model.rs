@@ -7115,8 +7115,22 @@ impl GraphDocument {
         &self,
         path: impl AsRef<Path>,
     ) -> anyhow::Result<SourcePackageManifestWriteResult> {
+        self.save_source_package_manifest_with_choice(
+            path,
+            SourcePackageManifestInclusionChoice::Default,
+        )
+    }
+
+    pub fn save_source_package_manifest_with_choice(
+        &self,
+        path: impl AsRef<Path>,
+        choice: SourcePackageManifestInclusionChoice,
+    ) -> anyhow::Result<SourcePackageManifestWriteResult> {
         let path = path.as_ref();
-        let manifest = self.source.metadata.package_manifest_preview();
+        let manifest = self
+            .source
+            .metadata
+            .package_manifest_preview_with_choice(choice);
         std::fs::write(path, serde_json::to_string_pretty(&manifest)?)?;
 
         Ok(SourcePackageManifestWriteResult {
@@ -7667,6 +7681,17 @@ impl SourceMetadata {
         SourcePackageManifestPreview::from_source_metadata(self, self.bundle_preview())
     }
 
+    pub fn package_manifest_preview_with_choice(
+        &self,
+        choice: SourcePackageManifestInclusionChoice,
+    ) -> SourcePackageManifestPreview {
+        SourcePackageManifestPreview::from_source_metadata_with_choice(
+            self,
+            self.bundle_preview(),
+            choice,
+        )
+    }
+
     pub fn source_format_inference_report(&self) -> SourceFormatInferenceReport {
         SourceFormatInferenceReport::from_metadata(self)
     }
@@ -8108,35 +8133,84 @@ impl SourcePackageManifestPreview {
         metadata: &SourceMetadata,
         bundle_preview: SourceBundlePreview,
     ) -> Self {
+        Self::from_source_metadata_with_choice(
+            metadata,
+            bundle_preview,
+            SourcePackageManifestInclusionChoice::Default,
+        )
+    }
+
+    fn from_source_metadata_with_choice(
+        metadata: &SourceMetadata,
+        bundle_preview: SourceBundlePreview,
+        choice: SourcePackageManifestInclusionChoice,
+    ) -> Self {
+        let original_inclusion = bundle_preview.item.inclusion;
+        let inclusion = choice.apply_to_bundle_inclusion(original_inclusion);
+        let artifact_size_bytes = bundle_preview.item.expected_size_bytes;
+        let expected_size_bytes = if inclusion == SourceBundleInclusion::IncludeAvailable {
+            artifact_size_bytes
+        } else {
+            None
+        };
+        let remaining_external_reference_count =
+            usize::from(inclusion == SourceBundleInclusion::ReferenceOnly);
+        let missing_reference_count = usize::from(inclusion == SourceBundleInclusion::Missing);
+        let mut reproducibility_warnings = bundle_preview.reproducibility_warnings;
+        if original_inclusion == SourceBundleInclusion::IncludeAvailable
+            && inclusion == SourceBundleInclusion::ReferenceOnly
+        {
+            reproducibility_warnings.push(format!(
+                "Local source `{}` was left external by explicit package/export choice.",
+                bundle_preview.item.locator
+            ));
+        }
+
         let artifact = SourcePackageManifestArtifact {
-            role: SourcePackageManifestArtifactRole::from_bundle_inclusion(
-                bundle_preview.item.inclusion,
-            ),
+            role: SourcePackageManifestArtifactRole::from_bundle_inclusion(inclusion),
             original_locator: bundle_preview.item.locator.clone(),
-            bundled_path: if bundle_preview.item.inclusion
-                == SourceBundleInclusion::IncludeAvailable
-            {
+            bundled_path: if inclusion == SourceBundleInclusion::IncludeAvailable {
                 Some(source_package_manifest_bundled_path(
                     &bundle_preview.item.locator,
                 ))
             } else {
                 None
             },
-            size_bytes: bundle_preview.item.expected_size_bytes,
+            size_bytes: artifact_size_bytes,
             content_hash: None,
             source_provenance: metadata.provenance,
-            external_status: SourcePackageManifestExternalStatus::from_bundle_inclusion(
-                bundle_preview.item.inclusion,
-            ),
+            external_status: SourcePackageManifestExternalStatus::from_bundle_inclusion(inclusion),
         };
 
         Self {
             schema_version: Self::SCHEMA_VERSION,
             artifacts: vec![artifact],
-            expected_size_bytes: bundle_preview.expected_size_bytes,
-            remaining_external_reference_count: bundle_preview.remaining_external_reference_count,
-            missing_reference_count: bundle_preview.missing_reference_count,
-            reproducibility_warnings: bundle_preview.reproducibility_warnings,
+            expected_size_bytes,
+            remaining_external_reference_count,
+            missing_reference_count,
+            reproducibility_warnings,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SourcePackageManifestInclusionChoice {
+    #[default]
+    Default,
+    IncludeAvailable,
+    ReferenceOnly,
+}
+
+impl SourcePackageManifestInclusionChoice {
+    fn apply_to_bundle_inclusion(self, inclusion: SourceBundleInclusion) -> SourceBundleInclusion {
+        match (self, inclusion) {
+            (Self::ReferenceOnly, SourceBundleInclusion::IncludeAvailable) => {
+                SourceBundleInclusion::ReferenceOnly
+            }
+            (Self::IncludeAvailable, SourceBundleInclusion::IncludeAvailable) => {
+                SourceBundleInclusion::IncludeAvailable
+            }
+            _ => inclusion,
         }
     }
 }
@@ -13402,9 +13476,9 @@ mod tests {
         SourceExternalReferenceActionKind, SourceExternalReferenceStatus,
         SourceFormatInferenceStatus, SourceFormatKind, SourceFormatSupportStatus,
         SourceLocatorKind, SourcePackageManifestArtifactRole, SourcePackageManifestExternalStatus,
-        SourcePackageManifestPreview, SourceProvenance, SubstrateCoordinateContract,
-        SubstrateOrigin, SubstrateYAxis, ViewerGeometry, load_cubic_bezier_parquet,
-        load_cubic_bezier_parquet_with_metadata,
+        SourcePackageManifestInclusionChoice, SourcePackageManifestPreview, SourceProvenance,
+        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
+        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -20909,6 +20983,95 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .is_some_and(|path| path.starts_with("sources/native_cubic"))
         );
         assert_eq!(written_manifest.artifacts[0].content_hash, None);
+    }
+
+    #[test]
+    fn source_package_manifest_inclusion_choice_can_leave_local_source_external() {
+        let graph = GraphDocument::sample();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source_path = temp_dir.path().join("native cubic.parquet");
+        std::fs::write(&source_path, b"native cubic bytes").unwrap();
+        let metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(source_path.display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+
+        let reference_only = metadata.package_manifest_preview_with_choice(
+            SourcePackageManifestInclusionChoice::ReferenceOnly,
+        );
+
+        assert_eq!(reference_only.expected_size_bytes, None);
+        assert_eq!(reference_only.remaining_external_reference_count, 1);
+        assert_eq!(reference_only.missing_reference_count, 0);
+        assert_eq!(
+            reference_only.artifacts[0].external_status,
+            SourcePackageManifestExternalStatus::ReferenceOnly
+        );
+        assert_eq!(reference_only.artifacts[0].bundled_path, None);
+        assert_eq!(
+            reference_only.artifacts[0].size_bytes,
+            Some("native cubic bytes".len() as u64)
+        );
+        assert!(
+            reference_only
+                .reproducibility_warnings
+                .iter()
+                .any(|warning| warning.contains("explicit package/export choice"))
+        );
+
+        let missing_path = temp_dir.path().join("missing-source.parquet");
+        let missing_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(missing_path.display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let missing_include = missing_metadata.package_manifest_preview_with_choice(
+            SourcePackageManifestInclusionChoice::IncludeAvailable,
+        );
+        assert_eq!(
+            missing_include.artifacts[0].external_status,
+            SourcePackageManifestExternalStatus::Missing
+        );
+        assert_eq!(missing_include.missing_reference_count, 1);
+    }
+
+    #[test]
+    fn source_package_manifest_writer_honors_reference_only_choice_without_copying() {
+        let mut graph = GraphDocument::sample();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source_path = temp_dir.path().join("native cubic.parquet");
+        std::fs::write(&source_path, b"native cubic bytes").unwrap();
+        graph.source.metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(source_path.display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+
+        let manifest_path = temp_dir.path().join("reference-only-source-manifest.json");
+        let result = graph
+            .save_source_package_manifest_with_choice(
+                &manifest_path,
+                SourcePackageManifestInclusionChoice::ReferenceOnly,
+            )
+            .unwrap();
+
+        assert_eq!(result.expected_size_bytes, None);
+        assert_eq!(result.remaining_external_reference_count, 1);
+        assert_eq!(result.missing_reference_count, 0);
+        assert!(!temp_dir.path().join("sources").exists());
+
+        let written_json = std::fs::read_to_string(&manifest_path).unwrap();
+        let written_manifest: SourcePackageManifestPreview =
+            serde_json::from_str(&written_json).unwrap();
+        assert_eq!(
+            written_manifest.artifacts[0].external_status,
+            SourcePackageManifestExternalStatus::ReferenceOnly
+        );
+        assert_eq!(written_manifest.artifacts[0].bundled_path, None);
     }
 
     #[test]
