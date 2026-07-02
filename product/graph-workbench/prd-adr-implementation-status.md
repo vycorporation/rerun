@@ -21,7 +21,7 @@ This ledger tracks how PRD/ADR material maps to issue-backed implementation in t
 
 ## Issue-backed lanes
 
-| Lane | Status | Tracker | Closed issues |
+| Lane | Status | Tracker | Issues |
 | --- | --- | --- | --- |
 | Rerun-native spike foundation | complete | `rerun-native-spike-decision.md` | `#1`, `#2`, `#3`, `#4`, `#5`, `#6`, `#7`, `#8`, `#9`, `#10`, `#11`, `#12`, `#13`, `#14`, `#15`, `#16`, `#28`, `#30` |
 | Graph source, typed nodes, filters, styles, layers, and output | complete | PRD ADRs plus implementation issues | `#19`, `#20`, `#21`, `#22`, `#23`, `#24`, `#25`, `#26`, `#56`, `#63` |
@@ -38,6 +38,7 @@ This ledger tracks how PRD/ADR material maps to issue-backed implementation in t
 | Node duplication and deletion | complete for ordinary single-node duplicate/delete | `node-duplication.md`, command-history tracker | `#92`, `#108`, `#113` |
 | Connection editing semantics | partial | this ledger until a focused tracker is added | `#136`, `#137`, `#138`, `#180`, `#182`, `#184`, `#186`, `#188`, `#190`, `#192`, `#194` |
 | Dataset/source breadth and external artifact references | partial | `dataset-source-breadth-tracker.md`, `source-gallery-view-prd.md` | `#196`, `#198`, `#200`, `#202`, `#204`, `#206`, `#208`, `#210`, `#212`, `#214`, `#244`, `#245`, `#246`, `#247`, `#248`, `#249` |
+| Minimal graph-backed viewport editing | partial | `viewport-editing-tracker.md` | planned: `#256`, `#257`, `#258` |
 | Malware byteplot starter workflow | complete for current starter graph and raster output slice | `malware-byteplot-workflow.md` | `#75`, `#79` |
 | Project command history | complete through the current command-history batch | `project-command-history.md` | `#88`, `#96`, `#98`, `#100`, `#102`, `#104`, `#106`, `#108`, `#110`, `#111`, `#112`, `#113`, `#114`, `#120`, `#121`, `#122`, `#123` |
 | PRD/ADR implementation status tracking | complete for the initial status ledger | `prd-adr-implementation-status.md` | `#128` |
@@ -83,7 +84,16 @@ issue-backed implementation slices next.
 
 5. Minimal graph-backed viewport editing.
    - Source ADRs: `0029`, `0047`, `0050`.
-   - First likely slices: transient viewport selection mapped to graph records, manual edit/source-edit node skeleton, and read-only table-to-selection interactions.
+   - Issue-backed slices: `#256` transient viewport selection identity bridge,
+     `#257` commit transient selections as graph-backed subset nodes, and `#258`
+     read-only table-to-selection interactions.
+   - Manual edit/source-edit skeletons and direct drawing tools are deferred
+     until the selection identity bridge and committed subset behavior have been
+     validated.
+   - Viewport work should prefer graph-model, workbench, blueprint, and existing
+     selection/table seams over broad edits to Rerun core viewport or renderer
+     internals, so the product fork can keep updating from upstream with low
+     conflict risk.
 
 6. Renderer specialization beyond the current line draw-data preview.
    - Source ADRs: `0020`, `0021`, `0055`, `0067`.
