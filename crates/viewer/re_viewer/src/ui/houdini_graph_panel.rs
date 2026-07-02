@@ -236,6 +236,14 @@ struct NodePortHit {
     kind: NodePortKind,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ConnectionDragPreview {
+    Floating,
+    NonInput,
+    Valid,
+    Invalid(String),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OperatorPaletteAction {
     AddOutNull,
@@ -3610,7 +3618,14 @@ impl HoudiniGraphPanel {
             let start =
                 node_primary_port_rect(*from_rect, NodePortKind::Output, self.graph_view_zoom)
                     .center();
-            let stroke = Stroke::new(2.0, ui.visuals().selection.stroke.color);
+            let preview = connection_drag_preview(
+                graph,
+                &node_rects,
+                connection_drag,
+                pointer_pos,
+                self.graph_view_zoom,
+            );
+            let stroke = Stroke::new(2.0, connection_drag_preview_color(&preview, ui.visuals()));
             painter.line_segment([start, pointer_pos], stroke);
             draw_arrowhead(&painter, pointer_pos, stroke.color);
         }
@@ -5859,6 +5874,47 @@ fn node_primary_port_at(
         })
 }
 
+fn connection_drag_preview(
+    graph: &GraphDocument,
+    node_rects: &[Rect],
+    connection_drag: &ConnectionDragState,
+    pointer_pos: Pos2,
+    zoom: f32,
+) -> ConnectionDragPreview {
+    let Some(port_hit) = node_primary_port_at(graph, node_rects, pointer_pos, zoom) else {
+        return ConnectionDragPreview::Floating;
+    };
+    if port_hit.kind != NodePortKind::Input {
+        return ConnectionDragPreview::NonInput;
+    }
+    let Some(target_node) = graph.nodes.get(port_hit.node_index) else {
+        return ConnectionDragPreview::Invalid("Connection target disappeared.".to_owned());
+    };
+
+    match graph.preview_add_data_flow_edge(
+        &connection_drag.from_node_id,
+        &connection_drag.from_output,
+        &target_node.node_id,
+        PRIMARY_GEOMETRY_OUTPUT,
+    ) {
+        Ok(_) => ConnectionDragPreview::Valid,
+        Err(diagnostic) => ConnectionDragPreview::Invalid(diagnostic.message),
+    }
+}
+
+fn connection_drag_preview_color(
+    preview: &ConnectionDragPreview,
+    visuals: &egui::Visuals,
+) -> Color32 {
+    match preview {
+        ConnectionDragPreview::Valid => visuals.selection.stroke.color,
+        ConnectionDragPreview::Invalid(_) => visuals.warn_fg_color,
+        ConnectionDragPreview::Floating | ConnectionDragPreview::NonInput => {
+            visuals.weak_text_color()
+        }
+    }
+}
+
 fn draw_node_primary_ports(
     painter: &egui::Painter,
     node_rect: Rect,
@@ -6213,12 +6269,13 @@ fn draw_arrowhead(painter: &egui::Painter, tip: Pos2, color: Color32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        GraphSearchTarget, HoudiniGraphPanel, NodePortKind, distance_to_segment, graph_edge_at,
+        ConnectionDragPreview, ConnectionDragState, GraphSearchTarget, HoudiniGraphPanel,
+        NodePortKind, connection_drag_preview, distance_to_segment, graph_edge_at,
         layout_node_rects,
         model::{ProjectGraphMetadata, ProjectGraphRole},
         node_primary_port_at, node_primary_port_rect,
     };
-    use crate::ui::houdini_graph_panel::model::GraphDocument;
+    use crate::ui::houdini_graph_panel::model::{GraphDocument, PRIMARY_GEOMETRY_OUTPUT};
 
     #[test]
     fn distance_to_segment_clamps_to_nearest_endpoint_or_segment() {
@@ -6305,6 +6362,69 @@ mod tests {
         assert_eq!(
             node_primary_port_at(&graph, &node_rects, output_output.center(), 1.0),
             None
+        );
+    }
+
+    #[test]
+    fn connection_drag_preview_reports_valid_and_invalid_targets() {
+        let graph = GraphDocument::sample();
+        let node_size = egui::vec2(116.0, 48.0);
+        let node_rects = vec![
+            egui::Rect::from_min_size(egui::pos2(20.0, 20.0), node_size),
+            egui::Rect::from_min_size(egui::pos2(180.0, 20.0), node_size),
+            egui::Rect::from_min_size(egui::pos2(340.0, 20.0), node_size),
+            egui::Rect::from_min_size(egui::pos2(500.0, 20.0), node_size),
+        ];
+        let source_drag = ConnectionDragState {
+            from_node_index: 0,
+            from_node_id: graph.nodes[0].node_id.clone(),
+            from_output: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+        };
+
+        let output_input = node_primary_port_rect(node_rects[3], NodePortKind::Input, 1.0);
+        assert_eq!(
+            connection_drag_preview(
+                &graph,
+                &node_rects,
+                &source_drag,
+                output_input.center(),
+                1.0
+            ),
+            ConnectionDragPreview::Valid
+        );
+
+        let filter_input = node_primary_port_rect(node_rects[1], NodePortKind::Input, 1.0);
+        assert_eq!(
+            connection_drag_preview(
+                &graph,
+                &node_rects,
+                &source_drag,
+                filter_input.center(),
+                1.0
+            ),
+            ConnectionDragPreview::Invalid("Connection already exists.".to_owned())
+        );
+
+        let source_output = node_primary_port_rect(node_rects[0], NodePortKind::Output, 1.0);
+        assert_eq!(
+            connection_drag_preview(
+                &graph,
+                &node_rects,
+                &source_drag,
+                source_output.center(),
+                1.0,
+            ),
+            ConnectionDragPreview::NonInput
+        );
+        assert_eq!(
+            connection_drag_preview(
+                &graph,
+                &node_rects,
+                &source_drag,
+                egui::pos2(8.0, 210.0),
+                1.0,
+            ),
+            ConnectionDragPreview::Floating
         );
     }
 
