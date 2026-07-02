@@ -8022,7 +8022,9 @@ impl GraphDocument {
     pub fn update_source_from_query_bridge(&mut self, query_bridge: &RerunQueryBridge) {
         if matches!(
             self.source.metadata.provenance,
-            SourceProvenance::ParquetImport | SourceProvenance::CsvImport
+            SourceProvenance::ParquetImport
+                | SourceProvenance::CsvImport
+                | SourceProvenance::GeoJsonImport
         ) {
             return;
         }
@@ -8068,6 +8070,32 @@ impl GraphDocument {
     pub fn import_polygon_csv_path(&mut self, path: impl AsRef<Path>) -> anyhow::Result<usize> {
         let path = path.as_ref();
         match load_polygon_csv_with_metadata(path) {
+            Ok(load) => {
+                let count = load.records.len();
+                self.source = GraphSource::recording_import(
+                    count,
+                    Some(path.display().to_string()),
+                    load.metadata,
+                );
+                self.recording_geometry = load
+                    .records
+                    .into_iter()
+                    .map(|record| record.geometry)
+                    .collect();
+                self.substrate_raster = None;
+                self.update_source_node_readiness();
+                Ok(count)
+            }
+            Err(err) => {
+                self.source = self.source.clone().with_import_error(path, &err);
+                Err(err)
+            }
+        }
+    }
+
+    pub fn import_geojson_polygon_path(&mut self, path: impl AsRef<Path>) -> anyhow::Result<usize> {
+        let path = path.as_ref();
+        match load_geojson_polygons_with_metadata(path) {
             Ok(load) => {
                 let count = load.records.len();
                 self.source = GraphSource::recording_import(
@@ -8599,6 +8627,157 @@ fn split_delimited_row(row: &str, delimiter: char) -> Vec<String> {
         .collect()
 }
 
+pub(crate) struct HoudiniGeoJsonLoad {
+    pub records: Vec<HoudiniGeometryRecord>,
+    pub metadata: SourceMetadata,
+}
+
+pub(crate) fn load_geojson_polygons_with_metadata(
+    path: impl AsRef<Path>,
+) -> anyhow::Result<HoudiniGeoJsonLoad> {
+    let path = path.as_ref();
+    let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    let mut records = Vec::new();
+    append_geojson_value(&value, 1.0, &mut records)?;
+
+    if records.is_empty() {
+        anyhow::bail!("GeoJSON source did not contain any polygon records.");
+    }
+
+    let geometry = records
+        .iter()
+        .map(|record| record.geometry.clone())
+        .collect::<Vec<_>>();
+    let metadata = SourceMetadata::from_geometry(
+        SourceProvenance::GeoJsonImport,
+        Some(path.display().to_string()),
+        &geometry,
+        vec![
+            "geometry.type".to_owned(),
+            "geometry.coordinates".to_owned(),
+        ],
+    );
+
+    Ok(HoudiniGeoJsonLoad { records, metadata })
+}
+
+fn append_geojson_value(
+    value: &serde_json::Value,
+    inherited_score: f32,
+    records: &mut Vec<HoudiniGeometryRecord>,
+) -> anyhow::Result<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("GeoJSON value must be an object."))?;
+    let value_type = object
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("GeoJSON object is missing a string `type`."))?;
+
+    match value_type {
+        "FeatureCollection" => {
+            let features = object
+                .get("features")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("GeoJSON FeatureCollection requires a `features` array.")
+                })?;
+            for feature in features {
+                append_geojson_value(feature, inherited_score, records)?;
+            }
+        }
+        "Feature" => {
+            let score = object
+                .get("properties")
+                .and_then(|properties| properties.get("score"))
+                .and_then(serde_json::Value::as_f64)
+                .map(|score| score as f32)
+                .unwrap_or(inherited_score);
+            let geometry = object
+                .get("geometry")
+                .ok_or_else(|| anyhow::anyhow!("GeoJSON Feature requires a `geometry` object."))?;
+            append_geojson_value(geometry, score, records)?;
+        }
+        "Polygon" => {
+            let coordinates = object.get("coordinates").ok_or_else(|| {
+                anyhow::anyhow!("GeoJSON Polygon requires a `coordinates` array.")
+            })?;
+            let points = geojson_polygon_points(coordinates)?;
+            let Some(record) =
+                HoudiniGeometryRecord::polygon(LayerKind::Polygons, points, inherited_score)
+            else {
+                anyhow::bail!(
+                    "GeoJSON Polygon exterior ring must contain at least three vertices."
+                );
+            };
+            records.push(record);
+        }
+        "MultiPolygon" => {
+            let polygons = object
+                .get("coordinates")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("GeoJSON MultiPolygon requires a `coordinates` array.")
+                })?;
+            for polygon in polygons {
+                let points = geojson_polygon_points(polygon)?;
+                let Some(record) =
+                    HoudiniGeometryRecord::polygon(LayerKind::Polygons, points, inherited_score)
+                else {
+                    anyhow::bail!(
+                        "GeoJSON MultiPolygon exterior ring must contain at least three vertices."
+                    );
+                };
+                records.push(record);
+            }
+        }
+        unsupported => {
+            anyhow::bail!("Unsupported GeoJSON geometry type `{unsupported}` for polygon import.");
+        }
+    }
+
+    Ok(())
+}
+
+fn geojson_polygon_points(coordinates: &serde_json::Value) -> anyhow::Result<Vec<GraphPoint>> {
+    let rings = coordinates.as_array().ok_or_else(|| {
+        anyhow::anyhow!("GeoJSON Polygon coordinates must be an array of linear rings.")
+    })?;
+    let exterior = rings
+        .first()
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("GeoJSON Polygon requires an exterior linear ring."))?;
+
+    let mut points = exterior
+        .iter()
+        .enumerate()
+        .map(|(index, coordinate)| geojson_position(coordinate, index))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if points.len() >= 2
+        && let (Some(first), Some(last)) = (points.first(), points.last())
+        && (first.x - last.x).abs() <= f32::EPSILON
+        && (first.y - last.y).abs() <= f32::EPSILON
+    {
+        points.pop();
+    }
+    Ok(points)
+}
+
+fn geojson_position(coordinate: &serde_json::Value, index: usize) -> anyhow::Result<GraphPoint> {
+    let values = coordinate.as_array().ok_or_else(|| {
+        anyhow::anyhow!("GeoJSON coordinate {index} must be a numeric position array.")
+    })?;
+    let x = values
+        .first()
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| anyhow::anyhow!("GeoJSON coordinate {index} is missing numeric x."))?;
+    let y = values
+        .get(1)
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| anyhow::anyhow!("GeoJSON coordinate {index} is missing numeric y."))?;
+    Ok(GraphPoint::new(x as f32, y as f32))
+}
+
 fn append_cubic_bezier_batch(
     batch: RecordBatch,
     records: &mut Vec<HoudiniGeometryRecord>,
@@ -8926,6 +9105,7 @@ impl SourceLocator {
             SourceProvenance::PythonOperator => Self::generated("python operator output"),
             SourceProvenance::ParquetImport => Self::generated("parquet import"),
             SourceProvenance::CsvImport => Self::generated("csv coordinate import"),
+            SourceProvenance::GeoJsonImport => Self::generated("geojson import"),
         }
     }
 
@@ -10400,9 +10580,10 @@ fn source_format_capabilities() -> Vec<SourceFormatCapability> {
         },
         SourceFormatCapability {
             kind: Kind::GeoJson,
-            status: Status::PlannedV1,
+            status: Status::Supported,
             geometry_kinds: vec![HoudiniGeometryKind::Polygon],
-            notes: "Planned v1 source format for polygon-heavy exploration workflows.".to_owned(),
+            notes: "Supports GeoJSON Polygon and MultiPolygon records without CRS transforms."
+                .to_owned(),
         },
         SourceFormatCapability {
             kind: Kind::FlatGeobuf,
@@ -10460,6 +10641,7 @@ pub(crate) enum SourceProvenance {
     DemoFallback,
     ParquetImport,
     CsvImport,
+    GeoJsonImport,
     RecordingQuery,
     SyntheticBenchmark,
     SyntheticMalware,
@@ -10472,6 +10654,7 @@ impl SourceProvenance {
             Self::DemoFallback => "demo fallback",
             Self::ParquetImport => "parquet import",
             Self::CsvImport => "csv coordinate import",
+            Self::GeoJsonImport => "geojson import",
             Self::RecordingQuery => "recording query",
             Self::SyntheticBenchmark => "synthetic benchmark",
             Self::SyntheticMalware => "synthetic malware",
@@ -15689,7 +15872,8 @@ mod tests {
         SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
         TransientViewportRecordTarget, TransientViewportSelection,
         TransientViewportSelectionStatus, ViewerGeometry, load_cubic_bezier_parquet,
-        load_cubic_bezier_parquet_with_metadata, load_polygon_csv_with_metadata,
+        load_cubic_bezier_parquet_with_metadata, load_geojson_polygons_with_metadata,
+        load_polygon_csv_with_metadata,
     };
     use std::sync::Arc;
 
@@ -23335,6 +23519,155 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
     }
 
     #[test]
+    fn geojson_loader_builds_polygon_record_from_bare_geometry() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let geojson_path = temp_dir.path().join("polygon.geojson");
+        std::fs::write(
+            &geojson_path,
+            r#"{
+                "type": "Polygon",
+                "coordinates": [[[0, 0], [2, 0], [2, 1], [0, 0]]]
+            }"#,
+        )
+        .unwrap();
+
+        let load = load_geojson_polygons_with_metadata(&geojson_path).unwrap();
+
+        assert_eq!(load.records.len(), 1);
+        assert_eq!(load.metadata.provenance, SourceProvenance::GeoJsonImport);
+        assert_eq!(load.metadata.record_count, 1);
+        assert_eq!(load.metadata.polygon_count, 1);
+        assert_eq!(
+            load.metadata.recognized_control_point_columns,
+            vec!["geometry.type", "geometry.coordinates"]
+        );
+        let Geometry::Polygon(polygon) = load.records[0].geometry.clone() else {
+            panic!("expected polygon record");
+        };
+        assert_eq!(polygon.points.len(), 3);
+        assert_eq!(polygon.points[0], GraphPoint::new(0.0, 0.0));
+        assert_eq!(polygon.points[2], GraphPoint::new(2.0, 1.0));
+        assert_eq!(polygon.score, 1.0);
+    }
+
+    #[test]
+    fn geojson_loader_builds_multipolygon_records_with_feature_score() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let geojson_path = temp_dir.path().join("features.geojson");
+        std::fs::write(
+            &geojson_path,
+            r#"{
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {"score": 0.42},
+                    "geometry": {
+                        "type": "MultiPolygon",
+                        "coordinates": [
+                            [[[0, 0], [1, 0], [0, 1], [0, 0]]],
+                            [[[2, 2], [3, 2], [2, 3], [2, 2]]]
+                        ]
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let load = load_geojson_polygons_with_metadata(&geojson_path).unwrap();
+
+        assert_eq!(load.records.len(), 2);
+        for record in &load.records {
+            let Geometry::Polygon(polygon) = record.geometry.clone() else {
+                panic!("expected polygon record");
+            };
+            assert_eq!(polygon.points.len(), 3);
+            assert_eq!(polygon.score, 0.42);
+        }
+    }
+
+    #[test]
+    fn geojson_loader_rejects_unsupported_geometry_and_malformed_coordinates() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let point_path = temp_dir.path().join("point.geojson");
+        std::fs::write(&point_path, r#"{"type":"Point","coordinates":[0,0]}"#).unwrap();
+        let point_err = match load_geojson_polygons_with_metadata(&point_path) {
+            Ok(_) => panic!("point geometry should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            point_err
+                .to_string()
+                .contains("Unsupported GeoJSON geometry type")
+        );
+
+        let malformed_path = temp_dir.path().join("malformed.geojson");
+        std::fs::write(
+            &malformed_path,
+            r#"{"type":"Polygon","coordinates":[[["bad", 0], [1, 0], [0, 1]]]}"#,
+        )
+        .unwrap();
+        let malformed_err = match load_geojson_polygons_with_metadata(&malformed_path) {
+            Ok(_) => panic!("malformed coordinate should fail"),
+            Err(err) => err,
+        };
+        assert!(malformed_err.to_string().contains("missing numeric x"));
+    }
+
+    #[test]
+    fn graph_document_can_import_geojson_polygon_path_without_query_bridge() {
+        let mut graph = GraphDocument::sample();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let geojson_path = temp_dir.path().join("polygon.geojson");
+        std::fs::write(
+            &geojson_path,
+            r#"{"type":"Polygon","coordinates":[[[0,0],[1,0],[0,1],[0,0]]]}"#,
+        )
+        .unwrap();
+
+        let imported = graph.import_geojson_polygon_path(&geojson_path).unwrap();
+
+        assert_eq!(imported, 1);
+        assert_eq!(graph.source.mode, super::GraphSourceMode::RecordingQuery);
+        assert_eq!(graph.source.matching_entity_count, 1);
+        assert_eq!(
+            graph.source.metadata.provenance,
+            SourceProvenance::GeoJsonImport
+        );
+        assert_eq!(graph.source.metadata.record_count, 1);
+        assert_eq!(graph.source.metadata.polygon_count, 1);
+        assert!(graph.source.metadata.bounds.is_some());
+        assert_eq!(graph.visible_output_count(), 1);
+    }
+
+    #[test]
+    fn failed_geojson_import_preserves_current_source_geometry() {
+        let mut graph = GraphDocument::sample();
+        let previous_visible_count = graph.visible_output_count();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let geojson_path = temp_dir.path().join("bad.geojson");
+        std::fs::write(&geojson_path, r#"{"type":"LineString","coordinates":[]}"#).unwrap();
+
+        let err = graph
+            .import_geojson_polygon_path(&geojson_path)
+            .expect_err("unsupported GeoJSON should fail import");
+
+        assert!(
+            err.to_string()
+                .contains("Unsupported GeoJSON geometry type")
+        );
+        assert_eq!(graph.visible_output_count(), previous_visible_count);
+        assert_eq!(
+            graph.source.metadata.provenance,
+            SourceProvenance::DemoFallback
+        );
+        assert!(graph.source.import_error.is_some());
+        assert_eq!(
+            graph.source.source_path,
+            Some(geojson_path.display().to_string())
+        );
+    }
+
+    #[test]
     fn checked_in_sample_parquet_loads_native_cubic_beziers() {
         let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("data/houdini_cubic_sample.parquet");
@@ -24609,13 +24942,16 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(csv.geometry_kinds, vec![HoudiniGeometryKind::Polygon]);
         assert!(csv.notes.contains("x0,y0,x1,y1,x2,y2"));
 
+        let geojson = capabilities
+            .iter()
+            .find(|capability| capability.kind == SourceFormatKind::GeoJson)
+            .expect("GeoJSON capability should be present");
+        assert_eq!(geojson.status, SourceFormatSupportStatus::Supported);
+        assert_eq!(geojson.geometry_kinds, vec![HoudiniGeometryKind::Polygon]);
+        assert!(geojson.notes.contains("Polygon"));
+
         let planned =
             graph.source_format_capabilities_with_status(SourceFormatSupportStatus::PlannedV1);
-        assert!(
-            planned
-                .iter()
-                .any(|capability| capability.kind == SourceFormatKind::GeoJson)
-        );
         assert!(
             planned
                 .iter()
@@ -24670,7 +25006,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             (
                 "https://example.test/features.geojson#latest",
                 SourceFormatKind::GeoJson,
-                SourceFormatSupportStatus::PlannedV1,
+                SourceFormatSupportStatus::Supported,
             ),
             (
                 "/tmp/features.fgb",

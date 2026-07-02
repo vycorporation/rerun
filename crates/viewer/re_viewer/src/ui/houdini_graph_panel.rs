@@ -2789,6 +2789,15 @@ impl HoudiniGraphPanel {
             {
                 self.import_csv_path(graph, path);
             }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if ui.button("Import GeoJSON...").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("GeoJSON", &["geojson", "json"])
+                    .pick_file()
+            {
+                self.import_geojson_path(graph, path);
+            }
         });
         if let Some(path) = &self.last_parquet_path {
             ui.weak(path);
@@ -4198,6 +4207,24 @@ impl HoudiniGraphPanel {
             Err(err) => {
                 self.last_parquet_path = Some(path.display().to_string());
                 self.parquet_status = Some(format!("CSV import failed: {err}"));
+            }
+        }
+    }
+
+    fn import_geojson_path(
+        &mut self,
+        graph: &mut GraphDocument,
+        path: impl AsRef<std::path::Path>,
+    ) {
+        let path = path.as_ref();
+        match graph.import_geojson_polygon_path(path) {
+            Ok(imported) => {
+                self.last_parquet_path = Some(path.display().to_string());
+                self.parquet_status = Some(format!("Imported {imported} GeoJSON polygon records"));
+            }
+            Err(err) => {
+                self.last_parquet_path = Some(path.display().to_string());
+                self.parquet_status = Some(format!("GeoJSON import failed: {err}"));
             }
         }
     }

@@ -49,6 +49,7 @@ for the dataset/source breadth lane.
 | `#249` | complete | Source-gallery source-node actions | Adds explicit selected-entry and checked-entry actions that create graph-owned source nodes or source collections with durable locator metadata, undo/redo support, and sidecar persistence without embedding source contents or thumbnails. |
 | `#262` | complete | Source package writes with copied local artifacts and hashes | Adds an explicit native package write action that creates a package directory, copies eligible local source artifacts to manifest-owned relative paths, records deterministic content hashes, and leaves missing, remote, generated, live, and reference-only artifacts external with diagnostics. |
 | `#264` | complete | Polygon coordinate CSV import | Adds a graph-owned CSV/TSV import path for headered polygon coordinate rows, updates source metadata/capability reporting, and preserves the current source geometry when malformed coordinate files fail to load. |
+| `#266` | complete | GeoJSON polygon import | Adds a graph-owned GeoJSON import path for Polygon and MultiPolygon records, updates source metadata/capability reporting, and preserves the current source geometry when unsupported or malformed GeoJSON fails to load. |
 
 ## Next implementation candidates
 
@@ -80,6 +81,8 @@ for the dataset/source breadth lane.
    - Add one parser family at a time.
    - `#264` adds the first CSV/TSV polygon coordinate parser for explicit
      `x0,y0,x1,y1,x2,y2` style coordinate columns.
+   - `#266` adds GeoJSON Polygon and MultiPolygon import without CRS transforms
+     or GIS editing scope.
    - Keep source records and prepared representations inspectable.
    - Avoid GIS/CRS expansion unless a source-specific issue explicitly reopens
      that product scope.
