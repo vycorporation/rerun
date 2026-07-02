@@ -7711,6 +7711,28 @@ impl GraphDocument {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        project_trusted: self.native_operator_trust.project_trusted,
+                        operator_enabled: self
+                            .native_operator_trust
+                            .enabled_operator_ids
+                            .iter()
+                            .any(|operator_id| operator_id == &native_node.operator_id),
+                        capability_grants: declaration
+                            .map(|declaration| {
+                                declaration
+                                    .capabilities
+                                    .iter()
+                                    .map(|capability| NativeOperatorCapabilityGrantInfo {
+                                        capability: *capability,
+                                        label: format!("{capability:?}"),
+                                        granted: self
+                                            .native_operator_trust
+                                            .granted_capabilities
+                                            .contains(capability),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                         provenance_summary: declaration
                             .map(|declaration| declaration.provenance.summary())
                             .unwrap_or_else(|| "none".to_owned()),
@@ -15243,6 +15265,9 @@ pub(crate) struct NativeOperatorNodeInfo {
     pub outputs: Vec<String>,
     pub parameters: Vec<String>,
     pub capabilities: Vec<String>,
+    pub project_trusted: bool,
+    pub operator_enabled: bool,
+    pub capability_grants: Vec<NativeOperatorCapabilityGrantInfo>,
     pub provenance_summary: String,
     pub output_provenance_summary: Option<String>,
     pub cache_key_summary: Option<String>,
@@ -15251,6 +15276,12 @@ pub(crate) struct NativeOperatorNodeInfo {
     pub load_status: NativeOperatorLoadStatus,
     pub last_valid_cache_key: Option<String>,
     pub last_failure_summary: Option<String>,
+}
+
+pub(crate) struct NativeOperatorCapabilityGrantInfo {
+    pub capability: NativeOperatorCapability,
+    pub label: String,
+    pub granted: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15287,7 +15318,7 @@ impl NativeOperatorLoadStatus {
         }
     }
 
-    fn summary(self) -> &'static str {
+    pub fn summary(self) -> &'static str {
         match self {
             Self::DeclarationMissing => "Native operator declaration is missing.",
             Self::TrustRequired => {
@@ -27170,6 +27201,59 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         );
         assert!(restored.command_history.undo_stack.is_empty());
         assert!(restored.command_history.redo_stack.is_empty());
+    }
+
+    #[test]
+    fn native_operator_trust_info_reports_inspector_control_state() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+
+        let initial = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist")
+            .native_operator
+            .expect("native info should exist");
+        assert!(!initial.project_trusted);
+        assert!(!initial.operator_enabled);
+        assert_eq!(initial.capability_grants.len(), 2);
+        assert!(initial.capability_grants.iter().all(|grant| !grant.granted));
+
+        assert!(graph.set_native_operator_project_trusted(true));
+        assert!(graph.set_native_operator_enabled("vy.native.simplify_curves", true));
+        assert!(
+            graph
+                .set_native_operator_capability_grant(NativeOperatorCapability::GeometryRead, true)
+        );
+
+        let trusted = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist")
+            .native_operator
+            .expect("native info should exist");
+        assert!(trusted.project_trusted);
+        assert!(trusted.operator_enabled);
+        assert!(
+            trusted
+                .capability_grants
+                .iter()
+                .any(
+                    |grant| grant.capability == NativeOperatorCapability::GeometryRead
+                        && grant.label == "GeometryRead"
+                        && grant.granted
+                )
+        );
+        assert!(
+            trusted
+                .capability_grants
+                .iter()
+                .any(
+                    |grant| grant.capability == NativeOperatorCapability::GeometryWrite
+                        && !grant.granted
+                )
+        );
     }
 
     #[test]

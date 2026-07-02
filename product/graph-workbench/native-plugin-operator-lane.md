@@ -99,3 +99,6 @@ Deferring these surfaces keeps the product fork focused on graph-visible dataflo
 5. #270 - Complete: add model-owned native operator trust controls for project
    trust, per-operator enablement, and capability grants with undo/redo and
    cache-status refresh.
+6. #272 - Complete: expose native operator trust controls in the inspector,
+   routing project trust, operator enablement, and capability grants through the
+   graph-owned model commands without loading native code.

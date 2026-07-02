@@ -1423,7 +1423,7 @@ impl HoudiniGraphPanel {
         self.selected_node_flags_ui(ui, graph, &info);
         self.selected_node_evaluation_ui(ui, graph, &info);
         self.selected_node_comment_ui(ui, graph);
-        self.selected_node_operator_settings_ui(ui, &info);
+        self.selected_node_operator_settings_ui(ui, graph, &info);
     }
 
     fn project_command_history_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -1878,7 +1878,12 @@ impl HoudiniGraphPanel {
             });
     }
 
-    fn selected_node_operator_settings_ui(&mut self, ui: &mut Ui, info: &self::model::NodeInfo) {
+    fn selected_node_operator_settings_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        info: &self::model::NodeInfo,
+    ) {
         egui::CollapsingHeader::new("Operator")
             .id_salt("houdini_graph_parms_operator")
             .default_open(true)
@@ -2089,6 +2094,7 @@ impl HoudiniGraphPanel {
                     if let Some(failure) = &native_operator.last_failure_summary {
                         ui.colored_label(ui.visuals().error_fg_color, failure);
                     }
+                    self.native_operator_trust_controls_ui(ui, graph, native_operator);
                 }
 
                 if !rendered {
@@ -5619,7 +5625,7 @@ impl HoudiniGraphPanel {
         self.graph_view_zoom = new_zoom;
     }
 
-    fn node_info_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) {
+    fn node_info_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         if let Some(info) = graph.selected_node_info(self.selected_node) {
             egui::Grid::new("houdini_graph_node_info")
                 .num_columns(2)
@@ -6184,6 +6190,9 @@ impl HoudiniGraphPanel {
                         }
                     }
                 });
+            if let Some(native_operator) = &info.native_operator {
+                self.native_operator_trust_controls_ui(ui, graph, native_operator);
+            }
             ui.label(info.summary);
             if let Some(python_operator) = &info.python_operator {
                 ui.weak(&python_operator.dependency_summary);
@@ -6200,6 +6209,51 @@ impl HoudiniGraphPanel {
             if let Some(source_metadata) = &info.source_metadata {
                 self.source_metadata_ui(ui, source_metadata, "node_info");
             }
+        }
+    }
+
+    fn native_operator_trust_controls_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+        native_operator: &self::model::NativeOperatorNodeInfo,
+    ) {
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            let mut project_trusted = native_operator.project_trusted;
+            if ui
+                .re_checkbox(&mut project_trusted, "Trust native operators")
+                .changed()
+            {
+                graph.set_native_operator_project_trusted(project_trusted);
+            }
+
+            let mut operator_enabled = native_operator.operator_enabled;
+            if ui
+                .re_checkbox(&mut operator_enabled, "Enable this operator")
+                .changed()
+            {
+                graph.set_native_operator_enabled(&native_operator.operator_id, operator_enabled);
+            }
+        });
+
+        if !native_operator.capability_grants.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("Capability grants");
+                for grant in &native_operator.capability_grants {
+                    let mut granted = grant.granted;
+                    if ui.re_checkbox(&mut granted, &grant.label).changed() {
+                        graph.set_native_operator_capability_grant(grant.capability, granted);
+                    }
+                }
+            });
+        }
+
+        if native_operator.load_status != NativeOperatorLoadStatus::Ready {
+            ui.colored_label(
+                native_operator_load_status_color(ui, native_operator.load_status),
+                native_operator.load_status.summary(),
+            );
         }
     }
 
