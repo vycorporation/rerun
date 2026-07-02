@@ -3062,6 +3062,43 @@ impl GraphDocument {
                     true
                 }
             },
+            ProjectCommand::NodesDuplicate { duplicated_nodes } => match direction {
+                ProjectCommandDirection::Undo => {
+                    let mut remove_indices = Vec::with_capacity(duplicated_nodes.len());
+                    for duplicate in duplicated_nodes {
+                        let Some(node_index) = self
+                            .nodes
+                            .iter()
+                            .position(|node| node.node_id == duplicate.duplicated_node.node_id)
+                        else {
+                            return false;
+                        };
+                        remove_indices.push(node_index);
+                    }
+                    remove_indices.sort_unstable_by(|left, right| right.cmp(left));
+                    for node_index in remove_indices {
+                        self.nodes.remove(node_index);
+                    }
+                    true
+                }
+                ProjectCommandDirection::Redo => {
+                    if duplicated_nodes.iter().any(|duplicate| {
+                        self.nodes
+                            .iter()
+                            .any(|node| node.node_id == duplicate.duplicated_node.node_id)
+                    }) {
+                        return false;
+                    }
+                    let mut duplicates = duplicated_nodes.clone();
+                    duplicates.sort_by_key(|duplicate| duplicate.insert_index);
+                    for duplicate in duplicates {
+                        let insert_index = duplicate.insert_index.min(self.nodes.len());
+                        self.nodes
+                            .insert(insert_index, (*duplicate.duplicated_node).clone());
+                    }
+                    true
+                }
+            },
             ProjectCommand::SourceNodeCreate {
                 source_node,
                 insert_index,
@@ -3998,7 +4035,10 @@ impl GraphDocument {
         })
     }
 
-    pub fn duplicate_node(&mut self, node_index: usize) -> Option<usize> {
+    fn duplicate_node_without_history(
+        &mut self,
+        node_index: usize,
+    ) -> Option<NodeDuplicateCommandSnapshot> {
         let source = self.nodes.get(node_index)?;
         let source_node_id = source.node_id.clone();
         let source_name = source.name.clone();
@@ -4044,14 +4084,63 @@ impl GraphDocument {
         let insert_index = (node_index + 1).min(self.nodes.len());
         let duplicated_node = node.clone();
         self.nodes.insert(insert_index, node);
-        self.rebuild_default_data_flow_edges();
-        self.record_project_command(ProjectCommand::NodeDuplicate {
+        Some(NodeDuplicateCommandSnapshot {
             source_node_id,
             source_node_name: source_name,
             duplicated_node: Box::new(duplicated_node),
             insert_index,
+        })
+    }
+
+    pub fn duplicate_node(&mut self, node_index: usize) -> Option<usize> {
+        let duplicate = self.duplicate_node_without_history(node_index)?;
+        let insert_index = duplicate.insert_index;
+        self.rebuild_default_data_flow_edges();
+        self.record_project_command(ProjectCommand::NodeDuplicate {
+            source_node_id: duplicate.source_node_id,
+            source_node_name: duplicate.source_node_name,
+            duplicated_node: duplicate.duplicated_node,
+            insert_index,
         });
         Some(insert_index)
+    }
+
+    pub fn duplicate_node_set(&mut self, node_indices: &[usize]) -> Vec<usize> {
+        let original_node_count = self.nodes.len();
+        let mut source_indices = node_indices
+            .iter()
+            .copied()
+            .filter(|index| *index < original_node_count)
+            .collect::<Vec<_>>();
+        source_indices.sort_unstable();
+        source_indices.dedup();
+
+        if source_indices.len() == 1 {
+            return self.duplicate_node(source_indices[0]).into_iter().collect();
+        }
+
+        let mut inserted_so_far = 0;
+        let mut duplicated_node_ids = Vec::new();
+        let mut duplicated_nodes = Vec::new();
+        for original_source_index in source_indices {
+            let source_index = original_source_index + inserted_so_far;
+            if let Some(duplicate) = self.duplicate_node_without_history(source_index) {
+                duplicated_node_ids.push(duplicate.duplicated_node.node_id.clone());
+                duplicated_nodes.push(duplicate);
+                inserted_so_far += 1;
+            }
+        }
+
+        if duplicated_nodes.is_empty() {
+            return Vec::new();
+        }
+
+        self.rebuild_default_data_flow_edges();
+        self.record_project_command(ProjectCommand::NodesDuplicate { duplicated_nodes });
+        duplicated_node_ids
+            .into_iter()
+            .filter_map(|node_id| self.nodes.iter().position(|node| node.node_id == node_id))
+            .collect()
     }
 
     fn unique_node_id(&self, prefix: &str) -> String {
@@ -13629,6 +13718,9 @@ pub(crate) enum ProjectCommand {
         duplicated_node: Box<GraphNode>,
         insert_index: usize,
     },
+    NodesDuplicate {
+        duplicated_nodes: Vec<NodeDuplicateCommandSnapshot>,
+    },
     SourceNodeCreate {
         source_node: Box<GraphNode>,
         insert_index: usize,
@@ -13805,6 +13897,9 @@ impl ProjectCommand {
             } => {
                 let _ = source_node_id;
                 format!("Duplicate {source_node_name}")
+            }
+            Self::NodesDuplicate { duplicated_nodes } => {
+                format!("Duplicate {} nodes", duplicated_nodes.len())
             }
             Self::NodeDelete { deleted_node, .. } => {
                 format!("Delete {}", deleted_node.name)
@@ -13984,6 +14079,7 @@ impl ProjectCommand {
         matches!(
             self,
             Self::NodeDuplicate { .. }
+                | Self::NodesDuplicate { .. }
                 | Self::ReferenceInputCreate { .. }
                 | Self::NodeOutputParticipationEdit { .. }
         )
@@ -13995,6 +14091,14 @@ pub(crate) struct NodeLayoutCommandSnapshot {
     node_id: String,
     old_position: GraphPoint,
     new_position: GraphPoint,
+}
+
+#[derive(Clone)]
+pub(crate) struct NodeDuplicateCommandSnapshot {
+    source_node_id: String,
+    source_node_name: String,
+    duplicated_node: Box<GraphNode>,
+    insert_index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -19363,6 +19467,86 @@ mod tests {
         assert!(!restored_duplicate.participates_in_output);
         assert!(restored_duplicate.output_operator.is_none());
         assert!(!graph.duplicate_node(graph.nodes.len()).is_some());
+    }
+
+    #[test]
+    fn node_set_duplicate_records_one_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let source_indices = vec![0, 1];
+        graph.nodes[source_indices[0]].comment = "First selected note.".to_owned();
+        graph.nodes[source_indices[1]].comment = "Second selected note.".to_owned();
+        let source_snapshots = source_indices
+            .iter()
+            .map(|index| {
+                let node = &graph.nodes[*index];
+                (
+                    node.node_id.clone(),
+                    node.name.clone(),
+                    node.parent_graph_id.clone(),
+                    node.layout_position,
+                    node.comment.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let original_node_count = graph.nodes.len();
+
+        let duplicate_indices = graph.duplicate_node_set(&source_indices);
+
+        assert_eq!(duplicate_indices.len(), 2);
+        assert_eq!(graph.nodes.len(), original_node_count + 2);
+        let duplicated_node_ids = duplicate_indices
+            .iter()
+            .map(|index| graph.nodes[*index].node_id.clone())
+            .collect::<Vec<_>>();
+        for (duplicate_index, source) in duplicate_indices.iter().zip(source_snapshots.iter()) {
+            let duplicate = &graph.nodes[*duplicate_index];
+            assert_ne!(duplicate.node_id, source.0);
+            assert_ne!(duplicate.name, source.1);
+            assert_eq!(duplicate.parent_graph_id, source.2);
+            assert_eq!(
+                duplicate.layout_position,
+                GraphPoint::new(source.3.x + 0.12, source.3.y + 0.08)
+            );
+            assert_eq!(duplicate.comment, source.4);
+            assert!(duplicate.generated.is_none());
+            assert!(duplicate.output_operator.is_none());
+            assert_eq!(duplicate.evaluation, NodeEvaluation::clean());
+            assert!(!duplicate.participates_in_output);
+        }
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodesDuplicate { duplicated_nodes })
+                if duplicated_nodes.len() == 2
+                    && duplicated_nodes
+                        .iter()
+                        .map(|duplicate| duplicate.source_node_id.clone())
+                        .collect::<Vec<_>>()
+                        == source_snapshots
+                            .iter()
+                            .map(|source| source.0.clone())
+                            .collect::<Vec<_>>()
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Duplicate 2 nodes")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes.len(), original_node_count);
+        for node_id in &duplicated_node_ids {
+            assert!(!graph.nodes.iter().any(|node| node.node_id == *node_id));
+        }
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Duplicate 2 nodes")
+        );
+
+        assert!(graph.redo_project_command());
+        for node_id in &duplicated_node_ids {
+            assert!(graph.nodes.iter().any(|node| node.node_id == *node_id));
+        }
+        assert!(graph.duplicate_node_set(&[graph.nodes.len()]).is_empty());
     }
 
     #[test]
