@@ -44,20 +44,16 @@ for the connection editing lane.
 | `#194` | complete | Drag-to-connect preview diagnostics | Shows valid/invalid connection preview diagnostics before mutating graph state. |
 | `#296` | complete | Focused connection editing tracker | Adds this focused tracker and points the main PRD/ADR status ledger at it. |
 | `#298` | complete | Typed node port inspection | Surfaces selected-node input/output port summaries from existing typed declarations while leaving primary quick-wire behavior unchanged. |
+| `#300` | complete | Multi-port hit testing and drawing | Draws stable per-port hit regions for typed ports while preserving primary quick-wire behavior. |
 
 ## Next implementation candidates
 
-1. Multi-port hit testing and drawing.
-   - Draw stable per-port hit regions for nodes with multiple declared ports.
-   - Keep layout dimensions stable so additional port labels do not resize
-     nodes during hover or drag.
-
-2. Multi-port drag-to-connect.
+1. Multi-port drag-to-connect.
    - Let users choose non-primary compatible ports during connection drag.
    - Reuse existing graph-owned edge diagnostics for compatibility, duplicate,
      and cycle checks.
 
-3. Connection organization polish.
+2. Connection organization polish.
    - Track connection routing-dot or bend-point work separately from semantic
      data-flow edges so organization affordances do not change evaluation.
 
