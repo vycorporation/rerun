@@ -466,6 +466,82 @@ impl GraphDocument {
             })
     }
 
+    pub fn procedural_asset_gallery_entries(&self) -> Vec<ProceduralAssetGalleryEntry> {
+        let mut entries = self
+            .procedural_asset_declarations
+            .iter()
+            .map(|declaration| ProceduralAssetGalleryEntry {
+                asset_id: declaration.asset_id.clone(),
+                display_name: declaration.display_name.clone(),
+                version: Some(declaration.version.clone()),
+                description: declaration.description.clone(),
+                labels: declaration.labels.clone(),
+                input_count: declaration.inputs.len(),
+                output_count: declaration.outputs.len(),
+                promoted_parameter_count: declaration.promoted_parameters.len(),
+                wrapped_graph_id: Some(declaration.wrapped_subgraph.graph_id.clone()),
+                missing_declaration: false,
+                usages: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        for (node_index, node) in self.nodes.iter().enumerate() {
+            let Some(asset_node) = node.procedural_asset.as_ref() else {
+                continue;
+            };
+            let graph_location = self.graph_location_for_node(node);
+            let version_status = self.procedural_asset_version_status_for_instance(asset_node);
+            let usage = ProceduralAssetUsageInfo {
+                node_index,
+                node_id: node.node_id.clone(),
+                node_name: node.name.clone(),
+                graph_id: graph_location.graph_id,
+                graph_path: graph_location.graph_path,
+                node_path: graph_location.node_path,
+                instance_version: asset_node.instance_version.clone(),
+                contents_unlocked: asset_node.contents_unlocked,
+                version_status,
+            };
+
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|entry| entry.asset_id == asset_node.asset_id)
+            {
+                entry.usages.push(usage);
+            } else {
+                entries.push(ProceduralAssetGalleryEntry {
+                    asset_id: asset_node.asset_id.clone(),
+                    display_name: asset_node.asset_id.clone(),
+                    version: None,
+                    description: "Asset definition is missing from this project.".to_owned(),
+                    labels: Vec::new(),
+                    input_count: 0,
+                    output_count: 0,
+                    promoted_parameter_count: 0,
+                    wrapped_graph_id: None,
+                    missing_declaration: true,
+                    usages: vec![usage],
+                });
+            }
+        }
+
+        entries.sort_by(|left, right| {
+            left.display_name
+                .to_lowercase()
+                .cmp(&right.display_name.to_lowercase())
+                .then_with(|| left.asset_id.cmp(&right.asset_id))
+        });
+        for entry in &mut entries {
+            entry.usages.sort_by(|left, right| {
+                left.node_path
+                    .to_lowercase()
+                    .cmp(&right.node_path.to_lowercase())
+                    .then_with(|| left.node_id.cmp(&right.node_id))
+            });
+        }
+        entries
+    }
+
     fn graph_container_metadata_for_node(&self, node_id: &str) -> Option<&GraphContainerMetadata> {
         self.graph_containers
             .iter()
@@ -4851,17 +4927,8 @@ impl GraphDocument {
             let Some(asset_node) = node.procedural_asset.as_mut() else {
                 continue;
             };
-            let declaration = self
-                .procedural_asset_declarations
-                .iter()
-                .find(|declaration| declaration.asset_id == asset_node.asset_id);
-            asset_node.version_status = match declaration {
-                Some(declaration) if declaration.version == asset_node.instance_version => {
-                    OperatorVersionStatus::Current
-                }
-                Some(_) => OperatorVersionStatus::NewerAvailable,
-                None => OperatorVersionStatus::MissingDeclaration,
-            };
+            asset_node.version_status =
+                procedural_asset_version_status(&self.procedural_asset_declarations, asset_node);
             if asset_node.version_status == OperatorVersionStatus::NewerAvailable {
                 node.evaluation.state = EvaluationState::Stale;
                 node.evaluation.message = Some(
@@ -4869,6 +4936,13 @@ impl GraphDocument {
                 );
             }
         }
+    }
+
+    fn procedural_asset_version_status_for_instance(
+        &self,
+        asset_node: &ProceduralAssetInstanceNode,
+    ) -> OperatorVersionStatus {
+        procedural_asset_version_status(&self.procedural_asset_declarations, asset_node)
     }
 
     #[allow(dead_code)]
@@ -10509,6 +10583,22 @@ pub(crate) struct ProceduralAssetInstanceNode {
     pub version_status: OperatorVersionStatus,
 }
 
+fn procedural_asset_version_status(
+    declarations: &[ProceduralAssetDeclaration],
+    asset_node: &ProceduralAssetInstanceNode,
+) -> OperatorVersionStatus {
+    declarations
+        .iter()
+        .find(|declaration| declaration.asset_id == asset_node.asset_id)
+        .map_or(OperatorVersionStatus::MissingDeclaration, |declaration| {
+            if declaration.version == asset_node.instance_version {
+                OperatorVersionStatus::Current
+            } else {
+                OperatorVersionStatus::NewerAvailable
+            }
+        })
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProceduralAssetBoundaryDirection {
@@ -12998,6 +13088,32 @@ pub(crate) struct ProceduralAssetNodeInfo {
     pub external_artifact_warnings: Vec<String>,
     pub input_bindings: Vec<HoudiniNodeBinding>,
     pub output_summary: Option<String>,
+    pub version_status: OperatorVersionStatus,
+}
+
+pub(crate) struct ProceduralAssetGalleryEntry {
+    pub asset_id: String,
+    pub display_name: String,
+    pub version: Option<String>,
+    pub description: String,
+    pub labels: Vec<String>,
+    pub input_count: usize,
+    pub output_count: usize,
+    pub promoted_parameter_count: usize,
+    pub wrapped_graph_id: Option<String>,
+    pub missing_declaration: bool,
+    pub usages: Vec<ProceduralAssetUsageInfo>,
+}
+
+pub(crate) struct ProceduralAssetUsageInfo {
+    pub node_index: usize,
+    pub node_id: String,
+    pub node_name: String,
+    pub graph_id: String,
+    pub graph_path: String,
+    pub node_path: String,
+    pub instance_version: String,
+    pub contents_unlocked: bool,
     pub version_status: OperatorVersionStatus,
 }
 
@@ -23225,6 +23341,63 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .procedural_asset_declarations
                 .iter()
                 .any(|declaration| declaration.asset_id == asset_id)
+        );
+    }
+
+    #[test]
+    fn procedural_asset_gallery_entries_report_usages_across_graphs() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        let main_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        graph.graph_registry.graphs.push(ProjectGraphMetadata {
+            graph_id: "analysis".to_owned(),
+            name: "Analysis".to_owned(),
+            path: "/obj/analysis".to_owned(),
+            role: ProjectGraphRole::Subgraph,
+        });
+        graph
+            .select_graph_by_id("analysis")
+            .expect("analysis graph should be selectable");
+        let analysis_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        let missing_index = graph.add_procedural_asset_node("vy.asset.missing");
+
+        let entries = graph.procedural_asset_gallery_entries();
+        let asset_entry = entries
+            .iter()
+            .find(|entry| entry.asset_id == "vy.asset.curve_cleanup")
+            .expect("declared asset should have a gallery entry");
+        assert_eq!(asset_entry.display_name, "Curve cleanup");
+        assert_eq!(asset_entry.version.as_deref(), Some("0.1.0"));
+        assert_eq!(asset_entry.input_count, 1);
+        assert_eq!(asset_entry.output_count, 1);
+        assert_eq!(asset_entry.promoted_parameter_count, 2);
+        assert_eq!(asset_entry.usages.len(), 2);
+        assert!(asset_entry.usages.iter().any(|usage| {
+            usage.node_index == main_index
+                && usage.graph_id == "main"
+                && usage.node_path == "/obj/main/Asset"
+                && usage.version_status == OperatorVersionStatus::Current
+        }));
+        assert!(asset_entry.usages.iter().any(|usage| {
+            usage.node_index == analysis_index
+                && usage.graph_id == "analysis"
+                && usage.node_path == "/obj/analysis/Asset"
+                && usage.version_status == OperatorVersionStatus::Current
+        }));
+
+        let missing_entry = entries
+            .iter()
+            .find(|entry| entry.asset_id == "vy.asset.missing")
+            .expect("missing asset usage should still have a gallery entry");
+        assert!(missing_entry.missing_declaration);
+        assert_eq!(missing_entry.version, None);
+        assert_eq!(missing_entry.usages.len(), 1);
+        assert_eq!(missing_entry.usages[0].node_index, missing_index);
+        assert_eq!(
+            missing_entry.usages[0].version_status,
+            OperatorVersionStatus::MissingDeclaration
         );
     }
 

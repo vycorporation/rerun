@@ -88,6 +88,15 @@ Saving writes compatible graph-owned metadata back to the project-local declarat
 The UI should avoid presenting assets as a hidden code plugin system.
 An asset is a saved graph pattern with a typed boundary.
 
+The project UI should include a project asset gallery for active project-local
+asset definitions. The gallery should show each definition's display metadata,
+interface summary, version, and current usage count, then list every graph node
+instance using that definition with readable graph/node paths. Usage entries
+should be navigable: selecting one switches to the owning graph, selects the
+asset instance node, and frames it in the network editor. Missing definitions
+that still have live instances should remain visible as repairable project
+state instead of disappearing from the gallery.
+
 ## Deferred work
 
 Shared asset libraries are deferred.
@@ -111,3 +120,4 @@ Python-backed assets are deferred until the Python operator lane is implemented.
 10. #218 - Complete: add explicit Save Asset Definition model and workbench UI actions for unlocked procedural asset instances while preserving exact-version pins.
 11. #220 - Complete: create project-local procedural asset drafts from resolved graph containers using their typed boundary and internal graph reference.
 12. #228 - Complete: expose asset draft creation from the selected subnet through the Tab/operator palette while reusing the graph-container asset draft path.
+13. #232 - Complete: add a project asset gallery that lists active project asset definitions and every graph usage with jump-to-instance navigation.

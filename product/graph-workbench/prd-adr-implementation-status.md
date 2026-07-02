@@ -29,7 +29,7 @@ This ledger tracks how PRD/ADR material maps to issue-backed implementation in t
 | Native cubic and renderer-native preview path | partial | `specialized-renderer-path.md` | `#29`, `#36`, `#37`, `#38` |
 | Python operator and project environment lane | partial | `python-operator-surface.md`, `python-environment-status.md` | `#31`, `#32`, `#39`, `#40`, `#41`, `#42`, `#43`, `#44`, `#45`, `#46`, `#55` |
 | Native plugin operator lane | partial | `native-plugin-operator-lane.md` | `#34`, `#51`, `#52`, `#53`, `#54` |
-| Procedural asset interface | partial | `procedural-asset-interface.md` | `#33`, `#47`, `#48`, `#49`, `#50`, `#61`, `#152`, `#156`, `#158`, `#160`, `#162`, `#218`, `#220`, `#228` |
+| Procedural asset interface | partial | `procedural-asset-interface.md` | `#33`, `#47`, `#48`, `#49`, `#50`, `#61`, `#152`, `#156`, `#158`, `#160`, `#162`, `#218`, `#220`, `#228`, `#232` |
 | Graph hierarchy and named graph registry | partial | `graph-hierarchy-tracker.md` | `#130`, `#131`, `#132`, `#142`, `#144`, `#146`, `#148`, `#164`, `#166`, `#168`, `#170`, `#172`, `#174`, `#176`, `#178`, `#216`, `#220`, `#222`, `#224`, `#226`, `#228`, `#230` |
 | Reference inputs, stable IDs, diagnostics, and target sets | complete for current v1 reference-input spine | PRD ADRs plus command-history tracker | `#57`, `#58`, `#59`, `#60`, `#62`, `#98`, `#113`, `#114`, `#121`, `#122` |
 | Workbench layout presets and browser | complete for current v1 workbench slice | `workbench-layout-presets.md` | `#64`, `#68`, `#72`, `#74` |
@@ -68,7 +68,7 @@ issue-backed implementation slices next.
 
 2. Procedural asset authoring depth.
    - Source ADRs: `0009`, `0010`, `0011`, `0077`, `0078`.
-   - Issue-backed slices: `#152` promoted parameter binding metadata, `#156` match-definition and upgrade-to-current-definition model actions, `#158` external artifact reference metadata and warnings, `#160` typed asset input/output boundary editing model actions, `#162` bundle/export artifact inclusion previews, `#218` explicit save-definition actions, `#220` graph-container asset draft promotion, `#222` drag marquee multi-select for subnet creation, `#224` Tab palette subnet collapse action, `#226` Houdini-style subnet enter/up navigation, and `#228` Tab palette asset draft creation from selected subnet.
+   - Issue-backed slices: `#152` promoted parameter binding metadata, `#156` match-definition and upgrade-to-current-definition model actions, `#158` external artifact reference metadata and warnings, `#160` typed asset input/output boundary editing model actions, `#162` bundle/export artifact inclusion previews, `#218` explicit save-definition actions, `#220` graph-container asset draft promotion, `#222` drag marquee multi-select for subnet creation, `#224` Tab palette subnet collapse action, `#226` Houdini-style subnet enter/up navigation, `#228` Tab palette asset draft creation from selected subnet, and `#232` project asset gallery with usage navigation.
    - Later likely slices: asset-definition polish for selected connected subgraphs, including promotion/version controls after manual subnet creation QA.
 
 3. Connection editing semantics.

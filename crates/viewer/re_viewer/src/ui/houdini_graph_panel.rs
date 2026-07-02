@@ -207,6 +207,7 @@ impl Default for HoudiniGraphPanel {
 enum GraphWorkbenchPane {
     Operators,
     Find,
+    Assets,
     Parameters,
     Info,
     Display,
@@ -218,6 +219,7 @@ impl GraphWorkbenchPane {
         match self {
             Self::Operators => "Ops",
             Self::Find => "Find",
+            Self::Assets => "Assets",
             Self::Parameters => "Parms",
             Self::Info => "Info",
             Self::Display => "Display",
@@ -573,6 +575,10 @@ impl HoudiniGraphPanel {
                 }
                 if ui.button("Find").clicked() {
                     self.show_graph_workbench_pane(GraphWorkbenchPane::Find);
+                    ui.close();
+                }
+                if ui.button("Assets").clicked() {
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Assets);
                     ui.close();
                 }
                 if ui.button("Parameters").clicked() {
@@ -1309,6 +1315,9 @@ impl HoudiniGraphPanel {
         self.asset_authoring_ui(ui, graph);
 
         ui.add_space(8.0);
+        self.asset_gallery_ui(ui, graph);
+
+        ui.add_space(8.0);
         ui.strong("Python");
         self.python_environment_ui(ui, graph);
 
@@ -2026,6 +2035,9 @@ impl HoudiniGraphPanel {
             }
             GraphWorkbenchPane::Find => {
                 self.graph_search_ui(ui, graph);
+            }
+            GraphWorkbenchPane::Assets => {
+                self.asset_gallery_ui(ui, graph);
             }
             GraphWorkbenchPane::Parameters => {
                 self.selected_node_controls_ui(ui, graph);
@@ -3070,6 +3082,119 @@ impl HoudiniGraphPanel {
         if let Some(status) = &self.asset_status {
             ui.weak(status);
         }
+    }
+
+    fn asset_gallery_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        ui.strong("Asset Gallery");
+        let entries = graph.procedural_asset_gallery_entries();
+        if entries.is_empty() {
+            ui.weak("No project assets.");
+            return;
+        }
+
+        for entry in entries {
+            let header_label = format!(
+                "{} ({})",
+                entry.display_name,
+                entry.version.as_deref().unwrap_or("missing")
+            );
+            egui::CollapsingHeader::new(header_label)
+                .id_salt(format!("houdini_asset_gallery_{}", entry.asset_id))
+                .default_open(entry.missing_declaration || !entry.usages.is_empty())
+                .show(ui, |ui| {
+                    egui::Grid::new(format!("houdini_asset_gallery_meta_{}", entry.asset_id))
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.weak("Asset id");
+                            ui.monospace(&entry.asset_id);
+                            ui.end_row();
+
+                            ui.weak("Interface");
+                            ui.label(format!(
+                                "{} input(s), {} output(s), {} promoted parameter(s)",
+                                entry.input_count,
+                                entry.output_count,
+                                entry.promoted_parameter_count
+                            ));
+                            ui.end_row();
+
+                            ui.weak("Labels");
+                            ui.label(format_list(&entry.labels));
+                            ui.end_row();
+
+                            ui.weak("Wrapped graph");
+                            ui.label(entry.wrapped_graph_id.as_deref().unwrap_or("missing"));
+                            ui.end_row();
+                        });
+                    if !entry.description.is_empty() {
+                        ui.weak(&entry.description);
+                    }
+                    ui.add_space(4.0);
+                    ui.strong(format!("Usage ({})", entry.usages.len()));
+                    if entry.usages.is_empty() {
+                        ui.weak("No instances in this project.");
+                    } else {
+                        egui::Grid::new(format!("houdini_asset_gallery_usage_{}", entry.asset_id))
+                            .num_columns(5)
+                            .spacing([10.0, 4.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.strong("Node");
+                                ui.strong("Graph");
+                                ui.strong("Version");
+                                ui.strong("State");
+                                ui.strong("");
+                                ui.end_row();
+
+                                for usage in &entry.usages {
+                                    ui.label(&usage.node_name).on_hover_text(&usage.node_path);
+                                    ui.label(&usage.graph_path);
+                                    ui.label(format!(
+                                        "{} / {}",
+                                        usage.instance_version,
+                                        usage.version_status.as_str()
+                                    ));
+                                    ui.label(if usage.contents_unlocked {
+                                        "unlocked"
+                                    } else {
+                                        "matched"
+                                    });
+                                    if ui.button("Go").clicked() {
+                                        self.jump_to_graph_node(
+                                            graph,
+                                            usage.node_index,
+                                            &usage.graph_id,
+                                        );
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                });
+        }
+    }
+
+    fn jump_to_graph_node(
+        &mut self,
+        graph: &mut GraphDocument,
+        node_index: usize,
+        graph_id: &str,
+    ) -> bool {
+        if graph.select_graph_by_id(graph_id).is_err() || node_index >= graph.nodes.len() {
+            self.asset_status = Some("Asset usage target is no longer available.".to_owned());
+            return false;
+        }
+        self.select_single_node(node_index);
+        self.selected_annotation = None;
+        self.selected_edge = None;
+        self.node_info_open = true;
+        self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
+        self.pending_frame_selected = true;
+        self.asset_status = graph
+            .readable_node_path(node_index)
+            .map(|path| format!("Selected asset instance: {path}"));
+        true
     }
 
     fn selected_node_can_create_asset_from_graph_container(&self, graph: &GraphDocument) -> bool {
@@ -7106,9 +7231,9 @@ fn draw_arrowhead(painter: &egui::Painter, tip: Pos2, color: Color32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectionDragPreview, ConnectionDragState, GraphSearchTarget, HoudiniGraphPanel,
-        NodePortKind, OperatorPaletteAction, connection_drag_preview, distance_to_segment,
-        graph_edge_at, layout_node_rects,
+        ConnectionDragPreview, ConnectionDragState, GraphSearchTarget, GraphWorkbenchPane,
+        HoudiniGraphPanel, NodePortKind, OperatorPaletteAction, connection_drag_preview,
+        distance_to_segment, graph_edge_at, layout_node_rects,
         model::{GraphContainerStatus, NodeKind, ProjectGraphMetadata, ProjectGraphRole},
         node_indices_in_selection_rect, node_primary_port_at, node_primary_port_rect,
         operator_palette_action_available, operator_palette_entries,
@@ -7560,6 +7685,43 @@ mod tests {
                 .asset_status
                 .as_deref()
                 .is_some_and(|status| status.contains("Created project asset from selected subnet"))
+        );
+    }
+
+    #[test]
+    fn asset_gallery_jump_selects_usage_node_in_owning_graph() {
+        let mut graph = GraphDocument::sample();
+        let (asset_id, _) = graph.create_asset_instance_from_graph(
+            "Gallery Cleanup",
+            "Created for gallery navigation.",
+            "Use from the asset gallery.",
+        );
+        graph.graph_registry.graphs.push(ProjectGraphMetadata {
+            graph_id: "analysis".to_owned(),
+            name: "Analysis".to_owned(),
+            path: "/obj/analysis".to_owned(),
+            role: ProjectGraphRole::Subgraph,
+        });
+        graph
+            .select_graph_by_id("analysis")
+            .expect("analysis graph should be selectable");
+        let analysis_asset_index = graph.add_procedural_asset_node(asset_id);
+        let mut panel = HoudiniGraphPanel::default();
+
+        assert!(panel.jump_to_graph_node(&mut graph, analysis_asset_index, "analysis"));
+
+        assert_eq!(graph.current_graph_id(), "analysis");
+        assert_eq!(panel.selected_node, analysis_asset_index);
+        assert_eq!(panel.selected_nodes, vec![analysis_asset_index]);
+        assert!(panel.selected_annotation.is_none());
+        assert!(panel.selected_edge.is_none());
+        assert_eq!(panel.active_graph_pane, GraphWorkbenchPane::Info);
+        assert!(panel.pending_frame_selected);
+        assert!(
+            panel
+                .asset_status
+                .as_deref()
+                .is_some_and(|status| status.contains("/obj/analysis/Asset"))
         );
     }
 
