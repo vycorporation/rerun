@@ -329,6 +329,17 @@ impl TransientViewportSelectionReport {
             diagnostics: vec![message.into()],
         }
     }
+
+    pub fn summary(&self) -> String {
+        if let Some(diagnostic) = self.diagnostics.first() {
+            return format!("{}: {diagnostic}", self.status.as_str());
+        }
+        format!(
+            "{}: {} graph record identity target(s)",
+            self.status.as_str(),
+            self.identities.len()
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -489,6 +500,45 @@ impl GraphDocument {
                 identities,
             },
         }
+    }
+
+    pub fn transient_table_selection_for_row(
+        &self,
+        row: &AttributeTableRow,
+    ) -> TransientViewportSelectionReport {
+        let Some((_, node)) = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(index, node)| {
+                self.node_parent_graph_id(node) == self.current_graph_id()
+                    && self.node_has_primary_geometry_output(*index)
+            })
+            .find(|(_, node)| node.kind == NodeKind::Style)
+            .or_else(|| {
+                self.nodes.iter().enumerate().find(|(index, node)| {
+                    self.node_parent_graph_id(node) == self.current_graph_id()
+                        && self.node_has_primary_geometry_output(*index)
+                })
+            })
+        else {
+            return TransientViewportSelectionReport::diagnostic(
+                TransientViewportSelectionStatus::Unsupported,
+                format!(
+                    "No supported geometry output exists in graph '{}'.",
+                    self.current_graph_path()
+                ),
+            );
+        };
+
+        self.resolve_transient_viewport_selection(&TransientViewportSelection {
+            graph_id: self.node_parent_graph_id(node).to_owned(),
+            output_node_id: node.node_id.clone(),
+            output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            record: TransientViewportRecordTarget::GeometryFingerprint(
+                row.geometry_fingerprint.clone(),
+            ),
+        })
     }
 
     #[allow(dead_code)]
@@ -2653,6 +2703,7 @@ impl GraphDocument {
             .filter(|(_, geometry)| self.emits(geometry))
             .map(|(record_index, geometry)| AttributeTableRow {
                 record_index,
+                geometry_fingerprint: geometry_record_fingerprint(geometry),
                 geometry_kind: geometry.kind(),
                 score: geometry.score(),
                 layer: geometry.layer(),
@@ -2695,6 +2746,7 @@ impl GraphDocument {
             .filter(|(_, geometry)| self.emits(geometry))
             .map(|(record_index, geometry)| AttributeTableRow {
                 record_index,
+                geometry_fingerprint: geometry_record_fingerprint(geometry),
                 geometry_kind: geometry.kind(),
                 score: geometry.score(),
                 layer: geometry.layer(),
@@ -14455,6 +14507,7 @@ impl AttributeTableSort {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AttributeTableRow {
     pub record_index: usize,
+    pub geometry_fingerprint: String,
     pub geometry_kind: GeometryKind,
     pub score: f32,
     pub layer: LayerKind,
@@ -17437,6 +17490,98 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.contains("transient viewport state"))
         );
+    }
+
+    #[test]
+    fn table_row_selection_resolves_through_transient_identity_bridge() {
+        let graph = GraphDocument::sample();
+        let rows = graph.attribute_table_rows(&AttributeTableQuery {
+            search: "curves".to_owned(),
+            minimum_score: None,
+            sort: AttributeTableSort::Score,
+            sort_descending: true,
+        });
+        let row = rows
+            .first()
+            .expect("filtered table should include a visible curve row");
+
+        let report = graph.transient_table_selection_for_row(row);
+
+        assert_eq!(report.status, TransientViewportSelectionStatus::Resolved);
+        assert!(report.diagnostics.is_empty());
+        assert_eq!(report.identities.len(), 1);
+        assert_eq!(
+            report.identities[0].geometry_fingerprint,
+            row.geometry_fingerprint
+        );
+        assert_eq!(
+            report.identities[0].geometry_kind,
+            GeometryKind::CubicBezier
+        );
+        assert!(
+            report.identities[0]
+                .readable_path
+                .contains("/obj/main/Style")
+        );
+    }
+
+    #[test]
+    fn table_row_selection_keeps_local_filters_read_only_until_commit() {
+        let graph = GraphDocument::sample();
+        let rows = graph.attribute_table_rows(&AttributeTableQuery {
+            search: String::new(),
+            minimum_score: Some(0.8),
+            sort: AttributeTableSort::RecordIndex,
+            sort_descending: false,
+        });
+        let before_visible_count = graph.visible_output_count();
+        let before_filter_value = graph
+            .filter_rule()
+            .expect("sample graph should include filter rule")
+            .value
+            .as_f32();
+
+        let report = graph.transient_table_selection_for_row(
+            rows.first()
+                .expect("local table filter should still show a selected candidate"),
+        );
+
+        assert_eq!(report.status, TransientViewportSelectionStatus::Resolved);
+        assert_eq!(graph.visible_output_count(), before_visible_count);
+        assert_eq!(
+            graph
+                .filter_rule()
+                .expect("sample graph should include filter rule")
+                .value
+                .as_f32(),
+            before_filter_value
+        );
+    }
+
+    #[test]
+    fn stale_table_row_selection_reports_missing_record_without_mutation() {
+        let mut graph = GraphDocument::sample();
+        let row = graph
+            .attribute_table_rows(&AttributeTableQuery::default())
+            .first()
+            .expect("sample graph should expose table rows")
+            .clone();
+        graph.geometry.clear();
+
+        let report = graph.transient_table_selection_for_row(&row);
+
+        assert_eq!(
+            report.status,
+            TransientViewportSelectionStatus::MissingRecord
+        );
+        assert!(report.identities.is_empty());
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("did not match any visible graph record"))
+        );
+        assert!(graph.geometry.is_empty());
     }
 
     #[test]
