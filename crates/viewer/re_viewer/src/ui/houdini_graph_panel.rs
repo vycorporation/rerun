@@ -2091,7 +2091,12 @@ impl HoudiniGraphPanel {
                     if let Some(provenance) = &native_operator.output_provenance_summary {
                         ui.weak(provenance);
                     }
-                    if let Some(failure) = &native_operator.last_failure_summary {
+                    if let Some(diagnostic) = &native_operator.last_failure_diagnostic {
+                        ui.colored_label(ui.visuals().error_fg_color, &diagnostic.summary);
+                        if let Some(detail) = &diagnostic.detail {
+                            ui.weak(detail);
+                        }
+                    } else if let Some(failure) = &native_operator.last_failure_summary {
                         ui.colored_label(ui.visuals().error_fg_color, failure);
                     }
                     self.native_operator_trust_controls_ui(ui, graph, native_operator);
@@ -6183,7 +6188,17 @@ impl HoudiniGraphPanel {
                             ui.end_row();
                         }
 
-                        if let Some(last_failure) = &native_operator.last_failure_summary {
+                        if let Some(diagnostic) = &native_operator.last_failure_diagnostic {
+                            ui.weak("Last failure");
+                            ui.label(&diagnostic.summary);
+                            ui.end_row();
+
+                            if let Some(detail) = &diagnostic.detail {
+                                ui.weak("Failure detail");
+                                ui.label(detail);
+                                ui.end_row();
+                            }
+                        } else if let Some(last_failure) = &native_operator.last_failure_summary {
                             ui.weak("Last failure");
                             ui.label(last_failure);
                             ui.end_row();
@@ -6254,6 +6269,11 @@ impl HoudiniGraphPanel {
                 native_operator_load_status_color(ui, native_operator.load_status),
                 native_operator.load_status.summary(),
             );
+            if let Some(diagnostic) = &native_operator.last_failure_diagnostic
+                && diagnostic.status == native_operator.load_status
+            {
+                ui.colored_label(ui.visuals().error_fg_color, diagnostic.warning());
+            }
             if !native_operator.missing_capability_grants.is_empty() {
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
