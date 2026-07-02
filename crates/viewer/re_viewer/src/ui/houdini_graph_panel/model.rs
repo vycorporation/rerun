@@ -8314,13 +8314,18 @@ impl SourceGalleryItem {
         let format_report = metadata.source_format_inference_report();
         let external_reference = metadata.external_reference_report();
         let kind = SourceGalleryItemKind::from_locator_and_format(&locator, &format_report);
+        let stable_id = source_gallery_stable_id(&locator);
 
         Self {
-            stable_id: source_gallery_stable_id(&locator),
+            thumbnail_intent: SourceGalleryThumbnailIntent::from_kind_and_status(
+                kind,
+                external_reference.status,
+                stable_id.clone(),
+            ),
+            stable_id,
             display_name: source_gallery_display_name(&locator),
             locator,
             kind,
-            thumbnail_intent: SourceGalleryThumbnailIntent::from_kind(kind),
             external_reference_status: external_reference.status,
             format_kind: format_report.kind,
             format_support_status: format_report.support_status,
@@ -8404,21 +8409,141 @@ impl SourceGalleryItemKind {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SourceGalleryThumbnailIntent {
-    Image,
-    Generic(SourceGalleryItemKind),
+    Image(SourceGalleryImageThumbnailIntent),
+    Generic(SourceGalleryGenericThumbnailIntent),
 }
 
 #[allow(dead_code)]
 impl SourceGalleryThumbnailIntent {
-    fn from_kind(kind: SourceGalleryItemKind) -> Self {
+    fn from_kind_and_status(
+        kind: SourceGalleryItemKind,
+        external_reference_status: SourceExternalReferenceStatus,
+        cache_key: String,
+    ) -> Self {
+        let status = SourceGalleryThumbnailStatus::from_external_reference_status(
+            kind,
+            external_reference_status,
+        );
         if kind == SourceGalleryItemKind::Image {
-            Self::Image
+            Self::Image(SourceGalleryImageThumbnailIntent { cache_key, status })
         } else {
-            Self::Generic(kind)
+            Self::Generic(SourceGalleryGenericThumbnailIntent { kind, status })
         }
     }
+
+    pub fn status(&self) -> SourceGalleryThumbnailStatus {
+        match self {
+            Self::Image(intent) => intent.status,
+            Self::Generic(intent) => intent.status,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceGalleryImageThumbnailIntent {
+    pub cache_key: String,
+    pub status: SourceGalleryThumbnailStatus,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SourceGalleryGenericThumbnailIntent {
+    pub kind: SourceGalleryItemKind,
+    pub status: SourceGalleryThumbnailStatus,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceGalleryThumbnailStatus {
+    DecodeReady,
+    GenericOnly,
+    MissingSource,
+    RemoteUnverified,
+    RuntimeInput,
+}
+
+#[allow(dead_code)]
+impl SourceGalleryThumbnailStatus {
+    fn from_external_reference_status(
+        kind: SourceGalleryItemKind,
+        status: SourceExternalReferenceStatus,
+    ) -> Self {
+        match status {
+            SourceExternalReferenceStatus::LocalAvailable
+                if kind == SourceGalleryItemKind::Image =>
+            {
+                Self::DecodeReady
+            }
+            SourceExternalReferenceStatus::LocalAvailable => Self::GenericOnly,
+            SourceExternalReferenceStatus::LocalMissing => Self::MissingSource,
+            SourceExternalReferenceStatus::UriUnverified => Self::RemoteUnverified,
+            SourceExternalReferenceStatus::RecordingQuery => Self::RuntimeInput,
+            SourceExternalReferenceStatus::NotExternal => Self::GenericOnly,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SourceGalleryThumbnailCache {
+    entries: Vec<SourceGalleryThumbnailCacheEntry>,
+}
+
+#[allow(dead_code)]
+impl SourceGalleryThumbnailCache {
+    pub fn store_decoded(
+        &mut self,
+        cache_key: impl Into<String>,
+        thumbnail: SourceGalleryDecodedThumbnail,
+    ) {
+        let cache_key = cache_key.into();
+        self.entries.retain(|entry| entry.cache_key != cache_key);
+        self.entries.push(SourceGalleryThumbnailCacheEntry {
+            cache_key,
+            state: SourceGalleryThumbnailCacheState::Decoded(thumbnail),
+        });
+    }
+
+    pub fn record_fetch_failure(&mut self, cache_key: impl Into<String>, error: impl Into<String>) {
+        let cache_key = cache_key.into();
+        self.entries.retain(|entry| entry.cache_key != cache_key);
+        self.entries.push(SourceGalleryThumbnailCacheEntry {
+            cache_key,
+            state: SourceGalleryThumbnailCacheState::FetchFailed(error.into()),
+        });
+    }
+
+    pub fn get(&self, cache_key: &str) -> Option<&SourceGalleryThumbnailCacheState> {
+        self.entries
+            .iter()
+            .find(|entry| entry.cache_key == cache_key)
+            .map(|entry| &entry.state)
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceGalleryThumbnailCacheEntry {
+    pub cache_key: String,
+    pub state: SourceGalleryThumbnailCacheState,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SourceGalleryThumbnailCacheState {
+    Decoded(SourceGalleryDecodedThumbnail),
+    FetchFailed(String),
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceGalleryDecodedThumbnail {
+    pub width: u32,
+    pub height: u32,
+    pub rgba_bytes: Vec<u8>,
 }
 
 #[allow(dead_code)]
@@ -14387,9 +14512,10 @@ mod tests {
         ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceBundleInclusion,
         SourceExternalReferenceActionKind, SourceExternalReferenceStatus,
         SourceFormatInferenceStatus, SourceFormatKind, SourceFormatSupportStatus,
-        SourceGalleryIndex, SourceGalleryItemKind, SourceGalleryManifestError,
-        SourceGalleryThumbnailIntent, SourceLocator, SourceLocatorKind,
-        SourcePackageManifestArtifactRole, SourcePackageManifestExternalStatus,
+        SourceGalleryDecodedThumbnail, SourceGalleryIndex, SourceGalleryItemKind,
+        SourceGalleryManifestError, SourceGalleryThumbnailCache, SourceGalleryThumbnailCacheState,
+        SourceGalleryThumbnailIntent, SourceGalleryThumbnailStatus, SourceLocator,
+        SourceLocatorKind, SourcePackageManifestArtifactRole, SourcePackageManifestExternalStatus,
         SourcePackageManifestInclusionChoice, SourcePackageManifestPreview, SourceProvenance,
         SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
         load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
@@ -21637,7 +21763,15 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             .find(|item| item.display_name == "frame.png")
             .expect("image item should be indexed");
         assert_eq!(image.kind, SourceGalleryItemKind::Image);
-        assert_eq!(image.thumbnail_intent, SourceGalleryThumbnailIntent::Image);
+        match &image.thumbnail_intent {
+            SourceGalleryThumbnailIntent::Image(intent) => {
+                assert_eq!(intent.cache_key, image.stable_id);
+                assert_eq!(intent.status, SourceGalleryThumbnailStatus::DecodeReady);
+            }
+            SourceGalleryThumbnailIntent::Generic(_) => {
+                panic!("image should request image thumbnail")
+            }
+        }
         assert_eq!(
             image.external_reference_status,
             SourceExternalReferenceStatus::LocalAvailable
@@ -21649,10 +21783,15 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             .find(|item| item.display_name == "curves.parquet")
             .expect("parquet item should be indexed");
         assert_eq!(table.kind, SourceGalleryItemKind::Table);
-        assert_eq!(
-            table.thumbnail_intent,
-            SourceGalleryThumbnailIntent::Generic(SourceGalleryItemKind::Table)
-        );
+        match &table.thumbnail_intent {
+            SourceGalleryThumbnailIntent::Generic(intent) => {
+                assert_eq!(intent.kind, SourceGalleryItemKind::Table);
+                assert_eq!(intent.status, SourceGalleryThumbnailStatus::GenericOnly);
+            }
+            SourceGalleryThumbnailIntent::Image(_) => {
+                panic!("parquet should use generic thumbnail")
+            }
+        }
         assert_eq!(table.format_kind, Some(SourceFormatKind::Parquet));
         assert_eq!(
             table.format_support_status,
@@ -21673,8 +21812,8 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             .expect("unknown item should be indexed");
         assert_eq!(unknown.kind, SourceGalleryItemKind::Unknown);
         assert_eq!(
-            unknown.thumbnail_intent,
-            SourceGalleryThumbnailIntent::Generic(SourceGalleryItemKind::Unknown)
+            unknown.thumbnail_intent.status(),
+            SourceGalleryThumbnailStatus::GenericOnly
         );
     }
 
@@ -21696,6 +21835,10 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             item.external_reference_status,
             SourceExternalReferenceStatus::LocalMissing
         );
+        assert_eq!(
+            item.thumbnail_intent.status(),
+            SourceGalleryThumbnailStatus::MissingSource
+        );
         assert_eq!(item.format_kind, Some(SourceFormatKind::GeoParquetLike));
         assert_eq!(
             item.format_support_status,
@@ -21712,8 +21855,8 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(direct.items.len(), 1);
         assert_eq!(direct.items[0].kind, SourceGalleryItemKind::Image);
         assert_eq!(
-            direct.items[0].thumbnail_intent,
-            SourceGalleryThumbnailIntent::Image
+            direct.items[0].thumbnail_intent.status(),
+            SourceGalleryThumbnailStatus::RemoteUnverified
         );
         assert_eq!(
             direct.items[0].external_reference_status,
@@ -21779,14 +21922,52 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             .find(|item| item.display_name == "Curated polygons")
             .expect("manifest labels should be used as display names");
         assert_eq!(polygons.kind, SourceGalleryItemKind::PolygonTable);
-        assert_eq!(
-            polygons.thumbnail_intent,
-            SourceGalleryThumbnailIntent::Generic(SourceGalleryItemKind::PolygonTable)
-        );
+        match &polygons.thumbnail_intent {
+            SourceGalleryThumbnailIntent::Generic(intent) => {
+                assert_eq!(intent.kind, SourceGalleryItemKind::PolygonTable);
+                assert_eq!(
+                    intent.status,
+                    SourceGalleryThumbnailStatus::RemoteUnverified
+                );
+            }
+            SourceGalleryThumbnailIntent::Image(_) => {
+                panic!("polygon table should use generic thumbnail")
+            }
+        }
         assert_eq!(
             polygons.external_reference_status,
             SourceExternalReferenceStatus::UriUnverified
         );
+    }
+
+    #[test]
+    fn source_gallery_thumbnail_cache_is_runtime_state_not_sidecar_state() {
+        let graph = GraphDocument::sample();
+        let sidecar_before = graph.to_sidecar_json().unwrap();
+        let mut cache = SourceGalleryThumbnailCache::default();
+        cache.store_decoded(
+            "local path:/tmp/frame.png",
+            SourceGalleryDecodedThumbnail {
+                width: 2,
+                height: 1,
+                rgba_bytes: vec![255, 0, 0, 255, 0, 0, 255, 255],
+            },
+        );
+        cache.record_fetch_failure("uri:https://example.test/frame.png", "timeout");
+
+        assert!(matches!(
+            cache.get("local path:/tmp/frame.png"),
+            Some(SourceGalleryThumbnailCacheState::Decoded(thumbnail))
+                if thumbnail.width == 2 && thumbnail.height == 1
+        ));
+        assert!(matches!(
+            cache.get("uri:https://example.test/frame.png"),
+            Some(SourceGalleryThumbnailCacheState::FetchFailed(error))
+                if error == "timeout"
+        ));
+        assert_eq!(graph.to_sidecar_json().unwrap(), sidecar_before);
+        assert!(!sidecar_before.contains("thumbnail"));
+        assert!(!sidecar_before.contains("frame.png"));
     }
 
     #[test]
