@@ -7654,6 +7654,10 @@ impl SourceMetadata {
     pub fn source_format_inference_report(&self) -> SourceFormatInferenceReport {
         SourceFormatInferenceReport::from_metadata(self)
     }
+
+    pub fn external_reference_action_report(&self) -> SourceExternalReferenceActionReport {
+        SourceExternalReferenceActionReport::from_metadata(self)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -7948,6 +7952,127 @@ impl SourceBundleInclusion {
             Self::LiveInput => "live input",
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SourceExternalReferenceActionReport {
+    pub recommended: SourceExternalReferenceActionHint,
+    pub secondary: Vec<SourceExternalReferenceActionHint>,
+}
+
+impl SourceExternalReferenceActionReport {
+    fn from_metadata(metadata: &SourceMetadata) -> Self {
+        let reference = metadata.external_reference_report();
+        let bundle_preview = metadata.bundle_preview();
+        let package_manifest = metadata.package_manifest_preview();
+        let locator = reference.readable_locator.clone();
+
+        match reference.status {
+            SourceExternalReferenceStatus::NotExternal => Self {
+                recommended: SourceExternalReferenceActionHint::new(
+                    SourceExternalReferenceActionKind::InspectGeneratedSource,
+                    "Inspect generated source",
+                    "Generated sources are graph-owned and do not need external reference actions.",
+                ),
+                secondary: Vec::new(),
+            },
+            SourceExternalReferenceStatus::LocalAvailable => {
+                let bundled_path = package_manifest
+                    .artifacts
+                    .first()
+                    .and_then(|artifact| artifact.bundled_path.as_deref())
+                    .unwrap_or("sources/source");
+                Self {
+                    recommended: SourceExternalReferenceActionHint::new(
+                        SourceExternalReferenceActionKind::IncludeDuringPackageExport,
+                        "Include during package/export",
+                        format!(
+                            "Eligible for explicit package/export inclusion at `{bundled_path}`."
+                        ),
+                    ),
+                    secondary: vec![
+                        SourceExternalReferenceActionHint::new(
+                            SourceExternalReferenceActionKind::RevealLocalPath,
+                            "Reveal local path",
+                            format!("Inspect local source `{locator}` outside the project file."),
+                        ),
+                        SourceExternalReferenceActionHint::new(
+                            SourceExternalReferenceActionKind::CopyLocator,
+                            "Copy locator",
+                            format!("Copy `{locator}` for sharing or relinking."),
+                        ),
+                    ],
+                }
+            }
+            SourceExternalReferenceStatus::LocalMissing => Self {
+                recommended: SourceExternalReferenceActionHint::new(
+                    SourceExternalReferenceActionKind::RelinkMissingSource,
+                    "Relink missing source",
+                    format!("Choose a replacement for missing source `{locator}`."),
+                ),
+                secondary: vec![SourceExternalReferenceActionHint::new(
+                    SourceExternalReferenceActionKind::CopyLocator,
+                    "Copy locator",
+                    format!("Copy missing locator `{locator}` for troubleshooting."),
+                )],
+            },
+            SourceExternalReferenceStatus::UriUnverified => Self {
+                recommended: SourceExternalReferenceActionHint::new(
+                    SourceExternalReferenceActionKind::KeepUriReference,
+                    "Keep URI reference",
+                    format!(
+                        "URI sources stay reference-only; {} external reference remains.",
+                        bundle_preview.remaining_external_reference_count
+                    ),
+                ),
+                secondary: vec![SourceExternalReferenceActionHint::new(
+                    SourceExternalReferenceActionKind::CopyLocator,
+                    "Copy locator",
+                    format!("Copy URI `{locator}` for sharing or resolver setup."),
+                )],
+            },
+            SourceExternalReferenceStatus::RecordingQuery => Self {
+                recommended: SourceExternalReferenceActionHint::new(
+                    SourceExternalReferenceActionKind::InspectLiveInput,
+                    "Inspect live input",
+                    "Recording query sources are live inputs and are not package artifacts.",
+                ),
+                secondary: Vec::new(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SourceExternalReferenceActionHint {
+    pub kind: SourceExternalReferenceActionKind,
+    pub label: String,
+    pub detail: String,
+}
+
+impl SourceExternalReferenceActionHint {
+    fn new(
+        kind: SourceExternalReferenceActionKind,
+        label: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            label: label.into(),
+            detail: detail.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SourceExternalReferenceActionKind {
+    InspectGeneratedSource,
+    CopyLocator,
+    RevealLocalPath,
+    IncludeDuringPackageExport,
+    RelinkMissingSource,
+    KeepUriReference,
+    InspectLiveInput,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -13248,11 +13373,12 @@ mod tests {
         PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
         ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
         ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceBundleInclusion,
-        SourceExternalReferenceStatus, SourceFormatInferenceStatus, SourceFormatKind,
-        SourceFormatSupportStatus, SourceLocatorKind, SourcePackageManifestArtifactRole,
-        SourcePackageManifestExternalStatus, SourcePackageManifestPreview, SourceProvenance,
-        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
-        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        SourceExternalReferenceActionKind, SourceExternalReferenceStatus,
+        SourceFormatInferenceStatus, SourceFormatKind, SourceFormatSupportStatus,
+        SourceLocatorKind, SourcePackageManifestArtifactRole, SourcePackageManifestExternalStatus,
+        SourcePackageManifestPreview, SourceProvenance, SubstrateCoordinateContract,
+        SubstrateOrigin, SubstrateYAxis, ViewerGeometry, load_cubic_bezier_parquet,
+        load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -20433,6 +20559,122 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .as_deref()
                 .is_some_and(|warning| warning.contains("live viewer inputs"))
         );
+    }
+
+    #[test]
+    fn source_external_reference_action_hints_cover_generated_local_missing_and_uri_sources() {
+        let graph = GraphDocument::sample();
+        let demo_actions = graph.source.metadata.external_reference_action_report();
+        assert_eq!(
+            demo_actions.recommended.kind,
+            SourceExternalReferenceActionKind::InspectGeneratedSource
+        );
+        assert!(demo_actions.secondary.is_empty());
+
+        let mut local_file = tempfile::Builder::new()
+            .prefix("local-source")
+            .suffix(".parquet")
+            .tempfile()
+            .unwrap();
+        use std::io::Write as _;
+        local_file.write_all(b"native cubic bytes").unwrap();
+        local_file.flush().unwrap();
+        let local_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(local_file.path().display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let local_actions = local_metadata.external_reference_action_report();
+        assert_eq!(
+            local_actions.recommended.kind,
+            SourceExternalReferenceActionKind::IncludeDuringPackageExport
+        );
+        assert!(
+            local_actions
+                .recommended
+                .detail
+                .contains("sources/local-source")
+        );
+        assert!(
+            local_actions
+                .secondary
+                .iter()
+                .any(|action| action.kind == SourceExternalReferenceActionKind::RevealLocalPath)
+        );
+        assert!(
+            local_actions
+                .secondary
+                .iter()
+                .any(|action| action.kind == SourceExternalReferenceActionKind::CopyLocator)
+        );
+
+        let missing_dir = tempfile::tempdir().unwrap();
+        let missing_path = missing_dir.path().join("missing-source.parquet");
+        let missing_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(missing_path.display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let missing_actions = missing_metadata.external_reference_action_report();
+        assert_eq!(
+            missing_actions.recommended.kind,
+            SourceExternalReferenceActionKind::RelinkMissingSource
+        );
+        assert!(
+            missing_actions
+                .secondary
+                .iter()
+                .any(|action| action.kind == SourceExternalReferenceActionKind::CopyLocator)
+        );
+
+        let uri_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some("s3://bucket/curves.parquet".to_owned()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let uri_actions = uri_metadata.external_reference_action_report();
+        assert_eq!(
+            uri_actions.recommended.kind,
+            SourceExternalReferenceActionKind::KeepUriReference
+        );
+        assert!(
+            uri_actions
+                .recommended
+                .detail
+                .contains("1 external reference")
+        );
+        assert!(
+            uri_actions
+                .secondary
+                .iter()
+                .any(|action| action.kind == SourceExternalReferenceActionKind::CopyLocator)
+        );
+    }
+
+    #[test]
+    fn source_external_reference_action_hints_keep_recording_query_live() {
+        let bridge = super::RerunQueryBridge {
+            mode: super::RerunQueryBridgeMode::ProductForkViewOwned,
+            view_id: "view(1234)".to_owned(),
+            space_origin: "/".to_owned(),
+            timeline: "frame".to_owned(),
+            latest_at: 42,
+            matching_entity_count: 1,
+            visualized_entity_count: 1,
+            visible_data_result_count: 1,
+        };
+        let source = super::GraphSource::from_query_bridge(&bridge);
+        let actions = source.metadata.external_reference_action_report();
+
+        assert_eq!(
+            actions.recommended.kind,
+            SourceExternalReferenceActionKind::InspectLiveInput
+        );
+        assert!(actions.recommended.detail.contains("live inputs"));
+        assert!(actions.secondary.is_empty());
     }
 
     #[test]

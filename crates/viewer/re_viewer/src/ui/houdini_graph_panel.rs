@@ -4866,6 +4866,7 @@ impl HoudiniGraphPanel {
         let bundle_preview = metadata.bundle_preview();
         let package_manifest = metadata.package_manifest_preview();
         let format_report = metadata.source_format_inference_report();
+        let action_report = metadata.external_reference_action_report();
         egui::Grid::new(("houdini_graph_source_metadata", id_suffix))
             .num_columns(2)
             .spacing([12.0, 4.0])
@@ -4965,6 +4966,10 @@ impl HoudiniGraphPanel {
                         .map(|status| status.as_str())
                         .unwrap_or("not applicable"),
                 );
+                ui.end_row();
+
+                ui.weak("Reference action");
+                ui.label(&action_report.recommended.label);
                 ui.end_row();
 
                 ui.weak("Bounds");
