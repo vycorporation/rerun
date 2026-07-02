@@ -7642,6 +7642,10 @@ impl SourceMetadata {
     pub fn external_reference_report(&self) -> SourceExternalReferenceReport {
         SourceExternalReferenceReport::from_locator(&self.locator)
     }
+
+    pub fn bundle_preview(&self) -> SourceBundlePreview {
+        SourceBundlePreview::from_external_reference(self.external_reference_report())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -7838,6 +7842,102 @@ impl SourceExternalReferenceStatus {
             Self::LocalMissing => "local missing",
             Self::UriUnverified => "uri unverified",
             Self::RecordingQuery => "recording query",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceBundlePreview {
+    pub item: SourceBundlePreviewItem,
+    pub expected_size_bytes: Option<u64>,
+    pub remaining_external_reference_count: usize,
+    pub missing_reference_count: usize,
+    pub reproducibility_warnings: Vec<String>,
+}
+
+impl SourceBundlePreview {
+    fn from_external_reference(reference: SourceExternalReferenceReport) -> Self {
+        let (inclusion, expected_size_bytes, warning) = match reference.status {
+            SourceExternalReferenceStatus::NotExternal => {
+                (SourceBundleInclusion::NotExternal, None, None)
+            }
+            SourceExternalReferenceStatus::RecordingQuery => (
+                SourceBundleInclusion::LiveInput,
+                None,
+                reference.warning.clone(),
+            ),
+            SourceExternalReferenceStatus::UriUnverified => (
+                SourceBundleInclusion::ReferenceOnly,
+                None,
+                reference.warning.clone(),
+            ),
+            SourceExternalReferenceStatus::LocalMissing => (
+                SourceBundleInclusion::Missing,
+                None,
+                reference.warning.clone(),
+            ),
+            SourceExternalReferenceStatus::LocalAvailable => {
+                let expected_size_bytes = std::fs::metadata(&reference.readable_locator)
+                    .ok()
+                    .map(|metadata| metadata.len());
+                (
+                    SourceBundleInclusion::IncludeAvailable,
+                    expected_size_bytes,
+                    Some(format!(
+                        "Local source `{}` can be included, but no content hash has been computed.",
+                        reference.readable_locator
+                    )),
+                )
+            }
+        };
+
+        let mut reproducibility_warnings = Vec::new();
+        if let Some(warning) = warning {
+            reproducibility_warnings.push(warning);
+        }
+
+        let remaining_external_reference_count =
+            usize::from(inclusion == SourceBundleInclusion::ReferenceOnly);
+        let missing_reference_count = usize::from(inclusion == SourceBundleInclusion::Missing);
+
+        Self {
+            item: SourceBundlePreviewItem {
+                locator: reference.readable_locator,
+                inclusion,
+                expected_size_bytes,
+            },
+            expected_size_bytes,
+            remaining_external_reference_count,
+            missing_reference_count,
+            reproducibility_warnings,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceBundlePreviewItem {
+    pub locator: String,
+    pub inclusion: SourceBundleInclusion,
+    pub expected_size_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceBundleInclusion {
+    NotExternal,
+    IncludeAvailable,
+    ReferenceOnly,
+    Missing,
+    LiveInput,
+}
+
+impl SourceBundleInclusion {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotExternal => "not external",
+            Self::IncludeAvailable => "include available",
+            Self::ReferenceOnly => "reference only",
+            Self::Missing => "missing",
+            Self::LiveInput => "live input",
         }
     }
 }
@@ -12898,7 +12998,7 @@ mod tests {
         PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
         PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
         ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
-        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem,
+        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceBundleInclusion,
         SourceExternalReferenceStatus, SourceFormatKind, SourceFormatSupportStatus,
         SourceLocatorKind, SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin,
         SubstrateYAxis, ViewerGeometry, load_cubic_bezier_parquet,
@@ -20082,6 +20182,104 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .warning
                 .as_deref()
                 .is_some_and(|warning| warning.contains("live viewer inputs"))
+        );
+    }
+
+    #[test]
+    fn source_bundle_preview_reports_inclusion_size_and_warnings_without_copying() {
+        let graph = GraphDocument::sample();
+        let demo_preview = graph.source.metadata.bundle_preview();
+        assert_eq!(
+            demo_preview.item.inclusion,
+            SourceBundleInclusion::NotExternal
+        );
+        assert_eq!(demo_preview.expected_size_bytes, None);
+        assert_eq!(demo_preview.remaining_external_reference_count, 0);
+        assert_eq!(demo_preview.missing_reference_count, 0);
+        assert!(demo_preview.reproducibility_warnings.is_empty());
+
+        let mut local_file = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write as _;
+        local_file.write_all(b"native cubic bytes").unwrap();
+        local_file.flush().unwrap();
+        let local_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(local_file.path().display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let local_preview = local_metadata.bundle_preview();
+        assert_eq!(
+            local_preview.item.inclusion,
+            SourceBundleInclusion::IncludeAvailable
+        );
+        assert_eq!(
+            local_preview.expected_size_bytes,
+            Some("native cubic bytes".len() as u64)
+        );
+        assert_eq!(local_preview.remaining_external_reference_count, 0);
+        assert_eq!(local_preview.missing_reference_count, 0);
+        assert!(
+            local_preview
+                .reproducibility_warnings
+                .iter()
+                .any(|warning| warning.contains("no content hash"))
+        );
+
+        let uri_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some("s3://bucket/curves.parquet".to_owned()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let uri_preview = uri_metadata.bundle_preview();
+        assert_eq!(
+            uri_preview.item.inclusion,
+            SourceBundleInclusion::ReferenceOnly
+        );
+        assert_eq!(uri_preview.remaining_external_reference_count, 1);
+        assert_eq!(uri_preview.missing_reference_count, 0);
+
+        let missing_dir = tempfile::tempdir().unwrap();
+        let missing_path = missing_dir.path().join("missing-source.parquet");
+        let missing_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(missing_path.display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let missing_preview = missing_metadata.bundle_preview();
+        assert_eq!(
+            missing_preview.item.inclusion,
+            SourceBundleInclusion::Missing
+        );
+        assert_eq!(missing_preview.remaining_external_reference_count, 0);
+        assert_eq!(missing_preview.missing_reference_count, 1);
+    }
+
+    #[test]
+    fn recording_query_source_bundle_preview_stays_live_input() {
+        let bridge = super::RerunQueryBridge {
+            mode: super::RerunQueryBridgeMode::ProductForkViewOwned,
+            view_id: "view(1234)".to_owned(),
+            space_origin: "/".to_owned(),
+            timeline: "frame".to_owned(),
+            latest_at: 42,
+            matching_entity_count: 1,
+            visualized_entity_count: 1,
+            visible_data_result_count: 1,
+        };
+        let source = super::GraphSource::from_query_bridge(&bridge);
+        let preview = source.metadata.bundle_preview();
+
+        assert_eq!(preview.item.inclusion, SourceBundleInclusion::LiveInput);
+        assert_eq!(preview.remaining_external_reference_count, 0);
+        assert_eq!(preview.missing_reference_count, 0);
+        assert!(
+            preview
+                .reproducibility_warnings
+                .iter()
+                .any(|warning| warning.contains("live viewer inputs"))
         );
     }
 
