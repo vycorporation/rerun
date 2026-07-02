@@ -102,3 +102,6 @@ Deferring these surfaces keeps the product fork focused on graph-visible dataflo
 6. #272 - Complete: expose native operator trust controls in the inspector,
    routing project trust, operator enablement, and capability grants through the
    graph-owned model commands without loading native code.
+7. #274 - Complete: name missing native operator capability grants in node
+   warnings and inspector trust diagnostics while keeping the existing load
+   status classification.
