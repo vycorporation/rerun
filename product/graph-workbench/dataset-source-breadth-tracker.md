@@ -40,6 +40,7 @@ for the dataset/source breadth lane.
 | `#208` | complete | Source format inference reports | Adds graph-owned source format inference reports from locator suffixes to ADR-backed capability records, including generated, live, unknown, supported, planned, later compatibility, and deferred statuses without adding parsers. |
 | `#210` | complete | External source reference action hints | Adds graph-owned recommended and secondary action hints for generated, local available, local missing, URI, and recording-query sources without performing OS, clipboard, relink, package, or parser actions. |
 | `#212` | complete | Explicit source package manifest writing | Adds an explicit native workbench action and model-owned JSON write seam for source package manifests without copying files, computing hashes, relinking sources, or embedding heavy artifacts. |
+| `#214` | complete | Source package manifest inclusion choices | Adds runtime/action-scoped include-available versus reference-only choices for eligible local source manifest artifacts without copying, hashing, relinking, or persisting choice state in sidecar JSON. |
 
 ## Next implementation candidates
 
@@ -47,6 +48,8 @@ for the dataset/source breadth lane.
    - Build on `#202` bundle metadata and `#206` manifest preview records.
    - `#212` writes manifest records only when an explicit package/export action
      exists.
+   - `#214` models explicit include-versus-reference choices before any file
+     copy or hash step.
    - Promote preview placeholders to written manifest entries only after package
      actions have copied files or chosen reference-only entries.
    - Keep content hashing and copying explicit, bounded, and testable.
