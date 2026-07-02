@@ -617,8 +617,8 @@ impl GraphDocument {
     }
 
     #[allow(dead_code)]
-    pub fn add_data_flow_edge(
-        &mut self,
+    pub fn preview_add_data_flow_edge(
+        &self,
         from_node_id: &str,
         from_output: &str,
         to_node_id: &str,
@@ -634,7 +634,26 @@ impl GraphDocument {
         if let Some(diagnostic) = self.data_flow_edge_addition_diagnostic(&edge) {
             return Err(diagnostic);
         }
+        Ok(edge.edge_id)
+    }
 
+    #[allow(dead_code)]
+    pub fn add_data_flow_edge(
+        &mut self,
+        from_node_id: &str,
+        from_output: &str,
+        to_node_id: &str,
+        to_input: &str,
+    ) -> Result<String, GraphDataFlowEdgeDiagnostic> {
+        self.preview_add_data_flow_edge(from_node_id, from_output, to_node_id, to_input)?;
+
+        let edge = GraphDataFlowEdge {
+            edge_id: Self::data_flow_edge_id(from_node_id, from_output, to_node_id, to_input),
+            from_node_id: from_node_id.to_owned(),
+            from_output: from_output.to_owned(),
+            to_node_id: to_node_id.to_owned(),
+            to_input: to_input.to_owned(),
+        };
         let edge_id = edge.edge_id.clone();
         let readable_path = self.readable_data_flow_edge_path(&edge);
         self.data_flow_edges.push(edge.clone());
@@ -16296,6 +16315,48 @@ mod tests {
         assert!(!graph.can_add_data_flow_edge(&edge));
         assert_eq!(diagnostic.status, GraphDataFlowEdgeDiagnosticStatus::Cycle);
         assert_eq!(diagnostic.edge_id, "style_to_source_cycle");
+    }
+
+    #[test]
+    fn preview_add_data_flow_edge_reports_diagnostics_without_mutating() {
+        let graph = GraphDocument::sample();
+        let initial_edges = graph.data_flow_edges.clone();
+        let source_node_id = graph.nodes[0].node_id.clone();
+        let filter_node_id = graph.nodes[1].node_id.clone();
+        let output_node_id = graph.nodes[3].node_id.clone();
+
+        let valid_edge_id = graph
+            .preview_add_data_flow_edge(
+                &source_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+                &output_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+            )
+            .expect("source to output should preview as a valid DAG edge");
+        assert_eq!(
+            valid_edge_id,
+            GraphDocument::data_flow_edge_id(
+                &source_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+                &output_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+            )
+        );
+
+        let duplicate = graph
+            .preview_add_data_flow_edge(
+                &source_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+                &filter_node_id,
+                PRIMARY_GEOMETRY_OUTPUT,
+            )
+            .expect_err("existing source to filter edge should preview as duplicate");
+        assert_eq!(
+            duplicate.status,
+            GraphDataFlowEdgeDiagnosticStatus::DuplicateConnection
+        );
+        assert_eq!(graph.data_flow_edges, initial_edges);
+        assert!(graph.command_history.undo_stack.is_empty());
     }
 
     #[test]

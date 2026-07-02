@@ -36,7 +36,7 @@ This ledger tracks how PRD/ADR material maps to issue-backed implementation in t
 | Shelf tools | complete for built-in shelf tools; custom shelf tools deferred | `shelf-tools.md` | `#90` |
 | Node comments, node info, badges, and organization affordances | complete for current v1 graph organization slice | `node-comment-display-mode.md`, command-history tracker | `#65`, `#66`, `#94`, `#100`, `#102`, `#104`, `#106`, `#111`, `#112`, `#120`, `#123` |
 | Node duplication and deletion | complete for ordinary single-node duplicate/delete | `node-duplication.md`, command-history tracker | `#92`, `#108`, `#113` |
-| Connection editing semantics | partial | this ledger until a focused tracker is added | `#136`, `#137`, `#138`, `#180`, `#182`, `#184`, `#186`, `#188`, `#190`, `#192` |
+| Connection editing semantics | partial | this ledger until a focused tracker is added | `#136`, `#137`, `#138`, `#180`, `#182`, `#184`, `#186`, `#188`, `#190`, `#192`, `#194` |
 | Malware byteplot starter workflow | complete for current starter graph and raster output slice | `malware-byteplot-workflow.md` | `#75`, `#79` |
 | Project command history | complete through the current command-history batch | `project-command-history.md` | `#88`, `#96`, `#98`, `#100`, `#102`, `#104`, `#106`, `#108`, `#110`, `#111`, `#112`, `#113`, `#114`, `#120`, `#121`, `#122`, `#123` |
 | PRD/ADR implementation status tracking | complete for the initial status ledger | `prd-adr-implementation-status.md` | `#128` |
@@ -72,8 +72,8 @@ issue-backed implementation slices next.
 
 3. Connection editing semantics.
    - Source ADRs: `0004`, `0006`, `0074`.
-   - Issue-backed slices: `#136` explicit graph edge metadata spine, `#137` acyclic edge validation, `#138` connection diagnostics, `#180` graph-owned data-flow edge add action, `#182` graph-owned data-flow edge remove action, `#184` explicit edge preservation across node deletion, `#186` reconnect-around node deletion model action, `#188` insert-node-on-connection model action, `#190` edge context-menu removal UI wiring, and `#192` primary-port drag-to-connect UI wiring.
-   - Later likely slices: drag-to-connect diagnostics polish and multi-port expansion.
+   - Issue-backed slices: `#136` explicit graph edge metadata spine, `#137` acyclic edge validation, `#138` connection diagnostics, `#180` graph-owned data-flow edge add action, `#182` graph-owned data-flow edge remove action, `#184` explicit edge preservation across node deletion, `#186` reconnect-around node deletion model action, `#188` insert-node-on-connection model action, `#190` edge context-menu removal UI wiring, `#192` primary-port drag-to-connect UI wiring, and `#194` drag-to-connect preview diagnostics.
+   - Later likely slices: multi-port expansion.
 
 4. Dataset/source breadth and external artifact references.
    - Source ADRs: `0014`, `0015`, `0016`, `0078`.
