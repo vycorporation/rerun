@@ -3724,6 +3724,16 @@ impl HoudiniGraphPanel {
             if ui.button("Index").clicked() {
                 self.rebuild_source_gallery_index();
             }
+            if ui
+                .add_enabled(
+                    self.source_gallery_index.is_some(),
+                    egui::Button::new("Refresh"),
+                )
+                .on_hover_text("Re-index the current gallery source without changing graph state.")
+                .clicked()
+            {
+                self.refresh_source_gallery_index();
+            }
             if ui.button("Clear").clicked() {
                 self.source_gallery_index = None;
                 self.source_gallery_selected_id = None;
@@ -3940,15 +3950,81 @@ impl HoudiniGraphPanel {
     }
 
     fn rebuild_source_gallery_index(&mut self) {
+        match self.build_source_gallery_index() {
+            Ok(index) => {
+                self.source_gallery_selected_id =
+                    index.items.first().map(|item| item.stable_id.clone());
+                self.source_gallery_checked_ids.clear();
+                self.source_gallery_status =
+                    Some(format!("Indexed {} item(s).", index.items.len()));
+                self.source_gallery_index = Some(index);
+            }
+            Err(error) => {
+                self.source_gallery_status = Some(error);
+            }
+        }
+    }
+
+    fn refresh_source_gallery_index(&mut self) -> bool {
+        let Some(previous_index) = self.source_gallery_index.clone() else {
+            self.source_gallery_status =
+                Some("Index a source gallery before refreshing.".to_owned());
+            return false;
+        };
+
+        let previous_ids = previous_index
+            .items
+            .iter()
+            .map(|item| item.stable_id.clone())
+            .collect::<Vec<_>>();
+        let selected_id = self.source_gallery_selected_id.clone();
+
+        let index = match self.build_source_gallery_index() {
+            Ok(index) => index,
+            Err(error) => {
+                self.source_gallery_status = Some(error);
+                return false;
+            }
+        };
+
+        let refreshed_ids = index
+            .items
+            .iter()
+            .map(|item| item.stable_id.clone())
+            .collect::<Vec<_>>();
+        let added_count = refreshed_ids
+            .iter()
+            .filter(|id| !previous_ids.iter().any(|previous_id| previous_id == *id))
+            .count();
+        let removed_count = previous_ids
+            .iter()
+            .filter(|id| !refreshed_ids.iter().any(|refreshed_id| refreshed_id == *id))
+            .count();
+
+        self.source_gallery_checked_ids
+            .retain(|id| refreshed_ids.iter().any(|refreshed_id| refreshed_id == id));
+        self.source_gallery_selected_id = selected_id
+            .filter(|id| refreshed_ids.iter().any(|refreshed_id| refreshed_id == id))
+            .or_else(|| index.items.first().map(|item| item.stable_id.clone()));
+        self.source_gallery_status = Some(format!(
+            "Refreshed {} item(s); {} added, {} removed.",
+            index.items.len(),
+            added_count,
+            removed_count
+        ));
+        self.source_gallery_index = Some(index);
+        true
+    }
+
+    fn build_source_gallery_index(&self) -> Result<SourceGalleryIndex, String> {
         let location = self.source_gallery_location.trim();
         if location.is_empty() {
-            self.source_gallery_status = Some("Enter a source locator.".to_owned());
-            return;
+            return Err("Enter a source locator.".to_owned());
         }
 
         let source = SourceLocator::from_location(location);
         let manifest_json = self.source_gallery_manifest_json.trim();
-        let result = if manifest_json.is_empty() {
+        if manifest_json.is_empty() {
             Ok(SourceGalleryIndex::from_locator(
                 source,
                 SOURCE_GALLERY_INDEX_LIMIT,
@@ -3959,19 +4035,7 @@ impl HoudiniGraphPanel {
                 manifest_json,
                 SOURCE_GALLERY_INDEX_LIMIT,
             )
-        };
-
-        match result {
-            Ok(index) => {
-                self.source_gallery_selected_id =
-                    index.items.first().map(|item| item.stable_id.clone());
-                self.source_gallery_status =
-                    Some(format!("Indexed {} item(s).", index.items.len()));
-                self.source_gallery_index = Some(index);
-            }
-            Err(error) => {
-                self.source_gallery_status = Some(error.to_string());
-            }
+            .map_err(|error| error.to_string())
         }
     }
 
@@ -9504,6 +9568,104 @@ mod tests {
                 .source_gallery_status
                 .as_deref()
                 .is_some_and(|status| status.contains("missing"))
+        );
+    }
+
+    #[test]
+    fn source_gallery_refresh_preserves_live_selection_and_prunes_stale_checks() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let first_path = temp_dir.path().join("first.png");
+        let second_path = temp_dir.path().join("second.png");
+        let third_path = temp_dir.path().join("third.png");
+        std::fs::write(&first_path, b"first").unwrap();
+        std::fs::write(&second_path, b"second").unwrap();
+
+        let mut panel = HoudiniGraphPanel {
+            source_gallery_location: temp_dir.path().display().to_string(),
+            ..Default::default()
+        };
+        panel.rebuild_source_gallery_index();
+        let initial_index = panel
+            .source_gallery_index
+            .clone()
+            .expect("initial source gallery index should exist");
+        let first_id = initial_index
+            .items
+            .iter()
+            .find(|item| item.display_name == "first.png")
+            .expect("first item should exist")
+            .stable_id
+            .clone();
+        let second_id = initial_index
+            .items
+            .iter()
+            .find(|item| item.display_name == "second.png")
+            .expect("second item should exist")
+            .stable_id
+            .clone();
+        panel.source_gallery_selected_id = Some(second_id.clone());
+        panel.source_gallery_checked_ids = vec![first_id.clone(), second_id.clone()];
+        let graph = GraphDocument::sample();
+        let node_count_before = graph.nodes.len();
+        let edge_count_before = graph.data_flow_edges.len();
+        let undo_count_before = graph.command_history.undo_stack.len();
+
+        std::fs::remove_file(&first_path).unwrap();
+        std::fs::write(&third_path, b"third").unwrap();
+
+        assert!(panel.refresh_source_gallery_index());
+
+        let refreshed_index = panel
+            .source_gallery_index
+            .as_ref()
+            .expect("refreshed source gallery index should exist");
+        assert_eq!(refreshed_index.items.len(), 2);
+        assert_eq!(
+            panel.source_gallery_selected_id.as_deref(),
+            Some(second_id.as_str())
+        );
+        assert_eq!(panel.source_gallery_checked_ids, vec![second_id]);
+        assert!(
+            panel
+                .source_gallery_status
+                .as_deref()
+                .is_some_and(|status| status.contains("1 added, 1 removed"))
+        );
+        assert_eq!(graph.nodes.len(), node_count_before);
+        assert_eq!(graph.data_flow_edges.len(), edge_count_before);
+        assert_eq!(graph.command_history.undo_stack.len(), undo_count_before);
+    }
+
+    #[test]
+    fn source_gallery_refresh_falls_back_when_selection_disappears() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let first_path = temp_dir.path().join("first.png");
+        let second_path = temp_dir.path().join("second.png");
+        std::fs::write(&first_path, b"first").unwrap();
+        std::fs::write(&second_path, b"second").unwrap();
+
+        let mut panel = HoudiniGraphPanel {
+            source_gallery_location: temp_dir.path().display().to_string(),
+            ..Default::default()
+        };
+        panel.rebuild_source_gallery_index();
+        let selected_id = panel.source_gallery_selected_id.clone();
+
+        std::fs::remove_file(&first_path).unwrap();
+        assert!(panel.refresh_source_gallery_index());
+
+        let refreshed_index = panel
+            .source_gallery_index
+            .as_ref()
+            .expect("refreshed source gallery index should exist");
+        assert_eq!(refreshed_index.items.len(), 1);
+        assert_ne!(panel.source_gallery_selected_id, selected_id);
+        assert_eq!(
+            panel.source_gallery_selected_id.as_deref(),
+            refreshed_index
+                .items
+                .first()
+                .map(|item| item.stable_id.as_str())
         );
     }
 

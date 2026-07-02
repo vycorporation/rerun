@@ -51,6 +51,7 @@ for the dataset/source breadth lane.
 | `#264` | complete | Polygon coordinate CSV import | Adds a graph-owned CSV/TSV import path for headered polygon coordinate rows, updates source metadata/capability reporting, and preserves the current source geometry when malformed coordinate files fail to load. |
 | `#266` | complete | GeoJSON polygon import | Adds a graph-owned GeoJSON import path for Polygon and MultiPolygon records, updates source metadata/capability reporting, and preserves the current source geometry when unsupported or malformed GeoJSON fails to load. |
 | `#268` | complete | Copy source locator action | Promotes the external-reference copy-locator action hint into a source metadata command that copies the readable locator to the egui clipboard without relinking, revealing, packaging, or mutating graph/source state. |
+| `#306` | complete | Source gallery explicit refresh | Adds a refresh path that re-indexes runtime gallery state, reports added/removed items, preserves live selection/checks, and prunes stale ids without mutating graph state. |
 
 ## Next implementation candidates
 
@@ -64,6 +65,8 @@ for the dataset/source breadth lane.
      state.
    - `#248` routes supported image and recording gallery items through Rerun's
      native file/URL loader without creating graph nodes or copying files.
+   - `#306` refreshes indexed gallery runtime state explicitly without
+     mutating graph sources or created nodes.
 
 2. Package/export manifest writing.
    - Build on `#202` bundle metadata and `#206` manifest preview records.
