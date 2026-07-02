@@ -7646,6 +7646,10 @@ impl SourceMetadata {
     pub fn bundle_preview(&self) -> SourceBundlePreview {
         SourceBundlePreview::from_external_reference(self.external_reference_report())
     }
+
+    pub fn package_manifest_preview(&self) -> SourcePackageManifestPreview {
+        SourcePackageManifestPreview::from_source_metadata(self, self.bundle_preview())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -7939,6 +7943,140 @@ impl SourceBundleInclusion {
             Self::Missing => "missing",
             Self::LiveInput => "live input",
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SourcePackageManifestPreview {
+    pub schema_version: u32,
+    pub artifacts: Vec<SourcePackageManifestArtifact>,
+    pub expected_size_bytes: Option<u64>,
+    pub remaining_external_reference_count: usize,
+    pub missing_reference_count: usize,
+    pub reproducibility_warnings: Vec<String>,
+}
+
+impl SourcePackageManifestPreview {
+    const SCHEMA_VERSION: u32 = 1;
+
+    fn from_source_metadata(
+        metadata: &SourceMetadata,
+        bundle_preview: SourceBundlePreview,
+    ) -> Self {
+        let artifact = SourcePackageManifestArtifact {
+            role: SourcePackageManifestArtifactRole::from_bundle_inclusion(
+                bundle_preview.item.inclusion,
+            ),
+            original_locator: bundle_preview.item.locator.clone(),
+            bundled_path: if bundle_preview.item.inclusion
+                == SourceBundleInclusion::IncludeAvailable
+            {
+                Some(source_package_manifest_bundled_path(
+                    &bundle_preview.item.locator,
+                ))
+            } else {
+                None
+            },
+            size_bytes: bundle_preview.item.expected_size_bytes,
+            content_hash: None,
+            source_provenance: metadata.provenance,
+            external_status: SourcePackageManifestExternalStatus::from_bundle_inclusion(
+                bundle_preview.item.inclusion,
+            ),
+        };
+
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            artifacts: vec![artifact],
+            expected_size_bytes: bundle_preview.expected_size_bytes,
+            remaining_external_reference_count: bundle_preview.remaining_external_reference_count,
+            missing_reference_count: bundle_preview.missing_reference_count,
+            reproducibility_warnings: bundle_preview.reproducibility_warnings,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SourcePackageManifestArtifact {
+    pub role: SourcePackageManifestArtifactRole,
+    pub original_locator: String,
+    pub bundled_path: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub content_hash: Option<String>,
+    pub source_provenance: SourceProvenance,
+    pub external_status: SourcePackageManifestExternalStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SourcePackageManifestArtifactRole {
+    SourceDataset,
+    LiveRecordingQuery,
+    GeneratedSource,
+}
+
+impl SourcePackageManifestArtifactRole {
+    fn from_bundle_inclusion(inclusion: SourceBundleInclusion) -> Self {
+        match inclusion {
+            SourceBundleInclusion::NotExternal => Self::GeneratedSource,
+            SourceBundleInclusion::LiveInput => Self::LiveRecordingQuery,
+            SourceBundleInclusion::IncludeAvailable
+            | SourceBundleInclusion::ReferenceOnly
+            | SourceBundleInclusion::Missing => Self::SourceDataset,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SourcePackageManifestExternalStatus {
+    NotExternal,
+    IncludedPendingWrite,
+    ReferenceOnly,
+    Missing,
+    LiveInput,
+}
+
+impl SourcePackageManifestExternalStatus {
+    fn from_bundle_inclusion(inclusion: SourceBundleInclusion) -> Self {
+        match inclusion {
+            SourceBundleInclusion::NotExternal => Self::NotExternal,
+            SourceBundleInclusion::IncludeAvailable => Self::IncludedPendingWrite,
+            SourceBundleInclusion::ReferenceOnly => Self::ReferenceOnly,
+            SourceBundleInclusion::Missing => Self::Missing,
+            SourceBundleInclusion::LiveInput => Self::LiveInput,
+        }
+    }
+}
+
+fn source_package_manifest_bundled_path(locator: &str) -> String {
+    let file_name = Path::new(locator)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("source");
+    format!(
+        "sources/{}",
+        sanitize_package_manifest_path_component(file_name)
+    )
+}
+
+fn sanitize_package_manifest_path_component(component: &str) -> String {
+    let sanitized = component
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if sanitized.is_empty() {
+        "source".to_owned()
+    } else {
+        sanitized
     }
 }
 
@@ -13000,8 +13138,9 @@ mod tests {
         ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
         ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceBundleInclusion,
         SourceExternalReferenceStatus, SourceFormatKind, SourceFormatSupportStatus,
-        SourceLocatorKind, SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin,
-        SubstrateYAxis, ViewerGeometry, load_cubic_bezier_parquet,
+        SourceLocatorKind, SourcePackageManifestArtifactRole, SourcePackageManifestExternalStatus,
+        SourcePackageManifestPreview, SourceProvenance, SubstrateCoordinateContract,
+        SubstrateOrigin, SubstrateYAxis, ViewerGeometry, load_cubic_bezier_parquet,
         load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
@@ -20281,6 +20420,150 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .iter()
                 .any(|warning| warning.contains("live viewer inputs"))
         );
+    }
+
+    #[test]
+    fn source_package_manifest_preview_reports_local_include_record_without_copying() {
+        let graph = GraphDocument::sample();
+        let mut local_file = tempfile::Builder::new()
+            .prefix("native cubic")
+            .suffix(".parquet")
+            .tempfile()
+            .unwrap();
+        use std::io::Write as _;
+        local_file.write_all(b"native cubic bytes").unwrap();
+        local_file.flush().unwrap();
+
+        let metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(local_file.path().display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let preview = metadata.package_manifest_preview();
+
+        assert_eq!(preview.schema_version, 1);
+        assert_eq!(preview.artifacts.len(), 1);
+        assert_eq!(
+            preview.expected_size_bytes,
+            Some("native cubic bytes".len() as u64)
+        );
+        assert_eq!(preview.remaining_external_reference_count, 0);
+        assert_eq!(preview.missing_reference_count, 0);
+        assert!(
+            preview
+                .reproducibility_warnings
+                .iter()
+                .any(|warning| warning.contains("no content hash"))
+        );
+
+        let artifact = &preview.artifacts[0];
+        assert_eq!(
+            artifact.role,
+            SourcePackageManifestArtifactRole::SourceDataset
+        );
+        assert_eq!(
+            artifact.original_locator,
+            local_file.path().display().to_string()
+        );
+        assert!(
+            artifact
+                .bundled_path
+                .as_deref()
+                .is_some_and(|path| path.starts_with("sources/native_cubic"))
+        );
+        assert_eq!(artifact.size_bytes, Some("native cubic bytes".len() as u64));
+        assert_eq!(artifact.content_hash, None);
+        assert_eq!(artifact.source_provenance, SourceProvenance::ParquetImport);
+        assert_eq!(
+            artifact.external_status,
+            SourcePackageManifestExternalStatus::IncludedPendingWrite
+        );
+
+        let json = serde_json::to_string_pretty(&preview).unwrap();
+        assert!(json.contains("\"schema_version\": 1"));
+        assert!(json.contains("\"role\": \"source_dataset\""));
+        assert!(json.contains("\"external_status\": \"included_pending_write\""));
+        let round_trip: SourcePackageManifestPreview = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip, preview);
+    }
+
+    #[test]
+    fn source_package_manifest_preview_reports_reference_missing_generated_and_live_records() {
+        let graph = GraphDocument::sample();
+        let demo_preview = graph.source.metadata.package_manifest_preview();
+        assert_eq!(demo_preview.artifacts.len(), 1);
+        assert_eq!(
+            demo_preview.artifacts[0].role,
+            SourcePackageManifestArtifactRole::GeneratedSource
+        );
+        assert_eq!(
+            demo_preview.artifacts[0].external_status,
+            SourcePackageManifestExternalStatus::NotExternal
+        );
+        assert_eq!(demo_preview.artifacts[0].bundled_path, None);
+
+        let uri_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some("s3://bucket/curves.parquet".to_owned()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let uri_preview = uri_metadata.package_manifest_preview();
+        assert_eq!(
+            uri_preview.artifacts[0].role,
+            SourcePackageManifestArtifactRole::SourceDataset
+        );
+        assert_eq!(
+            uri_preview.artifacts[0].external_status,
+            SourcePackageManifestExternalStatus::ReferenceOnly
+        );
+        assert_eq!(uri_preview.artifacts[0].bundled_path, None);
+        assert_eq!(uri_preview.remaining_external_reference_count, 1);
+        assert!(uri_preview.reproducibility_warnings[0].contains("unverified"));
+
+        let missing_dir = tempfile::tempdir().unwrap();
+        let missing_path = missing_dir.path().join("missing-source.parquet");
+        let missing_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(missing_path.display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let missing_preview = missing_metadata.package_manifest_preview();
+        assert_eq!(
+            missing_preview.artifacts[0].external_status,
+            SourcePackageManifestExternalStatus::Missing
+        );
+        assert_eq!(missing_preview.missing_reference_count, 1);
+        assert!(
+            missing_preview
+                .reproducibility_warnings
+                .iter()
+                .any(|warning| warning.contains("missing"))
+        );
+
+        let bridge = super::RerunQueryBridge {
+            mode: super::RerunQueryBridgeMode::ProductForkViewOwned,
+            view_id: "view(1234)".to_owned(),
+            space_origin: "/".to_owned(),
+            timeline: "frame".to_owned(),
+            latest_at: 42,
+            matching_entity_count: 1,
+            visualized_entity_count: 1,
+            visible_data_result_count: 1,
+        };
+        let source = super::GraphSource::from_query_bridge(&bridge);
+        let live_preview = source.metadata.package_manifest_preview();
+        assert_eq!(
+            live_preview.artifacts[0].role,
+            SourcePackageManifestArtifactRole::LiveRecordingQuery
+        );
+        assert_eq!(
+            live_preview.artifacts[0].external_status,
+            SourcePackageManifestExternalStatus::LiveInput
+        );
+        assert_eq!(live_preview.artifacts[0].bundled_path, None);
     }
 
     #[test]

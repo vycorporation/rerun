@@ -36,14 +36,15 @@ for the dataset/source breadth lane.
 | `#200` | complete | Source external-reference status reports | Adds non-persistent status reports for not-external, local available, local missing, URI/unverified, and recording-query source references and surfaces them in source metadata UI. |
 | `#202` | complete | Source bundle preview metadata | Adds preview-only source bundle metadata for inclusion status, expected local size, missing references, remaining external references, and reproducibility warnings without copying or hashing. |
 | `#204` | complete | Focused dataset/source tracker | Adds this tracker and points the main PRD/ADR status ledger at it. |
+| `#206` | complete | Source package manifest preview records | Adds serializable preview records for package/export manifests with source role, original locator, bundled path placeholder, expected size, hash availability, provenance, and external status without writing or copying files. |
 
 ## Next implementation candidates
 
 1. Package/export manifest writing.
-   - Build on `#202` preview metadata.
+   - Build on `#202` bundle metadata and `#206` manifest preview records.
    - Write manifest records only when an explicit package/export action exists.
-   - Include artifact role, original locator, bundled path when copied, size,
-     content hash when available, source/output provenance, and external status.
+   - Promote preview placeholders to written manifest entries only after package
+     actions have copied files or chosen reference-only entries.
    - Keep content hashing and copying explicit, bounded, and testable.
 
 2. Source-format import breadth.
