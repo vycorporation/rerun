@@ -6254,6 +6254,15 @@ impl HoudiniGraphPanel {
                 native_operator_load_status_color(ui, native_operator.load_status),
                 native_operator.load_status.summary(),
             );
+            if !native_operator.missing_capability_grants.is_empty() {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!(
+                        "Missing grants: {}",
+                        format_list(&native_operator.missing_capability_grants)
+                    ),
+                );
+            }
         }
     }
 

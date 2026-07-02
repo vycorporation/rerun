@@ -6129,6 +6129,23 @@ impl GraphDocument {
         NativeOperatorLoadStatus::Ready
     }
 
+    fn missing_native_operator_capability_grants(
+        &self,
+        declaration: &NativeOperatorDeclaration,
+    ) -> Vec<String> {
+        declaration
+            .capabilities
+            .iter()
+            .filter(|capability| {
+                !self
+                    .native_operator_trust
+                    .granted_capabilities
+                    .contains(capability)
+            })
+            .map(|capability| format!("{capability:?}"))
+            .collect()
+    }
+
     fn block_native_operator_run(&self, node_index: usize) -> Option<NativeOperatorLoadStatus> {
         let node = self.nodes.get(node_index)?;
         let native_operator = node.native_operator.as_ref()?;
@@ -7635,6 +7652,9 @@ impl GraphDocument {
                 let load_status = self.native_operator_load_status(
                     declaration.map(|declaration| declaration.operator_id.as_str()),
                 );
+                let missing_capability_grants = declaration
+                    .map(|declaration| self.missing_native_operator_capability_grants(declaration))
+                    .unwrap_or_default();
                 let mut warnings = match version_status {
                     OperatorVersionStatus::Current => Vec::new(),
                     _ => vec![format!(
@@ -7643,7 +7663,16 @@ impl GraphDocument {
                     )],
                 };
                 if load_status != NativeOperatorLoadStatus::Ready {
-                    warnings.push(load_status.summary().to_owned());
+                    if load_status == NativeOperatorLoadStatus::MissingCapabilityGrant
+                        && !missing_capability_grants.is_empty()
+                    {
+                        warnings.push(format!(
+                            "Missing native capability grants: {}.",
+                            missing_capability_grants.join(", ")
+                        ));
+                    } else {
+                        warnings.push(load_status.summary().to_owned());
+                    }
                 }
                 NodeInfo {
                     kind: node.kind,
@@ -7733,6 +7762,7 @@ impl GraphDocument {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        missing_capability_grants,
                         provenance_summary: declaration
                             .map(|declaration| declaration.provenance.summary())
                             .unwrap_or_else(|| "none".to_owned()),
@@ -15268,6 +15298,7 @@ pub(crate) struct NativeOperatorNodeInfo {
     pub project_trusted: bool,
     pub operator_enabled: bool,
     pub capability_grants: Vec<NativeOperatorCapabilityGrantInfo>,
+    pub missing_capability_grants: Vec<String>,
     pub provenance_summary: String,
     pub output_provenance_summary: Option<String>,
     pub cache_key_summary: Option<String>,
@@ -27254,6 +27285,55 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                         && !grant.granted
                 )
         );
+    }
+
+    #[test]
+    fn native_operator_missing_capability_grants_name_blocking_capabilities() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        assert!(graph.set_native_operator_project_trusted(true));
+        assert!(
+            graph
+                .set_native_operator_capability_grant(NativeOperatorCapability::GeometryRead, true)
+        );
+
+        let partial = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist");
+        assert!(
+            partial
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("GeometryWrite"))
+        );
+        let native = partial
+            .native_operator
+            .expect("native info should report missing capabilities");
+        assert_eq!(
+            native.missing_capability_grants,
+            vec!["GeometryWrite".to_owned()]
+        );
+        assert_eq!(
+            native.load_status,
+            NativeOperatorLoadStatus::MissingCapabilityGrant
+        );
+
+        assert!(
+            graph.set_native_operator_capability_grant(
+                NativeOperatorCapability::GeometryWrite,
+                true
+            )
+        );
+        let ready = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist")
+            .native_operator
+            .expect("native info should exist");
+        assert!(ready.missing_capability_grants.is_empty());
+        assert_eq!(ready.load_status, NativeOperatorLoadStatus::Ready);
     }
 
     #[test]
