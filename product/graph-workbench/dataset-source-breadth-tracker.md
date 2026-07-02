@@ -38,6 +38,7 @@ for the dataset/source breadth lane.
 | `#204` | complete | Focused dataset/source tracker | Adds this tracker and points the main PRD/ADR status ledger at it. |
 | `#206` | complete | Source package manifest preview records | Adds serializable preview records for package/export manifests with source role, original locator, bundled path placeholder, expected size, hash availability, provenance, and external status without writing or copying files. |
 | `#208` | complete | Source format inference reports | Adds graph-owned source format inference reports from locator suffixes to ADR-backed capability records, including generated, live, unknown, supported, planned, later compatibility, and deferred statuses without adding parsers. |
+| `#210` | complete | External source reference action hints | Adds graph-owned recommended and secondary action hints for generated, local available, local missing, URI, and recording-query sources without performing OS, clipboard, relink, package, or parser actions. |
 
 ## Next implementation candidates
 
@@ -56,9 +57,11 @@ for the dataset/source breadth lane.
      that product scope.
 
 3. External-reference UI actions.
-   - Build on `#200` and `#202`.
+   - Build on `#200`, `#202`, and `#210`.
    - Show missing/includable/reference-only status near source inspection and
      future package/export flows.
+   - Promote action hints to actual UI commands only behind explicit workflows
+     such as relink, clipboard copy, local reveal, or package/export.
    - Do not silently embed large data from asset definitions or source nodes.
 
 ## Maintenance
