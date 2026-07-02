@@ -439,6 +439,33 @@ impl GraphDocument {
         self.graph_local_node_indices(self.current_graph_id())
     }
 
+    pub fn graph_local_annotation_indices(&self, graph_id: &str) -> Vec<usize> {
+        let graph_id = if graph_id.is_empty() {
+            MAIN_GRAPH_ID
+        } else {
+            graph_id
+        };
+        self.annotations
+            .iter()
+            .enumerate()
+            .filter_map(|(index, annotation)| {
+                (self.annotation_parent_graph_id(annotation) == graph_id).then_some(index)
+            })
+            .collect()
+    }
+
+    pub fn current_graph_annotation_indices(&self) -> Vec<usize> {
+        self.graph_local_annotation_indices(self.current_graph_id())
+    }
+
+    pub fn annotation_belongs_to_current_graph(&self, annotation_index: usize) -> bool {
+        self.annotations
+            .get(annotation_index)
+            .is_some_and(|annotation| {
+                self.annotation_parent_graph_id(annotation) == self.current_graph_id()
+            })
+    }
+
     fn graph_container_metadata_for_node(&self, node_id: &str) -> Option<&GraphContainerMetadata> {
         self.graph_containers
             .iter()
@@ -580,6 +607,14 @@ impl GraphDocument {
             MAIN_GRAPH_ID
         } else {
             node.parent_graph_id.as_str()
+        }
+    }
+
+    fn annotation_parent_graph_id<'a>(&'a self, annotation: &'a GraphAnnotation) -> &'a str {
+        if annotation.parent_graph_id.is_empty() {
+            MAIN_GRAPH_ID
+        } else {
+            annotation.parent_graph_id.as_str()
         }
     }
 
@@ -1305,6 +1340,7 @@ impl GraphDocument {
             annotations: vec![
                 GraphAnnotation::network_box(
                     "box.prep".to_owned(),
+                    MAIN_GRAPH_ID.to_owned(),
                     "Prep".to_owned(),
                     GraphPoint::new(0.03, 0.24),
                     GraphPoint::new(0.62, 0.48),
@@ -1312,6 +1348,7 @@ impl GraphDocument {
                 ),
                 GraphAnnotation::sticky_note(
                     "note.review".to_owned(),
+                    MAIN_GRAPH_ID.to_owned(),
                     "Review".to_owned(),
                     "Check score cutoff before publishing output.".to_owned(),
                     GraphPoint::new(0.60, 0.12),
@@ -1610,6 +1647,7 @@ impl GraphDocument {
             annotations: vec![
                 GraphAnnotation::network_box(
                     "box.malware_sources".to_owned(),
+                    MAIN_GRAPH_ID.to_owned(),
                     "Independent Sources".to_owned(),
                     GraphPoint::new(-0.08, 0.08),
                     GraphPoint::new(0.28, 0.90),
@@ -1621,6 +1659,7 @@ impl GraphDocument {
                 ),
                 GraphAnnotation::network_box(
                     "box.malware_output".to_owned(),
+                    MAIN_GRAPH_ID.to_owned(),
                     "Filter Style Output".to_owned(),
                     GraphPoint::new(0.28, 0.34),
                     GraphPoint::new(0.82, 0.44),
@@ -1632,6 +1671,7 @@ impl GraphDocument {
                 ),
                 GraphAnnotation::sticky_note(
                     "note.pixel_space".to_owned(),
+                    MAIN_GRAPH_ID.to_owned(),
                     "Pixel Space".to_owned(),
                     "All mock region polygons are authored in the byteplot image pixel coordinate space.".to_owned(),
                     GraphPoint::new(0.30, 0.08),
@@ -1876,6 +1916,7 @@ impl GraphDocument {
             GraphPoint::new(node.layout_position.x - 0.08, node.layout_position.y - 0.16);
         let annotation = GraphAnnotation::network_box(
             self.unique_annotation_id("box"),
+            self.current_graph_id().to_owned(),
             self.unique_annotation_title("Network Box"),
             position,
             GraphPoint::new(0.22, 0.24),
@@ -1896,6 +1937,7 @@ impl GraphDocument {
             GraphPoint::new(node.layout_position.x + 0.08, node.layout_position.y - 0.18);
         let annotation = GraphAnnotation::sticky_note(
             self.unique_annotation_id("note"),
+            self.current_graph_id().to_owned(),
             self.unique_annotation_title("Sticky Note"),
             String::new(),
             position,
@@ -1931,11 +1973,24 @@ impl GraphDocument {
             return false;
         };
         let node_id = node.node_id.clone();
+        let node_parent_graph_id = if node.parent_graph_id.is_empty() {
+            MAIN_GRAPH_ID.to_owned()
+        } else {
+            node.parent_graph_id.clone()
+        };
         let node_position = node.layout_position;
         let mut changed = false;
 
         for annotation in &mut self.annotations {
             if annotation.kind != GraphAnnotationKind::NetworkBox {
+                continue;
+            }
+            let annotation_parent_graph_id = if annotation.parent_graph_id.is_empty() {
+                MAIN_GRAPH_ID
+            } else {
+                annotation.parent_graph_id.as_str()
+            };
+            if annotation_parent_graph_id != node_parent_graph_id {
                 continue;
             }
 
@@ -2015,7 +2070,10 @@ impl GraphDocument {
     pub fn network_box_organization_snapshots(&self) -> Vec<NetworkBoxOrganizationSnapshot> {
         self.annotations
             .iter()
-            .filter(|annotation| annotation.kind == GraphAnnotationKind::NetworkBox)
+            .filter(|annotation| {
+                annotation.kind == GraphAnnotationKind::NetworkBox
+                    && self.annotation_parent_graph_id(annotation) == self.current_graph_id()
+            })
             .map(NetworkBoxOrganizationSnapshot::from_annotation)
             .collect()
     }
@@ -2139,11 +2197,16 @@ impl GraphDocument {
     }
 
     pub fn set_all_annotations_collapsed(&mut self, collapsed: bool) -> bool {
+        let current_graph_id = self.current_graph_id().to_owned();
         let collapsed_annotations = self
             .annotations
             .iter_mut()
             .filter_map(|annotation| {
-                if annotation.collapsed == collapsed {
+                if (annotation.parent_graph_id.as_str() != current_graph_id
+                    && !(annotation.parent_graph_id.is_empty()
+                        && current_graph_id == MAIN_GRAPH_ID))
+                    || annotation.collapsed == collapsed
+                {
                     return None;
                 }
                 let old_collapsed = annotation.collapsed;
@@ -9421,6 +9484,8 @@ pub(crate) struct GraphNode {
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct GraphAnnotation {
     pub annotation_id: String,
+    #[serde(default = "default_main_graph_id")]
+    pub parent_graph_id: String,
     pub kind: GraphAnnotationKind,
     pub title: String,
     pub text: String,
@@ -9433,6 +9498,7 @@ pub(crate) struct GraphAnnotation {
 impl GraphAnnotation {
     fn network_box(
         annotation_id: String,
+        parent_graph_id: String,
         title: String,
         position: GraphPoint,
         size: GraphPoint,
@@ -9440,6 +9506,7 @@ impl GraphAnnotation {
     ) -> Self {
         Self {
             annotation_id,
+            parent_graph_id,
             kind: GraphAnnotationKind::NetworkBox,
             title,
             text: String::new(),
@@ -9452,6 +9519,7 @@ impl GraphAnnotation {
 
     fn sticky_note(
         annotation_id: String,
+        parent_graph_id: String,
         title: String,
         text: String,
         position: GraphPoint,
@@ -9459,6 +9527,7 @@ impl GraphAnnotation {
     ) -> Self {
         Self {
             annotation_id,
+            parent_graph_id,
             kind: GraphAnnotationKind::StickyNote,
             title,
             text,
@@ -9558,6 +9627,10 @@ fn default_grid_spacing() -> f32 {
 
 fn default_background_brightness() -> f32 {
     0.12
+}
+
+fn default_main_graph_id() -> String {
+    MAIN_GRAPH_ID.to_owned()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -16796,6 +16869,78 @@ mod tests {
     }
 
     #[test]
+    fn graph_annotations_are_scoped_to_current_graph() {
+        let mut graph = GraphDocument::sample();
+        graph.graph_registry.graphs.push(ProjectGraphMetadata {
+            graph_id: "analysis".to_owned(),
+            name: "Analysis".to_owned(),
+            path: "/obj/main/analysis".to_owned(),
+            role: ProjectGraphRole::Subgraph,
+        });
+        let main_annotation_count = graph.annotations.len();
+        assert_eq!(
+            graph.current_graph_annotation_indices().len(),
+            main_annotation_count
+        );
+
+        graph
+            .select_graph_by_id("analysis")
+            .expect("analysis graph should be selectable");
+        assert!(graph.current_graph_annotation_indices().is_empty());
+        let analysis_node_index = graph.add_null_operator_node("OUT_ANALYSIS");
+        let analysis_box_index = graph
+            .add_network_box_for_node(analysis_node_index)
+            .expect("analysis graph should support network boxes");
+        let analysis_note_index = graph
+            .add_sticky_note_near_node(analysis_node_index)
+            .expect("analysis graph should support sticky notes");
+
+        assert_eq!(
+            graph.current_graph_annotation_indices(),
+            vec![analysis_box_index, analysis_note_index]
+        );
+        assert_eq!(
+            graph.annotations[analysis_box_index].parent_graph_id,
+            "analysis"
+        );
+        assert_eq!(
+            graph.annotations[analysis_note_index].parent_graph_id,
+            "analysis"
+        );
+        assert!(
+            graph
+                .network_box_organization_snapshots()
+                .iter()
+                .all(|snapshot| {
+                    snapshot.annotation_id == graph.annotations[analysis_box_index].annotation_id
+                })
+        );
+
+        assert!(graph.set_all_annotations_collapsed(true));
+        assert!(graph.annotations[analysis_box_index].collapsed);
+        assert!(graph.annotations[analysis_note_index].collapsed);
+        assert!(
+            graph.annotations[..main_annotation_count]
+                .iter()
+                .all(|annotation| !annotation.collapsed)
+        );
+
+        graph
+            .select_graph_by_id("main")
+            .expect("main graph should be selectable");
+        assert_eq!(
+            graph.current_graph_annotation_indices(),
+            (0..main_annotation_count).collect::<Vec<_>>()
+        );
+        assert!(
+            graph
+                .current_graph_annotation_indices()
+                .iter()
+                .all(|index| { graph.annotations[*index].parent_graph_id == "main" })
+        );
+    }
+
+    #[test]
     fn annotation_delete_records_undoable_project_command() {
         let mut graph = GraphDocument::sample();
         graph.annotations.clear();
@@ -19228,6 +19373,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             restored.annotations[0].member_node_ids,
             vec![graph.nodes[selected_node_index].node_id.clone()]
         );
+        assert_eq!(restored.annotations[0].parent_graph_id, "main");
         assert_eq!(
             restored.annotations[1].kind,
             GraphAnnotationKind::StickyNote
@@ -19236,6 +19382,31 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(
             restored.annotations[1].text,
             "Raise threshold before output."
+        );
+        assert_eq!(restored.annotations[1].parent_graph_id, "main");
+
+        let mut legacy_value: serde_json::Value =
+            serde_json::from_str(&json).expect("sidecar should be valid json");
+        if let Some(annotations) = legacy_value
+            .get_mut("annotations")
+            .and_then(|annotations| annotations.as_array_mut())
+        {
+            for annotation in annotations {
+                annotation
+                    .as_object_mut()
+                    .expect("annotation should be object")
+                    .remove("parent_graph_id");
+            }
+        }
+        let legacy_json =
+            serde_json::to_string_pretty(&legacy_value).expect("legacy sidecar should serialize");
+        let mut legacy_restored = GraphDocument::sample();
+        legacy_restored.apply_sidecar_json(&legacy_json).unwrap();
+        assert!(
+            legacy_restored
+                .annotations
+                .iter()
+                .all(|annotation| annotation.parent_graph_id == "main")
         );
     }
 

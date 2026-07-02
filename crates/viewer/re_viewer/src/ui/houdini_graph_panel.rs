@@ -659,6 +659,7 @@ impl HoudiniGraphPanel {
 
     fn selected_item_label(&self, graph: &GraphDocument) -> String {
         if let Some(annotation_index) = self.selected_annotation
+            && graph.annotation_belongs_to_current_graph(annotation_index)
             && let Some(annotation) = graph.annotations.get(annotation_index)
         {
             return format!("{}: {}", annotation.kind.as_str(), annotation.title);
@@ -699,6 +700,10 @@ impl HoudiniGraphPanel {
         let Some(annotation_index) = self.selected_annotation else {
             return false;
         };
+        if !graph.annotation_belongs_to_current_graph(annotation_index) {
+            self.selected_annotation = None;
+            return false;
+        }
         let Some(annotation) = graph.annotations.get(annotation_index) else {
             return false;
         };
@@ -724,6 +729,7 @@ impl HoudiniGraphPanel {
 
     fn resize_selected_network_box_to_contents(&mut self, graph: &mut GraphDocument) -> bool {
         if let Some(annotation_index) = self.selected_annotation
+            && graph.annotation_belongs_to_current_graph(annotation_index)
             && graph
                 .annotations
                 .get(annotation_index)
@@ -732,15 +738,25 @@ impl HoudiniGraphPanel {
             return graph.resize_network_box_to_contents(annotation_index);
         }
 
-        let Some(annotation_index) = graph.annotations.iter().position(|annotation| {
-            annotation.kind == GraphAnnotationKind::NetworkBox
-                && graph.nodes.get(self.selected_node).is_some_and(|node| {
-                    annotation
-                        .member_node_ids
-                        .iter()
-                        .any(|member_id| member_id == &node.node_id)
+        let Some(annotation_index) =
+            graph
+                .current_graph_annotation_indices()
+                .into_iter()
+                .find(|annotation_index| {
+                    graph
+                        .annotations
+                        .get(*annotation_index)
+                        .is_some_and(|annotation| {
+                            annotation.kind == GraphAnnotationKind::NetworkBox
+                                && graph.nodes.get(self.selected_node).is_some_and(|node| {
+                                    annotation
+                                        .member_node_ids
+                                        .iter()
+                                        .any(|member_id| member_id == &node.node_id)
+                                })
+                        })
                 })
-        }) else {
+        else {
             return false;
         };
         graph.resize_network_box_to_contents(annotation_index)
@@ -748,11 +764,13 @@ impl HoudiniGraphPanel {
 
     fn resize_all_network_boxes_to_contents(&mut self, graph: &mut GraphDocument) {
         let network_box_indices = graph
-            .annotations
-            .iter()
-            .enumerate()
-            .filter_map(|(index, annotation)| {
-                (annotation.kind == GraphAnnotationKind::NetworkBox).then_some(index)
+            .current_graph_annotation_indices()
+            .into_iter()
+            .filter(|index| {
+                graph
+                    .annotations
+                    .get(*index)
+                    .is_some_and(|annotation| annotation.kind == GraphAnnotationKind::NetworkBox)
             })
             .collect::<Vec<_>>();
         for index in network_box_indices {
@@ -2124,7 +2142,8 @@ impl HoudiniGraphPanel {
                     .iter()
                     .map(|node| (node.node_id.clone(), node.name.clone()))
                     .collect::<Vec<_>>();
-                for annotation_index in 0..graph.annotations.len() {
+                let annotation_indices = graph.current_graph_annotation_indices();
+                for annotation_index in annotation_indices.iter().copied() {
                     let mut resize_to_contents = false;
                     let Some(annotation) = graph.annotations.get(annotation_index).cloned() else {
                         continue;
@@ -2222,7 +2241,7 @@ impl HoudiniGraphPanel {
                     }
                 }
 
-                if graph.annotations.is_empty() {
+                if annotation_indices.is_empty() {
                     ui.weak("No graph annotations.");
                 }
             });
@@ -3278,7 +3297,10 @@ impl HoudiniGraphPanel {
             }
         }
 
-        for (index, annotation) in graph.annotations.iter().enumerate() {
+        for index in graph.current_graph_annotation_indices() {
+            let Some(annotation) = graph.annotations.get(index) else {
+                continue;
+            };
             let haystack = [
                 annotation.title.as_str(),
                 annotation.text.as_str(),
@@ -3627,25 +3649,29 @@ impl HoudiniGraphPanel {
         let hovered_annotation_index = if response.hovered() {
             ui.input(|input| input.pointer.hover_pos())
                 .and_then(|pointer_pos| {
-                    annotation_rects.iter().enumerate().rev().find_map(
-                        |(index, annotation_rect)| {
-                            annotation_rect.contains(pointer_pos).then_some(index)
-                        },
-                    )
+                    annotation_rects
+                        .iter()
+                        .rev()
+                        .find_map(|(index, annotation_rect)| {
+                            annotation_rect.contains(pointer_pos).then_some(*index)
+                        })
                 })
         } else {
             None
         };
 
-        for (annotation_index, annotation) in graph.annotations.iter().enumerate() {
+        for (annotation_index, _) in &annotation_rects {
+            let Some(annotation) = graph.annotations.get(*annotation_index) else {
+                continue;
+            };
             draw_graph_annotation(
                 &painter,
                 layout_rect,
                 annotation,
                 self.graph_view_zoom,
                 self.graph_view_pan,
-                self.selected_annotation == Some(annotation_index),
-                hovered_annotation_index == Some(annotation_index),
+                self.selected_annotation == Some(*annotation_index),
+                hovered_annotation_index == Some(*annotation_index),
                 ui.visuals(),
             );
         }
@@ -3741,40 +3767,40 @@ impl HoudiniGraphPanel {
 
                 let mut hit_annotation = false;
                 if !hit_node {
-                    for (index, annotation_rect) in annotation_rects.iter().enumerate().rev() {
+                    for (index, annotation_rect) in annotation_rects.iter().rev() {
                         if annotation_collapse_toggle_rect(*annotation_rect).contains(pointer_pos) {
-                            if let Some(annotation) = graph.annotations.get(index) {
-                                graph.set_annotation_collapsed(index, !annotation.collapsed);
+                            if let Some(annotation) = graph.annotations.get(*index) {
+                                graph.set_annotation_collapsed(*index, !annotation.collapsed);
                             }
-                            self.selected_annotation = Some(index);
+                            self.selected_annotation = Some(*index);
                             self.selected_edge = None;
                             self.selected_nodes.clear();
                             hit_annotation = true;
                             break;
                         }
                         if annotation_resize_handle_rect(*annotation_rect).contains(pointer_pos) {
-                            self.selected_annotation = Some(index);
+                            self.selected_annotation = Some(*index);
                             self.selected_edge = None;
                             self.selected_nodes.clear();
-                            self.resizing_annotation = Some(index);
+                            self.resizing_annotation = Some(*index);
                             self.annotation_resize_start_size = graph
                                 .annotations
-                                .get(index)
+                                .get(*index)
                                 .map(|annotation| annotation.size);
                             hit_annotation = true;
                             break;
                         }
                         if annotation_rect.contains(pointer_pos) {
-                            self.selected_annotation = Some(index);
+                            self.selected_annotation = Some(*index);
                             self.selected_edge = None;
                             self.selected_nodes.clear();
-                            self.dragging_annotation = Some(index);
+                            self.dragging_annotation = Some(*index);
                             self.annotation_drag_start_position = graph
                                 .annotations
-                                .get(index)
+                                .get(*index)
                                 .map(|annotation| annotation.position);
                             self.annotation_drag_start_member_positions =
-                                graph.annotation_member_layout_positions(index);
+                                graph.annotation_member_layout_positions(*index);
                             hit_annotation = true;
                             break;
                         }
@@ -3829,9 +3855,9 @@ impl HoudiniGraphPanel {
                 self.context_menu_edge = None;
                 self.context_menu_canvas = true;
                 let mut hit_annotation = false;
-                for (index, annotation_rect) in annotation_rects.iter().enumerate().rev() {
+                for (index, annotation_rect) in annotation_rects.iter().rev() {
                     if annotation_rect.contains(pointer_pos) {
-                        self.selected_annotation = Some(index);
+                        self.selected_annotation = Some(*index);
                         self.selected_edge = None;
                         self.selected_nodes.clear();
                         self.context_menu_canvas = false;
@@ -4617,7 +4643,9 @@ impl HoudiniGraphPanel {
         let Some(annotation_index) = self.selected_annotation else {
             return;
         };
-        if annotation_index >= graph.annotations.len() {
+        if annotation_index >= graph.annotations.len()
+            || !graph.annotation_belongs_to_current_graph(annotation_index)
+        {
             self.selected_annotation = None;
             ui.weak("No annotation selected.");
             return;
@@ -6798,11 +6826,23 @@ fn node_indices_in_selection_rect(
         .collect()
 }
 
-fn layout_annotation_rects(graph: &GraphDocument, rect: Rect, zoom: f32, pan: Vec2) -> Vec<Rect> {
+fn layout_annotation_rects(
+    graph: &GraphDocument,
+    rect: Rect,
+    zoom: f32,
+    pan: Vec2,
+) -> Vec<(usize, Rect)> {
     graph
-        .annotations
-        .iter()
-        .map(|annotation| display_annotation_rect(rect, annotation, zoom, pan))
+        .current_graph_annotation_indices()
+        .into_iter()
+        .filter_map(|annotation_index| {
+            graph.annotations.get(annotation_index).map(|annotation| {
+                (
+                    annotation_index,
+                    display_annotation_rect(rect, annotation, zoom, pan),
+                )
+            })
+        })
         .collect()
 }
 

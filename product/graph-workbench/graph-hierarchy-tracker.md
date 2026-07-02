@@ -51,6 +51,8 @@ for the graph hierarchy lane.
 | `#222` | complete | Drag marquee multi-select for subnet creation | Adds empty-canvas marquee selection for graph nodes and a Collapse Selection to Subnet command that routes multi-node selections through the existing graph-owned physical collapse path. |
 | `#224` | complete | Tab palette subnet collapse action | Adds a Tab/operator-palette Subnet from Selection action that is only available for multi-node collapsible selections and reuses the graph-owned subnet collapse path. |
 | `#226` | complete | Houdini-style subnet enter/up navigation | Exposes Enter Subnet and Go Up through context menus and the Tab palette, adds Enter/double-click dive and U parent navigation, and keeps navigation routed through graph-owned actions. |
+| `#228` | complete | Tab palette asset draft creation from selected subnet | Exposes Asset from Subnet through the Tab/operator palette and selected subnet context menus so subnet-to-asset promotion is discoverable after collapse/navigation. |
+| `#230` | complete | Graph-local boxes and notes | Stamps network boxes and sticky notes with their parent graph and filters editor, search, drawing, hit-testing, drag membership, and collapse operations to the selected graph while defaulting legacy sidecars to `main`. |
 
 ## Next implementation candidates
 
@@ -84,6 +86,10 @@ for the graph hierarchy lane.
      palette so the operation behaves like a network-editor command.
    - `#226` makes created subnets discoverably navigable with visible
      enter/up actions plus Houdini-style Enter, double-click, and U shortcuts.
+   - `#228` adds discoverable selected-subnet asset draft creation through the
+     Tab/operator palette and context menu.
+   - `#230` scopes network boxes and sticky notes to the selected graph so
+     parent organization does not bleed into subnet interiors.
    - Keep selected-node collapse separate from network box organization.
 
 3. Typed graph boundary inputs and outputs.
