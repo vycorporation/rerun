@@ -7638,6 +7638,10 @@ impl SourceMetadata {
         }
         self
     }
+
+    pub fn external_reference_report(&self) -> SourceExternalReferenceReport {
+        SourceExternalReferenceReport::from_locator(&self.locator)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -7750,6 +7754,90 @@ impl SourceLocatorKind {
             Self::RecordingQuery => "recording query",
             Self::Generated => "generated",
             Self::Demo => "demo",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceExternalReferenceReport {
+    pub status: SourceExternalReferenceStatus,
+    pub readable_locator: String,
+    pub bundle_relevant: bool,
+    pub warning: Option<String>,
+}
+
+impl SourceExternalReferenceReport {
+    fn from_locator(locator: &SourceLocator) -> Self {
+        let readable_locator = locator.readable();
+        match locator.kind {
+            SourceLocatorKind::LocalPath => {
+                let exists = locator
+                    .location
+                    .as_deref()
+                    .is_some_and(|location| Path::new(location).exists());
+                if exists {
+                    Self {
+                        status: SourceExternalReferenceStatus::LocalAvailable,
+                        readable_locator,
+                        bundle_relevant: true,
+                        warning: Some(
+                            "Local source remains an external reference unless explicitly bundled."
+                                .to_owned(),
+                        ),
+                    }
+                } else {
+                    Self {
+                        status: SourceExternalReferenceStatus::LocalMissing,
+                        readable_locator: readable_locator.clone(),
+                        bundle_relevant: true,
+                        warning: Some(format!(
+                            "Local source `{readable_locator}` is missing from this machine."
+                        )),
+                    }
+                }
+            }
+            SourceLocatorKind::Uri => Self {
+                status: SourceExternalReferenceStatus::UriUnverified,
+                readable_locator,
+                bundle_relevant: true,
+                warning: Some("URI source remains an external reference; availability and content hash are unverified.".to_owned()),
+            },
+            SourceLocatorKind::RecordingQuery => Self {
+                status: SourceExternalReferenceStatus::RecordingQuery,
+                readable_locator,
+                bundle_relevant: false,
+                warning: Some(
+                    "Recording query sources are live viewer inputs, not bundled project data."
+                        .to_owned(),
+                ),
+            },
+            SourceLocatorKind::Generated | SourceLocatorKind::Demo => Self {
+                status: SourceExternalReferenceStatus::NotExternal,
+                readable_locator,
+                bundle_relevant: false,
+                warning: None,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceExternalReferenceStatus {
+    NotExternal,
+    LocalAvailable,
+    LocalMissing,
+    UriUnverified,
+    RecordingQuery,
+}
+
+impl SourceExternalReferenceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotExternal => "not external",
+            Self::LocalAvailable => "local available",
+            Self::LocalMissing => "local missing",
+            Self::UriUnverified => "uri unverified",
+            Self::RecordingQuery => "recording query",
         }
     }
 }
@@ -12810,10 +12898,11 @@ mod tests {
         PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
         PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
         ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
-        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceFormatKind,
-        SourceFormatSupportStatus, SourceLocatorKind, SourceProvenance,
-        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
-        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem,
+        SourceExternalReferenceStatus, SourceFormatKind, SourceFormatSupportStatus,
+        SourceLocatorKind, SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin,
+        SubstrateYAxis, ViewerGeometry, load_cubic_bezier_parquet,
+        load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -19897,6 +19986,103 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             "s3://bucket/curves.parquet"
         );
         assert!(uri_metadata.locator.is_external_reference());
+    }
+
+    #[test]
+    fn source_external_reference_report_distinguishes_generated_local_missing_and_uri_sources() {
+        let graph = GraphDocument::sample();
+        let demo_report = graph.source.metadata.external_reference_report();
+        assert_eq!(
+            demo_report.status,
+            SourceExternalReferenceStatus::NotExternal
+        );
+        assert!(!demo_report.bundle_relevant);
+        assert!(demo_report.warning.is_none());
+
+        let local_file = tempfile::NamedTempFile::new().unwrap();
+        let local_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(local_file.path().display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let local_report = local_metadata.external_reference_report();
+        assert_eq!(
+            local_report.status,
+            SourceExternalReferenceStatus::LocalAvailable
+        );
+        assert!(local_report.bundle_relevant);
+        assert!(
+            local_report
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("external reference"))
+        );
+
+        let missing_dir = tempfile::tempdir().unwrap();
+        let missing_path = missing_dir.path().join("missing-source.parquet");
+        let missing_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(missing_path.display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let missing_report = missing_metadata.external_reference_report();
+        assert_eq!(
+            missing_report.status,
+            SourceExternalReferenceStatus::LocalMissing
+        );
+        assert!(missing_report.bundle_relevant);
+        assert!(
+            missing_report
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("missing"))
+        );
+
+        let uri_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some("s3://bucket/curves.parquet".to_owned()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let uri_report = uri_metadata.external_reference_report();
+        assert_eq!(
+            uri_report.status,
+            SourceExternalReferenceStatus::UriUnverified
+        );
+        assert!(uri_report.bundle_relevant);
+        assert!(
+            uri_report
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("unverified"))
+        );
+    }
+
+    #[test]
+    fn recording_query_source_report_is_not_a_bundle_artifact() {
+        let bridge = super::RerunQueryBridge {
+            mode: super::RerunQueryBridgeMode::ProductForkViewOwned,
+            view_id: "view(1234)".to_owned(),
+            space_origin: "/".to_owned(),
+            timeline: "frame".to_owned(),
+            latest_at: 42,
+            matching_entity_count: 1,
+            visualized_entity_count: 1,
+            visible_data_result_count: 1,
+        };
+        let source = super::GraphSource::from_query_bridge(&bridge);
+        let report = source.metadata.external_reference_report();
+
+        assert_eq!(report.status, SourceExternalReferenceStatus::RecordingQuery);
+        assert!(!report.bundle_relevant);
+        assert!(
+            report
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("live viewer inputs"))
+        );
     }
 
     #[test]

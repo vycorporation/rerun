@@ -4862,6 +4862,7 @@ impl HoudiniGraphPanel {
     }
 
     fn source_metadata_ui(&self, ui: &mut Ui, metadata: &SourceMetadata, id_suffix: &'static str) {
+        let external_reference = metadata.external_reference_report();
         egui::Grid::new(("houdini_graph_source_metadata", id_suffix))
             .num_columns(2)
             .spacing([12.0, 4.0])
@@ -4892,6 +4893,20 @@ impl HoudiniGraphPanel {
                 ui.weak("Generated");
                 ui.label(yes_no(metadata.locator.is_generated()));
                 ui.end_row();
+
+                ui.weak("Reference");
+                ui.label(external_reference.status.as_str());
+                ui.end_row();
+
+                ui.weak("Bundle item");
+                ui.label(yes_no(external_reference.bundle_relevant));
+                ui.end_row();
+
+                if let Some(warning) = &external_reference.warning {
+                    ui.weak("Reference warning");
+                    ui.colored_label(ui.visuals().warn_fg_color, warning);
+                    ui.end_row();
+                }
 
                 ui.weak("Bounds");
                 ui.label(format_bounds(metadata.bounds.as_ref()));
