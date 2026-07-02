@@ -3062,7 +3062,11 @@ impl GraphDocument {
                     true
                 }
             },
-            ProjectCommand::NodesDuplicate { duplicated_nodes } => match direction {
+            ProjectCommand::NodesDuplicate {
+                duplicated_nodes,
+                data_flow_edges_before,
+                data_flow_edges_after,
+            } => match direction {
                 ProjectCommandDirection::Undo => {
                     let mut remove_indices = Vec::with_capacity(duplicated_nodes.len());
                     for duplicate in duplicated_nodes {
@@ -3079,6 +3083,7 @@ impl GraphDocument {
                     for node_index in remove_indices {
                         self.nodes.remove(node_index);
                     }
+                    self.data_flow_edges = data_flow_edges_before.clone();
                     true
                 }
                 ProjectCommandDirection::Redo => {
@@ -3096,6 +3101,7 @@ impl GraphDocument {
                         self.nodes
                             .insert(insert_index, (*duplicate.duplicated_node).clone());
                     }
+                    self.data_flow_edges = data_flow_edges_after.clone();
                     true
                 }
             },
@@ -4107,6 +4113,7 @@ impl GraphDocument {
 
     pub fn duplicate_node_set(&mut self, node_indices: &[usize]) -> Vec<usize> {
         let original_node_count = self.nodes.len();
+        let data_flow_edges_before = self.data_flow_edges.clone();
         let mut source_indices = node_indices
             .iter()
             .copied()
@@ -4122,9 +4129,14 @@ impl GraphDocument {
         let mut inserted_so_far = 0;
         let mut duplicated_node_ids = Vec::new();
         let mut duplicated_nodes = Vec::new();
+        let mut duplicated_ids_by_source_id = std::collections::BTreeMap::new();
         for original_source_index in source_indices {
             let source_index = original_source_index + inserted_so_far;
             if let Some(duplicate) = self.duplicate_node_without_history(source_index) {
+                duplicated_ids_by_source_id.insert(
+                    duplicate.source_node_id.clone(),
+                    duplicate.duplicated_node.node_id.clone(),
+                );
                 duplicated_node_ids.push(duplicate.duplicated_node.node_id.clone());
                 duplicated_nodes.push(duplicate);
                 inserted_so_far += 1;
@@ -4135,8 +4147,40 @@ impl GraphDocument {
             return Vec::new();
         }
 
-        self.rebuild_default_data_flow_edges();
-        self.record_project_command(ProjectCommand::NodesDuplicate { duplicated_nodes });
+        let mut data_flow_edges_after = data_flow_edges_before.clone();
+        for edge in &data_flow_edges_before {
+            let Some(from_node_id) = duplicated_ids_by_source_id.get(&edge.from_node_id) else {
+                continue;
+            };
+            let Some(to_node_id) = duplicated_ids_by_source_id.get(&edge.to_node_id) else {
+                continue;
+            };
+            let copied_edge = GraphDataFlowEdge {
+                edge_id: Self::data_flow_edge_id(
+                    from_node_id,
+                    &edge.from_output,
+                    to_node_id,
+                    &edge.to_input,
+                ),
+                from_node_id: from_node_id.clone(),
+                from_output: edge.from_output.clone(),
+                to_node_id: to_node_id.clone(),
+                to_input: edge.to_input.clone(),
+            };
+            if self
+                .data_flow_edge_addition_diagnostic_with_edges(&copied_edge, &data_flow_edges_after)
+                .is_none()
+            {
+                data_flow_edges_after.push(copied_edge);
+            }
+        }
+
+        self.data_flow_edges = data_flow_edges_after.clone();
+        self.record_project_command(ProjectCommand::NodesDuplicate {
+            duplicated_nodes,
+            data_flow_edges_before,
+            data_flow_edges_after,
+        });
         duplicated_node_ids
             .into_iter()
             .filter_map(|node_id| self.nodes.iter().position(|node| node.node_id == node_id))
@@ -13720,6 +13764,8 @@ pub(crate) enum ProjectCommand {
     },
     NodesDuplicate {
         duplicated_nodes: Vec<NodeDuplicateCommandSnapshot>,
+        data_flow_edges_before: Vec<GraphDataFlowEdge>,
+        data_flow_edges_after: Vec<GraphDataFlowEdge>,
     },
     SourceNodeCreate {
         source_node: Box<GraphNode>,
@@ -13898,7 +13944,9 @@ impl ProjectCommand {
                 let _ = source_node_id;
                 format!("Duplicate {source_node_name}")
             }
-            Self::NodesDuplicate { duplicated_nodes } => {
+            Self::NodesDuplicate {
+                duplicated_nodes, ..
+            } => {
                 format!("Duplicate {} nodes", duplicated_nodes.len())
             }
             Self::NodeDelete { deleted_node, .. } => {
@@ -14079,7 +14127,6 @@ impl ProjectCommand {
         matches!(
             self,
             Self::NodeDuplicate { .. }
-                | Self::NodesDuplicate { .. }
                 | Self::ReferenceInputCreate { .. }
                 | Self::NodeOutputParticipationEdit { .. }
         )
@@ -19489,6 +19536,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let original_node_count = graph.nodes.len();
+        let original_edge_count = graph.data_flow_edges.len();
 
         let duplicate_indices = graph.duplicate_node_set(&source_indices);
 
@@ -19513,11 +19561,28 @@ mod tests {
             assert_eq!(duplicate.evaluation, NodeEvaluation::clean());
             assert!(!duplicate.participates_in_output);
         }
+        assert_eq!(graph.data_flow_edges.len(), original_edge_count + 1);
+        assert!(graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == graph.nodes[duplicate_indices[0]].node_id
+                && edge.from_output == PRIMARY_GEOMETRY_OUTPUT
+                && edge.to_node_id == graph.nodes[duplicate_indices[1]].node_id
+                && edge.to_input == PRIMARY_GEOMETRY_OUTPUT
+        }));
+        assert!(!graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == graph.nodes[duplicate_indices[1]].node_id
+                && edge.to_node_id == graph.nodes[2].node_id
+        }));
         assert_eq!(graph.command_history.undo_stack.len(), 1);
         assert!(matches!(
             graph.command_history.undo_stack.last(),
-            Some(ProjectCommand::NodesDuplicate { duplicated_nodes })
+            Some(ProjectCommand::NodesDuplicate {
+                duplicated_nodes,
+                data_flow_edges_before,
+                data_flow_edges_after,
+            })
                 if duplicated_nodes.len() == 2
+                    && data_flow_edges_before.len() == original_edge_count
+                    && data_flow_edges_after.len() == original_edge_count + 1
                     && duplicated_nodes
                         .iter()
                         .map(|duplicate| duplicate.source_node_id.clone())
@@ -19534,8 +19599,15 @@ mod tests {
 
         assert!(graph.undo_project_command());
         assert_eq!(graph.nodes.len(), original_node_count);
+        assert_eq!(graph.data_flow_edges.len(), original_edge_count);
         for node_id in &duplicated_node_ids {
             assert!(!graph.nodes.iter().any(|node| node.node_id == *node_id));
+            assert!(
+                !graph
+                    .data_flow_edges
+                    .iter()
+                    .any(|edge| { edge.from_node_id == *node_id || edge.to_node_id == *node_id })
+            );
         }
         assert_eq!(
             graph.redo_project_command_label().as_deref(),
@@ -19546,6 +19618,10 @@ mod tests {
         for node_id in &duplicated_node_ids {
             assert!(graph.nodes.iter().any(|node| node.node_id == *node_id));
         }
+        assert_eq!(graph.data_flow_edges.len(), original_edge_count + 1);
+        assert!(graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == duplicated_node_ids[0] && edge.to_node_id == duplicated_node_ids[1]
+        }));
         assert!(graph.duplicate_node_set(&[graph.nodes.len()]).is_empty());
     }
 
