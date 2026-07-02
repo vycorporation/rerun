@@ -8196,6 +8196,429 @@ impl SourceLocatorKind {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceGalleryIndex {
+    pub source: SourceLocator,
+    pub items: Vec<SourceGalleryItem>,
+    pub limit: usize,
+    pub truncated: bool,
+    pub warnings: Vec<String>,
+}
+
+#[allow(dead_code)]
+impl SourceGalleryIndex {
+    pub fn from_locator(source: SourceLocator, limit: usize) -> Self {
+        let limit = limit.max(1);
+        let mut warnings = Vec::new();
+
+        let items = match source.kind {
+            SourceLocatorKind::LocalPath => {
+                let readable = source.readable();
+                let path = Path::new(&readable);
+                if path.is_dir() {
+                    source_gallery_items_from_directory(path, limit, &mut warnings)
+                } else {
+                    vec![SourceGalleryItem::from_locator(source.clone())]
+                }
+            }
+            SourceLocatorKind::Uri => {
+                if source_gallery_uri_requires_manifest(&source.readable()) {
+                    warnings.push(format!(
+                        "Remote collection `{}` requires an explicit manifest; recursive URL listing is not supported.",
+                        source.readable()
+                    ));
+                    Vec::new()
+                } else {
+                    vec![SourceGalleryItem::from_locator(source.clone())]
+                }
+            }
+            SourceLocatorKind::RecordingQuery
+            | SourceLocatorKind::Generated
+            | SourceLocatorKind::Demo => {
+                vec![SourceGalleryItem::from_locator(source.clone())]
+            }
+        };
+
+        let truncated = items.len() > limit;
+        let items = items.into_iter().take(limit).collect();
+
+        Self {
+            source,
+            items,
+            limit,
+            truncated,
+            warnings,
+        }
+    }
+
+    pub fn from_locations(
+        source: SourceLocator,
+        locations: impl IntoIterator<Item = SourceLocator>,
+        limit: usize,
+    ) -> Self {
+        let limit = limit.max(1);
+        let mut items = locations
+            .into_iter()
+            .map(SourceGalleryItem::from_locator)
+            .collect::<Vec<_>>();
+        let truncated = items.len() > limit;
+        items.truncate(limit);
+
+        Self {
+            source,
+            items,
+            limit,
+            truncated,
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn from_manifest_json(
+        source: SourceLocator,
+        manifest_json: &str,
+        limit: usize,
+    ) -> Result<Self, SourceGalleryManifestError> {
+        let manifest = SourceGalleryManifest::parse(manifest_json)?;
+        let locations = manifest.entries.into_iter().map(|entry| {
+            let mut locator = SourceLocator::from_location(&entry.location);
+            locator.label = entry.label;
+            locator
+        });
+        Ok(Self::from_locations(source, locations, limit))
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceGalleryItem {
+    pub stable_id: String,
+    pub display_name: String,
+    pub locator: SourceLocator,
+    pub kind: SourceGalleryItemKind,
+    pub thumbnail_intent: SourceGalleryThumbnailIntent,
+    pub external_reference_status: SourceExternalReferenceStatus,
+    pub format_kind: Option<SourceFormatKind>,
+    pub format_support_status: Option<SourceFormatSupportStatus>,
+}
+
+#[allow(dead_code)]
+impl SourceGalleryItem {
+    fn from_locator(locator: SourceLocator) -> Self {
+        let metadata = SourceMetadata {
+            provenance: SourceProvenance::ParquetImport,
+            source_path: locator.location.clone(),
+            locator: locator.clone(),
+            ..Default::default()
+        };
+        let format_report = metadata.source_format_inference_report();
+        let external_reference = metadata.external_reference_report();
+        let kind = SourceGalleryItemKind::from_locator_and_format(&locator, &format_report);
+
+        Self {
+            stable_id: source_gallery_stable_id(&locator),
+            display_name: source_gallery_display_name(&locator),
+            locator,
+            kind,
+            thumbnail_intent: SourceGalleryThumbnailIntent::from_kind(kind),
+            external_reference_status: external_reference.status,
+            format_kind: format_report.kind,
+            format_support_status: format_report.support_status,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceGalleryItemKind {
+    Image,
+    Table,
+    PolygonTable,
+    Recording,
+    PointCloud,
+    Manifest,
+    Generated,
+    LiveRecording,
+    Unknown,
+}
+
+#[allow(dead_code)]
+impl SourceGalleryItemKind {
+    fn from_locator_and_format(
+        locator: &SourceLocator,
+        format_report: &SourceFormatInferenceReport,
+    ) -> Self {
+        match locator.kind {
+            SourceLocatorKind::Generated | SourceLocatorKind::Demo => return Self::Generated,
+            SourceLocatorKind::RecordingQuery => return Self::LiveRecording,
+            SourceLocatorKind::LocalPath | SourceLocatorKind::Uri => {}
+        }
+
+        if source_gallery_is_image_locator(&locator.readable()) {
+            return Self::Image;
+        }
+
+        if source_gallery_is_recording_locator(&locator.readable()) {
+            return Self::Recording;
+        }
+
+        if source_gallery_is_manifest_locator(&locator.readable()) {
+            return Self::Manifest;
+        }
+
+        match format_report.kind {
+            Some(
+                SourceFormatKind::GeoParquetLike
+                | SourceFormatKind::GeoJson
+                | SourceFormatKind::FlatGeobuf,
+            ) => Self::PolygonTable,
+            Some(
+                SourceFormatKind::Parquet
+                | SourceFormatKind::CsvCoordinates
+                | SourceFormatKind::SqliteTableOrView,
+            ) => Self::Table,
+            Some(SourceFormatKind::LasLazPointCloud) => Self::PointCloud,
+            Some(
+                SourceFormatKind::GeoPackage
+                | SourceFormatKind::SpatiaLite
+                | SourceFormatKind::Shapefile,
+            ) => Self::PolygonTable,
+            None => Self::Unknown,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Table => "table",
+            Self::PolygonTable => "polygon table",
+            Self::Recording => "recording",
+            Self::PointCloud => "point cloud",
+            Self::Manifest => "manifest",
+            Self::Generated => "generated",
+            Self::LiveRecording => "live recording",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceGalleryThumbnailIntent {
+    Image,
+    Generic(SourceGalleryItemKind),
+}
+
+#[allow(dead_code)]
+impl SourceGalleryThumbnailIntent {
+    fn from_kind(kind: SourceGalleryItemKind) -> Self {
+        if kind == SourceGalleryItemKind::Image {
+            Self::Image
+        } else {
+            Self::Generic(kind)
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SourceGalleryManifestError {
+    InvalidJson(String),
+    MissingItems,
+}
+
+impl std::fmt::Display for SourceGalleryManifestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidJson(error) => {
+                write!(formatter, "invalid source gallery manifest: {error}")
+            }
+            Self::MissingItems => write!(
+                formatter,
+                "source gallery manifest does not contain any items"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SourceGalleryManifestError {}
+
+#[allow(dead_code)]
+struct SourceGalleryManifest {
+    entries: Vec<SourceGalleryManifestEntry>,
+}
+
+#[allow(dead_code)]
+impl SourceGalleryManifest {
+    fn parse(json: &str) -> Result<Self, SourceGalleryManifestError> {
+        let manifest: SourceGalleryManifestJson = serde_json::from_str(json)
+            .map_err(|error| SourceGalleryManifestError::InvalidJson(error.to_string()))?;
+        let entries = manifest.into_entries();
+        if entries.is_empty() {
+            return Err(SourceGalleryManifestError::MissingItems);
+        }
+        Ok(Self { entries })
+    }
+}
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum SourceGalleryManifestJson {
+    Items {
+        items: Vec<SourceGalleryManifestEntryJson>,
+    },
+    List(Vec<SourceGalleryManifestEntryJson>),
+}
+
+#[allow(dead_code)]
+impl SourceGalleryManifestJson {
+    fn into_entries(self) -> Vec<SourceGalleryManifestEntry> {
+        match self {
+            Self::Items { items } | Self::List(items) => items
+                .into_iter()
+                .map(SourceGalleryManifestEntryJson::into_entry)
+                .collect(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum SourceGalleryManifestEntryJson {
+    Location(String),
+    Object {
+        location: String,
+        #[serde(default)]
+        label: Option<String>,
+    },
+}
+
+#[allow(dead_code)]
+impl SourceGalleryManifestEntryJson {
+    fn into_entry(self) -> SourceGalleryManifestEntry {
+        match self {
+            Self::Location(location) => SourceGalleryManifestEntry {
+                location,
+                label: None,
+            },
+            Self::Object { location, label } => SourceGalleryManifestEntry { location, label },
+        }
+    }
+}
+
+#[allow(dead_code)]
+struct SourceGalleryManifestEntry {
+    location: String,
+    label: Option<String>,
+}
+
+#[allow(dead_code)]
+fn source_gallery_items_from_directory(
+    directory: &Path,
+    limit: usize,
+    warnings: &mut Vec<String>,
+) -> Vec<SourceGalleryItem> {
+    let mut paths = match std::fs::read_dir(directory) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            warnings.push(format!(
+                "Could not read gallery directory `{}`: {error}",
+                directory.display()
+            ));
+            return Vec::new();
+        }
+    };
+    paths.sort();
+    if paths.len() > limit {
+        warnings.push(format!(
+            "Gallery directory `{}` has more than {limit} files; only the first {limit} are indexed.",
+            directory.display()
+        ));
+    }
+    paths
+        .into_iter()
+        .map(|path| {
+            SourceGalleryItem::from_locator(SourceLocator::from_location(
+                &path.display().to_string(),
+            ))
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
+fn source_gallery_uri_requires_manifest(locator: &str) -> bool {
+    let without_query = source_gallery_without_query(locator);
+    without_query.ends_with('/')
+}
+
+#[allow(dead_code)]
+fn source_gallery_is_image_locator(locator: &str) -> bool {
+    matches!(
+        source_gallery_extension(locator).as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "webp")
+    )
+}
+
+#[allow(dead_code)]
+fn source_gallery_is_recording_locator(locator: &str) -> bool {
+    matches!(source_gallery_extension(locator).as_deref(), Some("rrd"))
+}
+
+#[allow(dead_code)]
+fn source_gallery_is_manifest_locator(locator: &str) -> bool {
+    matches!(
+        source_gallery_extension(locator).as_deref(),
+        Some("manifest" | "source-gallery" | "gallery")
+    ) || source_gallery_without_query(locator)
+        .to_ascii_lowercase()
+        .ends_with(".gallery.json")
+}
+
+#[allow(dead_code)]
+fn source_gallery_extension(locator: &str) -> Option<String> {
+    let without_query = source_gallery_without_query(locator).to_ascii_lowercase();
+    Path::new(&without_query)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(ToOwned::to_owned)
+}
+
+#[allow(dead_code)]
+fn source_gallery_without_query(locator: &str) -> &str {
+    locator.split(['?', '#']).next().unwrap_or(locator)
+}
+
+#[allow(dead_code)]
+fn source_gallery_display_name(locator: &SourceLocator) -> String {
+    if let Some(label) = locator
+        .label
+        .as_deref()
+        .filter(|label| !label.trim().is_empty())
+    {
+        return label.to_owned();
+    }
+
+    let readable = locator.readable();
+    Path::new(source_gallery_without_query(&readable))
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or(readable)
+}
+
+#[allow(dead_code)]
+fn source_gallery_stable_id(locator: &SourceLocator) -> String {
+    format!("{}:{}", locator.kind.as_str(), locator.readable())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SourceExternalReferenceReport {
     pub status: SourceExternalReferenceStatus,
@@ -13964,7 +14387,9 @@ mod tests {
         ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceBundleInclusion,
         SourceExternalReferenceActionKind, SourceExternalReferenceStatus,
         SourceFormatInferenceStatus, SourceFormatKind, SourceFormatSupportStatus,
-        SourceLocatorKind, SourcePackageManifestArtifactRole, SourcePackageManifestExternalStatus,
+        SourceGalleryIndex, SourceGalleryItemKind, SourceGalleryManifestError,
+        SourceGalleryThumbnailIntent, SourceLocator, SourceLocatorKind,
+        SourcePackageManifestArtifactRole, SourcePackageManifestExternalStatus,
         SourcePackageManifestInclusionChoice, SourcePackageManifestPreview, SourceProvenance,
         SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
         load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
@@ -21181,6 +21606,203 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             "s3://bucket/curves.parquet"
         );
         assert!(uri_metadata.locator.is_external_reference());
+    }
+
+    #[test]
+    fn source_gallery_index_reports_local_mixed_collection_items() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let image_path = temp_dir.path().join("frame.png");
+        let table_path = temp_dir.path().join("curves.parquet");
+        let recording_path = temp_dir.path().join("scene.rrd");
+        let unknown_path = temp_dir.path().join("notes.bin");
+        let nested_dir = temp_dir.path().join("nested");
+        std::fs::write(&image_path, b"not decoded in index slice").unwrap();
+        std::fs::write(&table_path, b"parquet placeholder").unwrap();
+        std::fs::write(&recording_path, b"rrd placeholder").unwrap();
+        std::fs::write(&unknown_path, b"unknown placeholder").unwrap();
+        std::fs::create_dir(&nested_dir).unwrap();
+
+        let index = SourceGalleryIndex::from_locator(
+            SourceLocator::from_location(&temp_dir.path().display().to_string()),
+            16,
+        );
+
+        assert_eq!(index.items.len(), 4);
+        assert!(!index.truncated);
+        assert!(index.warnings.is_empty());
+
+        let image = index
+            .items
+            .iter()
+            .find(|item| item.display_name == "frame.png")
+            .expect("image item should be indexed");
+        assert_eq!(image.kind, SourceGalleryItemKind::Image);
+        assert_eq!(image.thumbnail_intent, SourceGalleryThumbnailIntent::Image);
+        assert_eq!(
+            image.external_reference_status,
+            SourceExternalReferenceStatus::LocalAvailable
+        );
+
+        let table = index
+            .items
+            .iter()
+            .find(|item| item.display_name == "curves.parquet")
+            .expect("parquet item should be indexed");
+        assert_eq!(table.kind, SourceGalleryItemKind::Table);
+        assert_eq!(
+            table.thumbnail_intent,
+            SourceGalleryThumbnailIntent::Generic(SourceGalleryItemKind::Table)
+        );
+        assert_eq!(table.format_kind, Some(SourceFormatKind::Parquet));
+        assert_eq!(
+            table.format_support_status,
+            Some(SourceFormatSupportStatus::Supported)
+        );
+
+        let recording = index
+            .items
+            .iter()
+            .find(|item| item.display_name == "scene.rrd")
+            .expect("recording item should be indexed");
+        assert_eq!(recording.kind, SourceGalleryItemKind::Recording);
+
+        let unknown = index
+            .items
+            .iter()
+            .find(|item| item.display_name == "notes.bin")
+            .expect("unknown item should be indexed");
+        assert_eq!(unknown.kind, SourceGalleryItemKind::Unknown);
+        assert_eq!(
+            unknown.thumbnail_intent,
+            SourceGalleryThumbnailIntent::Generic(SourceGalleryItemKind::Unknown)
+        );
+    }
+
+    #[test]
+    fn source_gallery_index_reports_missing_local_file_as_gallery_item() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing_path = temp_dir.path().join("missing-polygons.geoparquet");
+
+        let index = SourceGalleryIndex::from_locator(
+            SourceLocator::from_location(&missing_path.display().to_string()),
+            16,
+        );
+
+        assert_eq!(index.items.len(), 1);
+        let item = &index.items[0];
+        assert_eq!(item.display_name, "missing-polygons.geoparquet");
+        assert_eq!(item.kind, SourceGalleryItemKind::PolygonTable);
+        assert_eq!(
+            item.external_reference_status,
+            SourceExternalReferenceStatus::LocalMissing
+        );
+        assert_eq!(item.format_kind, Some(SourceFormatKind::GeoParquetLike));
+        assert_eq!(
+            item.format_support_status,
+            Some(SourceFormatSupportStatus::PlannedV1)
+        );
+    }
+
+    #[test]
+    fn source_gallery_index_accepts_direct_urls_but_rejects_unbounded_url_listing() {
+        let direct = SourceGalleryIndex::from_locator(
+            SourceLocator::from_location("https://example.test/images/frame.webp?download=1"),
+            16,
+        );
+        assert_eq!(direct.items.len(), 1);
+        assert_eq!(direct.items[0].kind, SourceGalleryItemKind::Image);
+        assert_eq!(
+            direct.items[0].thumbnail_intent,
+            SourceGalleryThumbnailIntent::Image
+        );
+        assert_eq!(
+            direct.items[0].external_reference_status,
+            SourceExternalReferenceStatus::UriUnverified
+        );
+
+        let listing = SourceGalleryIndex::from_locator(
+            SourceLocator::from_location("https://example.test/gallery/"),
+            16,
+        );
+        assert!(listing.items.is_empty());
+        assert!(
+            listing
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("explicit manifest"))
+        );
+    }
+
+    #[test]
+    fn source_gallery_manifest_entries_create_bounded_remote_index() {
+        let manifest_json = r#"
+        {
+            "items": [
+                "https://example.test/images/frame.png",
+                {
+                    "location": "https://example.test/tables/polygons.geoparquet",
+                    "label": "Curated polygons"
+                },
+                {
+                    "location": "s3://bucket/run/output.rrd"
+                }
+            ]
+        }
+        "#;
+
+        let index = SourceGalleryIndex::from_manifest_json(
+            SourceLocator::from_location("https://example.test/gallery.gallery.json"),
+            manifest_json,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(index.items.len(), 2);
+        assert!(index.truncated);
+        assert!(
+            index
+                .items
+                .iter()
+                .any(|item| item.kind == SourceGalleryItemKind::Image)
+        );
+        assert!(
+            !index
+                .items
+                .iter()
+                .any(|item| item.display_name == "output.rrd"),
+            "manifest order should define which bounded entries are retained"
+        );
+
+        let polygons = index
+            .items
+            .iter()
+            .find(|item| item.display_name == "Curated polygons")
+            .expect("manifest labels should be used as display names");
+        assert_eq!(polygons.kind, SourceGalleryItemKind::PolygonTable);
+        assert_eq!(
+            polygons.thumbnail_intent,
+            SourceGalleryThumbnailIntent::Generic(SourceGalleryItemKind::PolygonTable)
+        );
+        assert_eq!(
+            polygons.external_reference_status,
+            SourceExternalReferenceStatus::UriUnverified
+        );
+    }
+
+    #[test]
+    fn source_gallery_manifest_rejects_empty_or_invalid_lists() {
+        let source = SourceLocator::from_location("https://example.test/gallery.gallery.json");
+
+        let empty = SourceGalleryIndex::from_manifest_json(source.clone(), r#"{"items":[]}"#, 16)
+            .expect_err("empty manifest should be rejected");
+        assert_eq!(empty, SourceGalleryManifestError::MissingItems);
+
+        let invalid = SourceGalleryIndex::from_manifest_json(source, r#"{"items": "#, 16)
+            .expect_err("invalid manifest should be rejected");
+        assert!(matches!(
+            invalid,
+            SourceGalleryManifestError::InvalidJson(_)
+        ));
     }
 
     #[test]
