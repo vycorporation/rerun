@@ -1293,6 +1293,128 @@ impl GraphDocument {
         })
     }
 
+    pub fn selected_node_port_info(&self, index: usize) -> Option<NodePortInfo> {
+        let node = self.nodes.get(index)?;
+        Some(NodePortInfo {
+            inputs: self.node_input_port_summaries(node),
+            outputs: self.node_output_port_summaries(node),
+        })
+    }
+
+    fn node_input_port_summaries(&self, node: &GraphNode) -> Vec<NodePortSummary> {
+        match node.kind {
+            NodeKind::Source | NodeKind::Selection | NodeKind::ReferenceInput => Vec::new(),
+            NodeKind::GraphContainer => self
+                .graph_container_metadata_for_node(&node.node_id)
+                .map(|metadata| summarize_houdini_ports(&metadata.boundary.inputs))
+                .unwrap_or_default(),
+            NodeKind::ProceduralAsset => node
+                .procedural_asset
+                .as_ref()
+                .and_then(|asset| {
+                    self.procedural_asset_declarations
+                        .iter()
+                        .find(|declaration| declaration.asset_id == asset.asset_id)
+                })
+                .map(|declaration| summarize_houdini_ports(&declaration.inputs))
+                .unwrap_or_default(),
+            NodeKind::PythonOperator => node
+                .python_operator
+                .as_ref()
+                .and_then(|python_operator| {
+                    self.python_operator_declarations
+                        .iter()
+                        .find(|declaration| {
+                            declaration.operator_id == python_operator.declaration_id
+                        })
+                })
+                .map(|declaration| summarize_python_ports(&declaration.inputs))
+                .unwrap_or_default(),
+            NodeKind::NativeOperator => node
+                .native_operator
+                .as_ref()
+                .and_then(|native_operator| {
+                    self.native_operator_declarations
+                        .iter()
+                        .find(|declaration| declaration.operator_id == native_operator.operator_id)
+                })
+                .map(|declaration| summarize_houdini_ports(&declaration.inputs))
+                .unwrap_or_default(),
+            NodeKind::Filter
+            | NodeKind::Style
+            | NodeKind::Null
+            | NodeKind::SubstrateProjection
+            | NodeKind::Output => {
+                vec![primary_geometry_port_summary(
+                    "Geometry table entering this node.",
+                )]
+            }
+        }
+    }
+
+    fn node_output_port_summaries(&self, node: &GraphNode) -> Vec<NodePortSummary> {
+        match node.kind {
+            NodeKind::Output => Vec::new(),
+            NodeKind::GraphContainer => self
+                .graph_container_metadata_for_node(&node.node_id)
+                .map(|metadata| summarize_houdini_ports(&metadata.boundary.outputs))
+                .unwrap_or_default(),
+            NodeKind::ProceduralAsset => node
+                .procedural_asset
+                .as_ref()
+                .and_then(|asset| {
+                    self.procedural_asset_declarations
+                        .iter()
+                        .find(|declaration| declaration.asset_id == asset.asset_id)
+                })
+                .map(|declaration| summarize_houdini_ports(&declaration.outputs))
+                .unwrap_or_default(),
+            NodeKind::PythonOperator => node
+                .python_operator
+                .as_ref()
+                .and_then(|python_operator| {
+                    self.python_operator_declarations
+                        .iter()
+                        .find(|declaration| {
+                            declaration.operator_id == python_operator.declaration_id
+                        })
+                })
+                .map(|declaration| summarize_python_ports(&declaration.outputs))
+                .unwrap_or_default(),
+            NodeKind::NativeOperator => node
+                .native_operator
+                .as_ref()
+                .and_then(|native_operator| {
+                    self.native_operator_declarations
+                        .iter()
+                        .find(|declaration| declaration.operator_id == native_operator.operator_id)
+                })
+                .map(|declaration| summarize_houdini_ports(&declaration.outputs))
+                .unwrap_or_default(),
+            NodeKind::Source
+            | NodeKind::Filter
+            | NodeKind::Style
+            | NodeKind::Null
+            | NodeKind::SubstrateProjection => vec![primary_geometry_port_summary(
+                "Primary geometry table produced by this node.",
+            )],
+            NodeKind::Selection => vec![NodePortSummary {
+                name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                data_kind: HoudiniDataKind::RecordSubset,
+                required: true,
+                help: "Committed record subset identities produced by this node.".to_owned(),
+                primary_quick_wire: false,
+            }],
+            NodeKind::ReferenceInput => vec![NodePortSummary {
+                name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                data_kind: HoudiniDataKind::GeometryTable,
+                required: true,
+                help: "Referenced geometry table imported by this node.".to_owned(),
+                primary_quick_wire: false,
+            }],
+        }
+    }
+
     #[allow(dead_code)]
     pub fn insert_node_on_data_flow_edge(
         &mut self,
@@ -13916,6 +14038,47 @@ impl HoudiniOperatorPort {
     }
 }
 
+fn primary_geometry_port_summary(help: &str) -> NodePortSummary {
+    NodePortSummary {
+        name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+        data_kind: HoudiniDataKind::GeometryTable,
+        required: true,
+        help: help.to_owned(),
+        primary_quick_wire: true,
+    }
+}
+
+fn summarize_houdini_ports(ports: &[HoudiniOperatorPort]) -> Vec<NodePortSummary> {
+    ports
+        .iter()
+        .map(|port| NodePortSummary {
+            name: port.name.clone(),
+            data_kind: port.data_kind,
+            required: port.required,
+            help: port.help.clone(),
+            primary_quick_wire: port.name == PRIMARY_GEOMETRY_OUTPUT
+                && port.data_kind == HoudiniDataKind::GeometryTable,
+        })
+        .collect()
+}
+
+fn summarize_python_ports(ports: &[PythonOperatorPort]) -> Vec<NodePortSummary> {
+    ports
+        .iter()
+        .map(|port| {
+            let data_kind = port.data_kind.into_houdini_data_kind();
+            NodePortSummary {
+                name: port.name.clone(),
+                data_kind,
+                required: true,
+                help: port.help.clone(),
+                primary_quick_wire: port.name == PRIMARY_GEOMETRY_OUTPUT
+                    && data_kind == HoudiniDataKind::GeometryTable,
+            }
+        })
+        .collect()
+}
+
 fn normalized_asset_boundary_port(mut port: HoudiniOperatorPort) -> Option<HoudiniOperatorPort> {
     port.name = port.name.trim().to_owned();
     port.help = port.help.trim().to_owned();
@@ -13965,6 +14128,17 @@ impl HoudiniDataKind {
     #[allow(dead_code)]
     pub fn preserves_native_cubic_bezier(self) -> bool {
         matches!(self, Self::GeometryTable)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GeometryTable => "Geometry table",
+            Self::RecordSubset => "Record subset",
+            Self::AttributeTable => "Attribute table",
+            Self::Scalar => "Scalar",
+            Self::String => "String",
+            Self::LayerStyle => "Layer style",
+        }
     }
 }
 
@@ -14655,6 +14829,18 @@ pub(crate) enum PythonOperatorDataKind {
     Scalar,
     String,
     LayerStyle,
+}
+
+impl PythonOperatorDataKind {
+    fn into_houdini_data_kind(self) -> HoudiniDataKind {
+        match self {
+            Self::GeometryTable => HoudiniDataKind::GeometryTable,
+            Self::AttributeTable => HoudiniDataKind::AttributeTable,
+            Self::Scalar => HoudiniDataKind::Scalar,
+            Self::String => HoudiniDataKind::String,
+            Self::LayerStyle => HoudiniDataKind::LayerStyle,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -15616,6 +15802,21 @@ pub(crate) struct NodeDataFlowInfo {
     pub incoming_edge_count: usize,
     pub outgoing_edge_count: usize,
     pub diagnostics: Vec<GraphDataFlowEdgeDiagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NodePortInfo {
+    pub inputs: Vec<NodePortSummary>,
+    pub outputs: Vec<NodePortSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NodePortSummary {
+    pub name: String,
+    pub data_kind: HoudiniDataKind,
+    pub required: bool,
+    pub help: String,
+    pub primary_quick_wire: bool,
 }
 
 pub(crate) struct NodeInfo {
@@ -21992,6 +22193,87 @@ mod tests {
         assert_eq!(filter_info.data_flow.outgoing_edge_count, 1);
         assert_eq!(output_info.data_flow.incoming_edge_count, 1);
         assert_eq!(output_info.data_flow.outgoing_edge_count, 0);
+    }
+
+    #[test]
+    fn selected_node_port_info_reports_builtin_primary_geometry_ports() {
+        let graph = GraphDocument::sample();
+
+        let source_ports = graph
+            .selected_node_port_info(0)
+            .expect("source port info should exist");
+        assert!(source_ports.inputs.is_empty());
+        assert_eq!(source_ports.outputs.len(), 1);
+        assert_eq!(source_ports.outputs[0].name, PRIMARY_GEOMETRY_OUTPUT);
+        assert_eq!(
+            source_ports.outputs[0].data_kind,
+            HoudiniDataKind::GeometryTable
+        );
+        assert!(source_ports.outputs[0].primary_quick_wire);
+
+        let filter_ports = graph
+            .selected_node_port_info(1)
+            .expect("filter port info should exist");
+        assert_eq!(filter_ports.inputs.len(), 1);
+        assert_eq!(filter_ports.outputs.len(), 1);
+        assert!(filter_ports.inputs[0].primary_quick_wire);
+        assert!(filter_ports.outputs[0].primary_quick_wire);
+
+        let output_ports = graph
+            .selected_node_port_info(3)
+            .expect("output port info should exist");
+        assert_eq!(output_ports.inputs.len(), 1);
+        assert!(output_ports.inputs[0].primary_quick_wire);
+        assert!(output_ports.outputs.is_empty());
+        assert!(graph.selected_node_port_info(graph.nodes.len()).is_none());
+    }
+
+    #[test]
+    fn selected_node_port_info_reports_graph_container_boundary_ports() {
+        let mut graph = GraphDocument::sample();
+        let container_index = graph.add_graph_container_node(
+            "Multi Port Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.multi_port".to_owned(),
+                name: "Multi Port".to_owned(),
+                path: "/obj/main/multi_port".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+        let container_node_id = graph.nodes[container_index].node_id.clone();
+        let metadata = graph
+            .graph_containers
+            .iter_mut()
+            .find(|metadata| metadata.container_node_id == container_node_id)
+            .expect("graph container metadata should exist");
+        metadata.boundary.inputs.push(HoudiniOperatorPort {
+            name: "mask".to_owned(),
+            data_kind: HoudiniDataKind::RecordSubset,
+            required: false,
+            help: "Optional mask subset.".to_owned(),
+        });
+        metadata.boundary.outputs.push(HoudiniOperatorPort {
+            name: "style".to_owned(),
+            data_kind: HoudiniDataKind::LayerStyle,
+            required: false,
+            help: "Optional style metadata.".to_owned(),
+        });
+
+        let ports = graph
+            .selected_node_port_info(container_index)
+            .expect("graph container port info should exist");
+
+        assert_eq!(ports.inputs.len(), 2);
+        assert_eq!(ports.outputs.len(), 2);
+        assert_eq!(ports.inputs[0].name, PRIMARY_GEOMETRY_OUTPUT);
+        assert!(ports.inputs[0].primary_quick_wire);
+        assert_eq!(ports.inputs[1].name, "mask");
+        assert_eq!(ports.inputs[1].data_kind, HoudiniDataKind::RecordSubset);
+        assert!(!ports.inputs[1].required);
+        assert!(!ports.inputs[1].primary_quick_wire);
+        assert_eq!(ports.outputs[1].name, "style");
+        assert_eq!(ports.outputs[1].data_kind, HoudiniDataKind::LayerStyle);
+        assert!(!ports.outputs[1].primary_quick_wire);
     }
 
     #[test]
