@@ -53,6 +53,7 @@ for the graph hierarchy lane.
 | `#226` | complete | Houdini-style subnet enter/up navigation | Exposes Enter Subnet and Go Up through context menus and the Tab palette, adds Enter/double-click dive and U parent navigation, and keeps navigation routed through graph-owned actions. |
 | `#228` | complete | Tab palette asset draft creation from selected subnet | Exposes Asset from Subnet through the Tab/operator palette and selected subnet context menus so subnet-to-asset promotion is discoverable after collapse/navigation. |
 | `#230` | complete | Graph-local boxes and notes | Stamps network boxes and sticky notes with their parent graph and filters editor, search, drawing, hit-testing, drag membership, and collapse operations to the selected graph while defaulting legacy sidecars to `main`. |
+| `#288` | complete | Modifier-click graph node selection | Adds Shift and Command/Ctrl modifier-click selection for graph nodes so users can build selected node sets without marquee selection before duplicating or collapsing them. |
 
 ## Next implementation candidates
 

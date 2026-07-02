@@ -1536,6 +1536,34 @@ impl HoudiniGraphPanel {
         self.selected_nodes.push(node_index);
     }
 
+    fn select_node_from_graph_click(&mut self, node_index: usize, additive: bool) -> bool {
+        if !additive {
+            self.select_single_node(node_index);
+            return true;
+        }
+
+        if self.selected_nodes.contains(&node_index) {
+            if self.selected_nodes.len() > 1 {
+                self.selected_nodes.retain(|index| *index != node_index);
+                if self.selected_node == node_index
+                    && let Some(primary) = self.selected_nodes.first().copied()
+                {
+                    self.selected_node = primary;
+                }
+                return false;
+            }
+
+            self.select_single_node(node_index);
+            return true;
+        }
+
+        self.selected_nodes.push(node_index);
+        self.selected_nodes.sort_unstable();
+        self.selected_nodes.dedup();
+        self.selected_node = node_index;
+        true
+    }
+
     fn set_selected_node_set(&mut self, mut node_indices: Vec<usize>) {
         node_indices.sort_unstable();
         node_indices.dedup();
@@ -4588,6 +4616,12 @@ impl HoudiniGraphPanel {
                 self.dragging_annotation = None;
                 self.resizing_annotation = None;
                 self.selection_drag = None;
+                let additive_node_selection = ui.input(|input| {
+                    input.modifiers.shift
+                        || input.modifiers.command
+                        || input.modifiers.ctrl
+                        || input.modifiers.mac_cmd
+                });
                 let mut hit_node = false;
                 if let Some(port_hit) =
                     node_primary_port_at(graph, &node_rects, pointer_pos, self.graph_view_zoom)
@@ -4636,23 +4670,26 @@ impl HoudiniGraphPanel {
                             break;
                         }
                         if node_rect.contains(pointer_pos) {
-                            self.select_single_node(index);
+                            let selected_for_interaction =
+                                self.select_node_from_graph_click(index, additive_node_selection);
                             self.selected_edge = None;
                             self.selected_annotation = None;
                             self.node_info_open = true;
-                            if response.double_clicked_by(egui::PointerButton::Primary)
-                                && self.selected_node_can_enter_graph_container(graph)
-                            {
-                                self.enter_selected_graph_container(graph);
-                                hit_node = true;
-                                break;
+                            if selected_for_interaction {
+                                if response.double_clicked_by(egui::PointerButton::Primary)
+                                    && self.selected_node_can_enter_graph_container(graph)
+                                {
+                                    self.enter_selected_graph_container(graph);
+                                    hit_node = true;
+                                    break;
+                                }
+                                self.dragging_node = Some(index);
+                                self.node_drag_start_position =
+                                    graph.nodes.get(index).map(|node| node.layout_position);
+                                self.node_drag_start_network_box_states =
+                                    graph.network_box_organization_snapshots();
+                                self.node_drag_peak_delta_pixels = 0.0;
                             }
-                            self.dragging_node = Some(index);
-                            self.node_drag_start_position =
-                                graph.nodes.get(index).map(|node| node.layout_position);
-                            self.node_drag_start_network_box_states =
-                                graph.network_box_organization_snapshots();
-                            self.node_drag_peak_delta_pixels = 0.0;
                             hit_node = true;
                             break;
                         }
@@ -8636,6 +8673,39 @@ mod tests {
         assert_eq!(panel.selected_node, analysis_node_index);
         assert!(panel.selected_annotation.is_none());
         assert!(panel.node_info_open);
+    }
+
+    #[test]
+    fn modifier_node_click_adds_and_removes_from_selected_node_set() {
+        let mut panel = HoudiniGraphPanel::default();
+
+        assert!(panel.select_node_from_graph_click(1, false));
+        assert_eq!(panel.selected_node, 1);
+        assert_eq!(panel.selected_nodes, vec![1]);
+
+        assert!(panel.select_node_from_graph_click(2, true));
+        assert_eq!(panel.selected_node, 2);
+        assert_eq!(panel.selected_nodes, vec![1, 2]);
+
+        assert!(!panel.select_node_from_graph_click(1, true));
+        assert_eq!(panel.selected_node, 2);
+        assert_eq!(panel.selected_nodes, vec![2]);
+
+        assert!(panel.select_node_from_graph_click(1, true));
+        assert_eq!(panel.selected_node, 1);
+        assert_eq!(panel.selected_nodes, vec![1, 2]);
+
+        assert!(!panel.select_node_from_graph_click(1, true));
+        assert_eq!(panel.selected_node, 2);
+        assert_eq!(panel.selected_nodes, vec![2]);
+
+        assert!(panel.select_node_from_graph_click(2, true));
+        assert_eq!(panel.selected_node, 2);
+        assert_eq!(panel.selected_nodes, vec![2]);
+
+        assert!(panel.select_node_from_graph_click(3, false));
+        assert_eq!(panel.selected_node, 3);
+        assert_eq!(panel.selected_nodes, vec![3]);
     }
 
     #[test]
