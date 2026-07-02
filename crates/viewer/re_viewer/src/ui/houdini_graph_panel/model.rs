@@ -1,6 +1,4 @@
-use std::path::Path;
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7113,6 +7111,24 @@ impl GraphDocument {
         Ok(())
     }
 
+    pub fn save_source_package_manifest(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> anyhow::Result<SourcePackageManifestWriteResult> {
+        let path = path.as_ref();
+        let manifest = self.source.metadata.package_manifest_preview();
+        std::fs::write(path, serde_json::to_string_pretty(&manifest)?)?;
+
+        Ok(SourcePackageManifestWriteResult {
+            path: path.to_path_buf(),
+            artifact_count: manifest.artifacts.len(),
+            expected_size_bytes: manifest.expected_size_bytes,
+            remaining_external_reference_count: manifest.remaining_external_reference_count,
+            missing_reference_count: manifest.missing_reference_count,
+            reproducibility_warning_count: manifest.reproducibility_warnings.len(),
+        })
+    }
+
     pub fn load_sidecar_json(&mut self, path: impl AsRef<Path>) -> anyhow::Result<()> {
         let json = std::fs::read_to_string(path)?;
         self.apply_sidecar_json(&json)
@@ -8123,6 +8139,16 @@ impl SourcePackageManifestPreview {
             reproducibility_warnings: bundle_preview.reproducibility_warnings,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourcePackageManifestWriteResult {
+    pub path: PathBuf,
+    pub artifact_count: usize,
+    pub expected_size_bytes: Option<u64>,
+    pub remaining_external_reference_count: usize,
+    pub missing_reference_count: usize,
+    pub reproducibility_warning_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -20839,6 +20865,50 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert!(json.contains("\"external_status\": \"included_pending_write\""));
         let round_trip: SourcePackageManifestPreview = serde_json::from_str(&json).unwrap();
         assert_eq!(round_trip, preview);
+    }
+
+    #[test]
+    fn source_package_manifest_writes_explicit_json_without_copying_sources() {
+        let mut graph = GraphDocument::sample();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source_path = temp_dir.path().join("native cubic.parquet");
+        std::fs::write(&source_path, b"native cubic bytes").unwrap();
+        graph.source.metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some(source_path.display().to_string()),
+            &graph.geometry,
+            Vec::new(),
+        );
+
+        let manifest_path = temp_dir.path().join("houdini-source-package-manifest.json");
+        let result = graph.save_source_package_manifest(&manifest_path).unwrap();
+
+        assert_eq!(result.path, manifest_path);
+        assert_eq!(result.artifact_count, 1);
+        assert_eq!(
+            result.expected_size_bytes,
+            Some("native cubic bytes".len() as u64)
+        );
+        assert_eq!(result.remaining_external_reference_count, 0);
+        assert_eq!(result.missing_reference_count, 0);
+        assert_eq!(result.reproducibility_warning_count, 1);
+        assert!(!temp_dir.path().join("sources").exists());
+
+        let written_json = std::fs::read_to_string(&manifest_path).unwrap();
+        let written_manifest: SourcePackageManifestPreview =
+            serde_json::from_str(&written_json).unwrap();
+        assert_eq!(written_manifest.schema_version, 1);
+        assert_eq!(
+            written_manifest.artifacts[0].external_status,
+            SourcePackageManifestExternalStatus::IncludedPendingWrite
+        );
+        assert!(
+            written_manifest.artifacts[0]
+                .bundled_path
+                .as_deref()
+                .is_some_and(|path| path.starts_with("sources/native_cubic"))
+        );
+        assert_eq!(written_manifest.artifacts[0].content_hash, None);
     }
 
     #[test]
