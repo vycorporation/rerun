@@ -96,3 +96,6 @@ Deferring these surfaces keeps the product fork focused on graph-visible dataflo
 2. #51 - Add native operator node inspection and demand-driven state integration.
 3. #53 - Prototype native operator loading with explicit project trust and capability checks.
 4. #54 - Add native operator cache/provenance records and compatibility invalidation.
+5. #270 - Complete: add model-owned native operator trust controls for project
+   trust, per-operator enablement, and capability grants with undo/redo and
+   cache-status refresh.
