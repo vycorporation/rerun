@@ -24,6 +24,9 @@ const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
 const ATTRIBUTE_TABLE_PREVIEW_ROWS: usize = 200;
 const NETWORK_BOX_FAST_DRAG_PEAK_DELTA_PIXELS: f32 = 18.0;
 const NETWORK_DISPLAY_OPTIONS_ID: &str = "houdini_graph_network_display_options";
+const DEFAULT_ASSET_NAME: &str = "Curve cleanup";
+const DEFAULT_ASSET_DESCRIPTION: &str = "Project-local graph asset.";
+const DEFAULT_ASSET_HELP: &str = "Created from the current Houdini graph.";
 
 pub(crate) type SharedHoudiniGraph = Arc<Mutex<GraphDocument>>;
 pub(crate) type SharedHoudiniGraphPanel = Arc<Mutex<HoudiniGraphPanel>>;
@@ -192,9 +195,9 @@ impl Default for HoudiniGraphPanel {
             table_sort: AttributeTableSort::RecordIndex,
             table_sort_descending: false,
             table_commit_status: None,
-            asset_name: "Curve cleanup".to_owned(),
-            asset_description: "Project-local graph asset.".to_owned(),
-            asset_help: "Created from the current Houdini graph.".to_owned(),
+            asset_name: DEFAULT_ASSET_NAME.to_owned(),
+            asset_description: DEFAULT_ASSET_DESCRIPTION.to_owned(),
+            asset_help: DEFAULT_ASSET_HELP.to_owned(),
             asset_status: None,
             python_uv_executable_path: String::new(),
             python_existing_environment_path: String::new(),
@@ -3205,11 +3208,13 @@ impl HoudiniGraphPanel {
     }
 
     fn create_asset_from_selected_graph_container(&mut self, graph: &mut GraphDocument) -> bool {
+        let (asset_name, asset_description, asset_help) =
+            self.selected_graph_container_asset_metadata(graph);
         match graph.create_asset_draft_from_graph_container(
             self.selected_node,
-            self.asset_name.trim(),
-            self.asset_description.trim(),
-            self.asset_help.trim(),
+            asset_name,
+            asset_description,
+            asset_help,
         ) {
             Ok(draft) => {
                 let asset_id = graph.commit_asset_draft(draft);
@@ -3227,6 +3232,32 @@ impl HoudiniGraphPanel {
                 false
             }
         }
+    }
+
+    fn selected_graph_container_asset_metadata(
+        &self,
+        graph: &GraphDocument,
+    ) -> (String, String, String) {
+        let selected_name = graph
+            .nodes
+            .get(self.selected_node)
+            .map(|node| node.name.trim())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(DEFAULT_ASSET_NAME);
+
+        let asset_name =
+            metadata_value_or_fallback(&self.asset_name, DEFAULT_ASSET_NAME, selected_name);
+        let asset_description = metadata_value_or_fallback(
+            &self.asset_description,
+            DEFAULT_ASSET_DESCRIPTION,
+            &format!("Project-local asset from {selected_name}."),
+        );
+        let asset_help = metadata_value_or_fallback(
+            &self.asset_help,
+            DEFAULT_ASSET_HELP,
+            "Created from the selected Houdini subnet.",
+        );
+        (asset_name, asset_description, asset_help)
     }
 
     fn recording_export_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) {
@@ -5960,6 +5991,15 @@ fn format_bindings(bindings: &[HoudiniNodeBinding]) -> String {
     }
 }
 
+fn metadata_value_or_fallback(value: &str, default_value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == default_value {
+        fallback.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 fn operator_matches(filter: &str, label: &str, aliases: &[&str]) -> bool {
     filter.is_empty()
         || label.to_lowercase().contains(filter)
@@ -7672,7 +7712,19 @@ mod tests {
         assert_eq!(graph.procedural_asset_declarations.len(), 1);
         assert_eq!(
             graph.procedural_asset_declarations[0].asset_id,
-            "project.asset.curve_cleanup"
+            "project.asset.filter_selection_subnet"
+        );
+        assert_eq!(
+            graph.procedural_asset_declarations[0].display_name,
+            "Filter Selection Subnet"
+        );
+        assert_eq!(
+            graph.procedural_asset_declarations[0].description,
+            "Project-local asset from Filter Selection Subnet."
+        );
+        assert_eq!(
+            graph.procedural_asset_declarations[0].help,
+            "Created from the selected Houdini subnet."
         );
         assert_eq!(
             graph.procedural_asset_declarations[0]
@@ -7686,6 +7738,28 @@ mod tests {
                 .as_deref()
                 .is_some_and(|status| status.contains("Created project asset from selected subnet"))
         );
+    }
+
+    #[test]
+    fn subnet_asset_metadata_preserves_user_fields() {
+        let mut graph = GraphDocument::sample();
+        let mut panel = HoudiniGraphPanel {
+            asset_name: "Custom Cleanup".to_owned(),
+            asset_description: "Custom description.".to_owned(),
+            asset_help: "Custom help.".to_owned(),
+            ..HoudiniGraphPanel::default()
+        };
+        panel.set_selected_node_set(vec![1, 2]);
+        assert!(panel.apply_operator_palette_action(
+            &mut graph,
+            OperatorPaletteAction::CollapseSelectionToSubnet,
+        ));
+
+        let (name, description, help) = panel.selected_graph_container_asset_metadata(&graph);
+
+        assert_eq!(name, "Custom Cleanup");
+        assert_eq!(description, "Custom description.");
+        assert_eq!(help, "Custom help.");
     }
 
     #[test]

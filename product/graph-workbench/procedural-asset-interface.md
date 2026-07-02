@@ -121,3 +121,4 @@ Python-backed assets are deferred until the Python operator lane is implemented.
 11. #220 - Complete: create project-local procedural asset drafts from resolved graph containers using their typed boundary and internal graph reference.
 12. #228 - Complete: expose asset draft creation from the selected subnet through the Tab/operator palette while reusing the graph-container asset draft path.
 13. #232 - Complete: add a project asset gallery that lists active project asset definitions and every graph usage with jump-to-instance navigation.
+14. #234 - Complete: seed subnet asset drafts from the selected graph container when authoring fields are still generic, while preserving explicit user metadata and collision-safe project-local asset ids.

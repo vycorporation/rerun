@@ -4722,10 +4722,10 @@ impl GraphDocument {
         description: impl Into<String>,
         help: impl Into<String>,
     ) -> CreateAssetDraft {
-        let display_name = display_name.into();
-        let asset_slug = sanitize_asset_id_part(&display_name);
+        let display_name = normalized_asset_display_name(display_name, "Project Asset");
+        let asset_id = self.next_project_asset_id_for_display_name(&display_name);
         CreateAssetDraft {
-            asset_id: format!("project.asset.{asset_slug}"),
+            asset_id: asset_id.clone(),
             display_name,
             version: "0.1.0".to_owned(),
             description: description.into(),
@@ -4746,7 +4746,7 @@ impl GraphDocument {
             external_artifacts: Vec::new(),
             graph_snapshot: self.procedural_asset_graph_snapshot(),
             wrapped_subgraph: ProceduralAssetSubgraphReference {
-                graph_id: format!("project.asset.{asset_slug}.graph"),
+                graph_id: format!("{asset_id}.graph"),
                 output_node_id: "output.main".to_owned(),
                 captures_native_cubic_bezier: true,
                 graph_snapshot: None,
@@ -4783,8 +4783,8 @@ impl GraphDocument {
             return Err(GraphContainerAssetDraftError::MissingOutputBoundary);
         }
 
-        let display_name = display_name.into();
-        let asset_slug = sanitize_asset_id_part(&display_name);
+        let display_name = normalized_asset_display_name(display_name, &node.name);
+        let asset_id = self.next_project_asset_id_for_display_name(&display_name);
         let graph_snapshot =
             self.procedural_asset_graph_snapshot_for_graph(&container.internal_graph_id);
         let output_node_id = container
@@ -4796,7 +4796,7 @@ impl GraphDocument {
             .unwrap_or_else(|| "output.main".to_owned());
 
         Ok(CreateAssetDraft {
-            asset_id: format!("project.asset.{asset_slug}"),
+            asset_id,
             display_name,
             version: "0.1.0".to_owned(),
             description: description.into(),
@@ -4818,6 +4818,31 @@ impl GraphDocument {
                 graph_snapshot: Some(graph_snapshot),
             },
         })
+    }
+
+    fn next_project_asset_id_for_display_name(&self, display_name: &str) -> String {
+        let asset_slug = sanitize_asset_id_part(display_name);
+        let base_asset_id = format!("project.asset.{asset_slug}");
+        if !self
+            .procedural_asset_declarations
+            .iter()
+            .any(|declaration| declaration.asset_id == base_asset_id)
+        {
+            return base_asset_id;
+        }
+
+        let mut suffix = 2;
+        loop {
+            let asset_id = format!("{base_asset_id}_{suffix}");
+            if !self
+                .procedural_asset_declarations
+                .iter()
+                .any(|declaration| declaration.asset_id == asset_id)
+            {
+                return asset_id;
+            }
+            suffix += 1;
+        }
     }
 
     #[allow(dead_code)]
@@ -12452,6 +12477,16 @@ fn sanitize_asset_id_part(value: &str) -> String {
         "asset".to_owned()
     } else {
         sanitized
+    }
+}
+
+fn normalized_asset_display_name(display_name: impl Into<String>, fallback: &str) -> String {
+    let display_name = display_name.into();
+    let trimmed = display_name.trim();
+    if trimmed.is_empty() {
+        fallback.to_owned()
+    } else {
+        trimmed.to_owned()
     }
 }
 
@@ -22890,6 +22925,28 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
     }
 
     #[test]
+    fn procedural_asset_drafts_get_collision_safe_project_ids() {
+        let mut graph = GraphDocument::sample();
+        let first_draft =
+            graph.create_asset_draft_from_graph("My Cleanup Asset", "First.", "First.");
+        let first_asset_id = graph.commit_asset_draft(first_draft);
+
+        let second_draft =
+            graph.create_asset_draft_from_graph("My Cleanup Asset", "Second.", "Second.");
+        let second_asset_id = graph.commit_asset_draft(second_draft);
+
+        assert_eq!(first_asset_id, "project.asset.my_cleanup_asset");
+        assert_eq!(second_asset_id, "project.asset.my_cleanup_asset_2");
+        assert_eq!(graph.procedural_asset_declarations.len(), 2);
+        assert_eq!(
+            graph.procedural_asset_declarations[1]
+                .wrapped_subgraph
+                .graph_id,
+            "project.asset.my_cleanup_asset_2.graph"
+        );
+    }
+
+    #[test]
     fn procedural_asset_draft_from_graph_container_uses_container_boundary() {
         let mut graph = GraphDocument::sample();
         let filter_index = graph
@@ -22964,6 +23021,39 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .node_count,
             2
         );
+    }
+
+    #[test]
+    fn procedural_asset_draft_from_graph_container_falls_back_to_subnet_name() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "filter.main")
+            .expect("sample graph should include filter");
+        let style_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "style.main")
+            .expect("sample graph should include style");
+        let container_index = graph
+            .add_graph_container_collapse_manifest_for_node_set(
+                "Cleanup Subnet",
+                &[filter_index, style_index],
+            )
+            .expect("connected selection should collapse");
+
+        let draft = graph
+            .create_asset_draft_from_graph_container(
+                container_index,
+                " ",
+                "Promoted from a graph container.",
+                "Use as a reusable cleanup asset.",
+            )
+            .expect("resolved graph container should create an asset draft");
+
+        assert_eq!(draft.display_name, "Cleanup Subnet");
+        assert_eq!(draft.asset_id, "project.asset.cleanup_subnet");
     }
 
     #[test]
