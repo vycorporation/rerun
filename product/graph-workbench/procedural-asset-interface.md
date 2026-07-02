@@ -81,6 +81,8 @@ The inspector should show asset metadata, promoted parameters, input bindings, o
 
 The asset creation flow should start from a selected graph or subgraph and prompt for name, description, inputs, outputs, and promoted parameters.
 The asset editing flow should preserve graph-visible internals.
+Unlocked asset instances should expose an explicit Save Asset Definition action.
+Saving writes compatible graph-owned metadata back to the project-local declaration, bumps the declaration version, relocks the saved instance to that version, and leaves other exact-version pins requiring explicit upgrade.
 
 The UI should avoid presenting assets as a hidden code plugin system.
 An asset is a saved graph pattern with a typed boundary.
@@ -105,3 +107,4 @@ Python-backed assets are deferred until the Python operator lane is implemented.
 7. #158 - Complete: add external artifact reference metadata and asset inspection warnings without embedding heavy artifacts.
 8. #160 - Complete: add typed asset input/output boundary editing model actions with duplicate guards and stale-instance marking.
 9. #162 - Complete: add artifact bundle/export preview metadata with inclusion choices, expected size, remaining external references, and reproducibility warnings without copying artifacts.
+10. #218 - Complete: add explicit Save Asset Definition model and workbench UI actions for unlocked procedural asset instances while preserving exact-version pins.

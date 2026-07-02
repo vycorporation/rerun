@@ -2782,6 +2782,73 @@ impl HoudiniGraphPanel {
             let asset_id = graph.commit_asset_draft(draft);
             self.asset_status = Some(format!("Created project asset: {asset_id}"));
         }
+
+        ui.add_space(6.0);
+        ui.strong("Selected Asset");
+        let selected_asset = graph
+            .selected_node_info(self.selected_node)
+            .and_then(|info| info.procedural_asset);
+        if let Some(asset) = selected_asset {
+            egui::Grid::new("houdini_selected_asset_definition")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    ui.weak("Definition");
+                    ui.label(format!("{} ({})", asset.display_name, asset.asset_id));
+                    ui.end_row();
+
+                    ui.weak("Version");
+                    ui.label(format!(
+                        "instance {} / current {} / {}",
+                        asset.instance_version,
+                        asset.current_version.as_deref().unwrap_or("missing"),
+                        asset.version_status.as_str()
+                    ));
+                    ui.end_row();
+
+                    ui.weak("State");
+                    ui.label(if asset.contents_unlocked {
+                        "unlocked"
+                    } else {
+                        "matched"
+                    });
+                    ui.end_row();
+                });
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        asset.can_save_definition,
+                        egui::Button::new("Save Asset Definition"),
+                    )
+                    .on_hover_text(
+                        "Write compatible unlocked asset edits back to the project-local definition.",
+                    )
+                    .clicked()
+                {
+                    self.asset_status = Some(
+                        graph
+                            .save_procedural_asset_definition(self.selected_node)
+                            .map_or_else(
+                                || "Selected asset definition was not saved.".to_owned(),
+                                |result| {
+                                    format!(
+                                        "Saved {} from {} to {}; {} matched instance(s) now have an explicit upgrade available.",
+                                        result.asset_id,
+                                        result.previous_version,
+                                        result.new_version,
+                                        result.update_available_instance_count
+                                    )
+                                },
+                            ),
+                    );
+                }
+                if !asset.can_save_definition {
+                    ui.weak("Unlock a procedural asset instance before saving its definition.");
+                }
+            });
+        } else {
+            ui.weak("Select a procedural asset node to save or update its definition.");
+        }
         if let Some(status) = &self.asset_status {
             ui.weak(status);
         }
