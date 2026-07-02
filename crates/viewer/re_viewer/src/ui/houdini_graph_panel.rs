@@ -1104,8 +1104,16 @@ impl HoudiniGraphPanel {
                 }
             }
             OperatorPaletteAction::DuplicateSelected => {
-                if let Some(index) = graph.duplicate_node(self.selected_node) {
-                    self.select_single_node(index);
+                let duplicated_nodes = if self.selected_nodes.len() > 1 {
+                    graph.duplicate_node_set(&self.selected_nodes)
+                } else {
+                    graph
+                        .duplicate_node(self.selected_node)
+                        .into_iter()
+                        .collect()
+                };
+                if !duplicated_nodes.is_empty() {
+                    self.set_selected_node_set(duplicated_nodes);
                     self.selected_annotation = None;
                     self.node_info_open = true;
                     self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
