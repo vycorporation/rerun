@@ -4845,7 +4845,7 @@ impl HoudiniGraphPanel {
                 });
                 let mut hit_node = false;
                 if let Some(port_hit) =
-                    node_primary_port_at(graph, &node_rects, pointer_pos, self.graph_view_zoom)
+                    node_port_at(graph, &node_rects, pointer_pos, self.graph_view_zoom)
                 {
                     self.select_single_node(port_hit.node_index);
                     self.selected_edge = None;
@@ -4857,7 +4857,7 @@ impl HoudiniGraphPanel {
                         self.connection_drag = Some(ConnectionDragState {
                             from_node_index: port_hit.node_index,
                             from_node_id: node.node_id.clone(),
-                            from_output: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                            from_output: port_hit.port_name,
                         });
                     }
                     hit_node = true;
@@ -5234,22 +5234,25 @@ impl HoudiniGraphPanel {
         for edge in graph.graph_layout().edges {
             let from_rect = node_rects[edge.from_node];
             let to_rect = node_rects[edge.to_node];
-            let start = node_primary_port_rect_for_node(
+            let (from_output, to_input) = graph_edge_port_names(graph, &edge.edge_id);
+            let start = node_port_rect_for_node(
                 graph,
                 edge.from_node,
                 from_rect,
                 NodePortKind::Output,
+                from_output,
                 self.graph_view_zoom,
             )
             .unwrap_or_else(|| {
                 node_primary_port_rect(from_rect, NodePortKind::Output, self.graph_view_zoom)
             })
             .center();
-            let end = node_primary_port_rect_for_node(
+            let end = node_port_rect_for_node(
                 graph,
                 edge.to_node,
                 to_rect,
                 NodePortKind::Input,
+                to_input,
                 self.graph_view_zoom,
             )
             .unwrap_or_else(|| {
@@ -5285,11 +5288,12 @@ impl HoudiniGraphPanel {
             && let Some(from_rect) = node_rects.get(connection_drag.from_node_index)
             && let Some(pointer_pos) = ui.input(|input| input.pointer.hover_pos())
         {
-            let start = node_primary_port_rect_for_node(
+            let start = node_port_rect_for_node(
                 graph,
                 connection_drag.from_node_index,
                 *from_rect,
                 NodePortKind::Output,
+                &connection_drag.from_output,
                 self.graph_view_zoom,
             )
             .unwrap_or_else(|| {
@@ -5475,8 +5479,7 @@ impl HoudiniGraphPanel {
         connection_drag: ConnectionDragState,
         pointer_pos: Pos2,
     ) {
-        let Some(port_hit) =
-            node_primary_port_at(graph, node_rects, pointer_pos, self.graph_view_zoom)
+        let Some(port_hit) = node_port_at(graph, node_rects, pointer_pos, self.graph_view_zoom)
         else {
             self.shelf_status = Some("Connection canceled.".to_owned());
             return;
@@ -5495,7 +5498,7 @@ impl HoudiniGraphPanel {
             &connection_drag.from_node_id,
             &connection_drag.from_output,
             &target_node_id,
-            PRIMARY_GEOMETRY_OUTPUT,
+            &port_hit.port_name,
         ) {
             Ok(_) => {
                 self.select_single_node(port_hit.node_index);
@@ -8144,16 +8147,17 @@ fn node_port_layouts(graph: &GraphDocument, node_rects: &[Rect], zoom: f32) -> V
         .collect()
 }
 
-fn node_primary_port_rect_for_node(
+fn node_port_rect_for_node(
     graph: &GraphDocument,
     node_index: usize,
     node_rect: Rect,
     kind: NodePortKind,
+    port_name: &str,
     zoom: f32,
 ) -> Option<Rect> {
     node_port_layouts_for_node(graph, node_index, node_rect, zoom)
         .into_iter()
-        .find(|layout| layout.kind == kind && layout.primary_quick_wire)
+        .find(|layout| layout.kind == kind && layout.port_name == port_name)
         .map(|layout| layout.rect)
 }
 
@@ -8176,6 +8180,7 @@ fn node_port_at(
         })
 }
 
+#[allow(dead_code)]
 fn node_primary_port_at(
     graph: &GraphDocument,
     node_rects: &[Rect],
@@ -8192,7 +8197,7 @@ fn connection_drag_preview(
     pointer_pos: Pos2,
     zoom: f32,
 ) -> ConnectionDragPreview {
-    let Some(port_hit) = node_primary_port_at(graph, node_rects, pointer_pos, zoom) else {
+    let Some(port_hit) = node_port_at(graph, node_rects, pointer_pos, zoom) else {
         return ConnectionDragPreview::Floating;
     };
     if port_hit.kind != NodePortKind::Input {
@@ -8206,7 +8211,7 @@ fn connection_drag_preview(
         &connection_drag.from_node_id,
         &connection_drag.from_output,
         &target_node.node_id,
-        PRIMARY_GEOMETRY_OUTPUT,
+        &port_hit.port_name,
     ) {
         Ok(_) => ConnectionDragPreview::Valid,
         Err(diagnostic) => ConnectionDragPreview::Invalid(diagnostic.message),
@@ -8258,6 +8263,15 @@ fn edge_hit_radius(zoom: f32) -> f32 {
     (8.0 * zoom).clamp(6.0, 14.0)
 }
 
+fn graph_edge_port_names<'a>(graph: &'a GraphDocument, edge_id: &str) -> (&'a str, &'a str) {
+    graph
+        .data_flow_edges
+        .iter()
+        .find(|edge| edge.edge_id == edge_id)
+        .map(|edge| (edge.from_output.as_str(), edge.to_input.as_str()))
+        .unwrap_or((PRIMARY_GEOMETRY_OUTPUT, PRIMARY_GEOMETRY_OUTPUT))
+}
+
 fn graph_edge_at(
     graph: &GraphDocument,
     node_rects: &[Rect],
@@ -8272,20 +8286,23 @@ fn graph_edge_at(
         .filter_map(|edge| {
             let from_rect = *node_rects.get(edge.from_node)?;
             let to_rect = *node_rects.get(edge.to_node)?;
-            let start = node_primary_port_rect_for_node(
+            let (from_output, to_input) = graph_edge_port_names(graph, &edge.edge_id);
+            let start = node_port_rect_for_node(
                 graph,
                 edge.from_node,
                 from_rect,
                 NodePortKind::Output,
+                from_output,
                 zoom,
             )
             .unwrap_or_else(|| node_primary_port_rect(from_rect, NodePortKind::Output, zoom))
             .center();
-            let end = node_primary_port_rect_for_node(
+            let end = node_port_rect_for_node(
                 graph,
                 edge.to_node,
                 to_rect,
                 NodePortKind::Input,
+                to_input,
                 zoom,
             )
             .unwrap_or_else(|| node_primary_port_rect(to_rect, NodePortKind::Input, zoom))
@@ -8796,6 +8813,32 @@ mod tests {
         container_index
     }
 
+    fn add_geometry_boundary_ports(
+        graph: &mut GraphDocument,
+        container_index: usize,
+        input_name: &str,
+        output_name: &str,
+    ) {
+        let container_node_id = graph.nodes[container_index].node_id.clone();
+        let metadata = graph
+            .graph_containers
+            .iter_mut()
+            .find(|metadata| metadata.container_node_id == container_node_id)
+            .expect("graph container metadata should exist");
+        metadata.boundary.inputs.push(HoudiniOperatorPort {
+            name: input_name.to_owned(),
+            data_kind: HoudiniDataKind::GeometryTable,
+            required: false,
+            help: "Optional geometry input.".to_owned(),
+        });
+        metadata.boundary.outputs.push(HoudiniOperatorPort {
+            name: output_name.to_owned(),
+            data_kind: HoudiniDataKind::GeometryTable,
+            required: false,
+            help: "Optional geometry output.".to_owned(),
+        });
+    }
+
     #[test]
     fn distance_to_segment_clamps_to_nearest_endpoint_or_segment() {
         let start = egui::pos2(10.0, 10.0);
@@ -9214,6 +9257,103 @@ mod tests {
                 1.0,
             ),
             ConnectionDragPreview::Floating
+        );
+    }
+
+    #[test]
+    fn connection_drag_uses_non_primary_geometry_port_names() {
+        let mut graph = GraphDocument::sample();
+        let source_index = add_multi_port_graph_container(&mut graph);
+        let target_index = add_multi_port_graph_container(&mut graph);
+        add_geometry_boundary_ports(&mut graph, source_index, "guide_in", "guide_out");
+        add_geometry_boundary_ports(&mut graph, target_index, "guide_in", "guide_out");
+        let node_size = egui::vec2(116.0, 48.0);
+        let node_rects = (0..graph.nodes.len())
+            .map(|index| {
+                egui::Rect::from_min_size(egui::pos2(20.0 + index as f32 * 160.0, 20.0), node_size)
+            })
+            .collect::<Vec<_>>();
+        let layouts = node_port_layouts(&graph, &node_rects, 1.0);
+        let source_guide_output = layouts
+            .iter()
+            .find(|layout| {
+                layout.node_index == source_index
+                    && layout.kind == NodePortKind::Output
+                    && layout.port_name == "guide_out"
+            })
+            .expect("source should expose non-primary guide output");
+        let target_guide_input = layouts
+            .iter()
+            .find(|layout| {
+                layout.node_index == target_index
+                    && layout.kind == NodePortKind::Input
+                    && layout.port_name == "guide_in"
+            })
+            .expect("target should expose non-primary guide input");
+        let target_mask_input = layouts
+            .iter()
+            .find(|layout| {
+                layout.node_index == target_index
+                    && layout.kind == NodePortKind::Input
+                    && layout.port_name == "mask"
+            })
+            .expect("target should expose non-geometry mask input");
+        assert!(!source_guide_output.primary_quick_wire);
+        assert!(!target_guide_input.primary_quick_wire);
+
+        let source_drag = ConnectionDragState {
+            from_node_index: source_index,
+            from_node_id: graph.nodes[source_index].node_id.clone(),
+            from_output: "guide_out".to_owned(),
+        };
+        assert_eq!(
+            connection_drag_preview(
+                &graph,
+                &node_rects,
+                &source_drag,
+                target_guide_input.rect.center(),
+                1.0,
+            ),
+            ConnectionDragPreview::Valid
+        );
+        assert_eq!(
+            connection_drag_preview(
+                &graph,
+                &node_rects,
+                &source_drag,
+                target_mask_input.rect.center(),
+                1.0,
+            ),
+            ConnectionDragPreview::Invalid(
+                "Target port 'mask' is not geometry-table data.".to_owned()
+            )
+        );
+
+        let mut panel = HoudiniGraphPanel::default();
+        panel.finish_connection_drag(
+            &mut graph,
+            &node_rects,
+            source_drag,
+            target_guide_input.rect.center(),
+        );
+
+        let guide_edge = graph
+            .data_flow_edges
+            .iter()
+            .find(|edge| {
+                edge.from_node_id == graph.nodes[source_index].node_id
+                    && edge.from_output == "guide_out"
+                    && edge.to_node_id == graph.nodes[target_index].node_id
+                    && edge.to_input == "guide_in"
+            })
+            .expect("drop should add a non-primary guide edge");
+        assert_eq!(panel.selected_node, target_index);
+
+        let guide_midpoint = source_guide_output.rect.center()
+            + (target_guide_input.rect.center() - source_guide_output.rect.center()) * 0.5;
+        assert_eq!(
+            graph_edge_at(&graph, &node_rects, guide_midpoint, 1.0, 8.0),
+            Some(guide_edge.edge_id.clone())
         );
     }
 
