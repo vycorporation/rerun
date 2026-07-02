@@ -29,8 +29,8 @@ This ledger tracks how PRD/ADR material maps to issue-backed implementation in t
 | Native cubic and renderer-native preview path | partial | `specialized-renderer-path.md` | `#29`, `#36`, `#37`, `#38` |
 | Python operator and project environment lane | partial | `python-operator-surface.md`, `python-environment-status.md` | `#31`, `#32`, `#39`, `#40`, `#41`, `#42`, `#43`, `#44`, `#45`, `#46`, `#55` |
 | Native plugin operator lane | partial | `native-plugin-operator-lane.md` | `#34`, `#51`, `#52`, `#53`, `#54` |
-| Procedural asset interface | partial | `procedural-asset-interface.md` | `#33`, `#47`, `#48`, `#49`, `#50`, `#61`, `#152`, `#156`, `#158`, `#160`, `#162`, `#218` |
-| Graph hierarchy and named graph registry | partial | `graph-hierarchy-tracker.md` | `#130`, `#131`, `#132`, `#142`, `#144`, `#146`, `#148`, `#164`, `#166`, `#168`, `#170`, `#172`, `#174`, `#176`, `#178`, `#216` |
+| Procedural asset interface | partial | `procedural-asset-interface.md` | `#33`, `#47`, `#48`, `#49`, `#50`, `#61`, `#152`, `#156`, `#158`, `#160`, `#162`, `#218`, `#220` |
+| Graph hierarchy and named graph registry | partial | `graph-hierarchy-tracker.md` | `#130`, `#131`, `#132`, `#142`, `#144`, `#146`, `#148`, `#164`, `#166`, `#168`, `#170`, `#172`, `#174`, `#176`, `#178`, `#216`, `#220` |
 | Reference inputs, stable IDs, diagnostics, and target sets | complete for current v1 reference-input spine | PRD ADRs plus command-history tracker | `#57`, `#58`, `#59`, `#60`, `#62`, `#98`, `#113`, `#114`, `#121`, `#122` |
 | Workbench layout presets and browser | complete for current v1 workbench slice | `workbench-layout-presets.md` | `#64`, `#68`, `#72`, `#74` |
 | Shelf tools | complete for built-in shelf tools; custom shelf tools deferred | `shelf-tools.md` | `#90` |
@@ -63,13 +63,13 @@ issue-backed implementation slices next.
 
 1. Multiple named graphs and subgraph navigation.
    - Source ADRs: `0008`, `0035`, `0036`, `0074`, `0075`.
-   - Issue-backed slices: `#130` graph registry metadata, `#131` current graph path and graph-local inspection, `#132` focused graph hierarchy tracker, `#142` graph container metadata, `#144` typed graph container boundaries, `#146` boundary anchor mappings, `#148` collapse manifests, `#164` graph-local node name policy, `#166` selected graph navigation model actions, `#168` selected graph storage layout scope, `#170` physical graph container collapse storage, `#172` graph container enter inspector action, `#174` selected graph data-flow diagnostics, `#176` cross-graph search result navigation, `#178` graph-path reference delete warnings, and `#216` selected-node graph container collapse UI.
+   - Issue-backed slices: `#130` graph registry metadata, `#131` current graph path and graph-local inspection, `#132` focused graph hierarchy tracker, `#142` graph container metadata, `#144` typed graph container boundaries, `#146` boundary anchor mappings, `#148` collapse manifests, `#164` graph-local node name policy, `#166` selected graph navigation model actions, `#168` selected graph storage layout scope, `#170` physical graph container collapse storage, `#172` graph container enter inspector action, `#174` selected graph data-flow diagnostics, `#176` cross-graph search result navigation, `#178` graph-path reference delete warnings, `#216` selected-node graph container collapse UI, and `#220` graph-container asset draft promotion.
    - Later likely slices: explicit connection-editing cycle blocking and multi-node graph-container collapse UI once graph multi-selection exists.
 
 2. Procedural asset authoring depth.
    - Source ADRs: `0009`, `0010`, `0011`, `0077`, `0078`.
-   - Issue-backed slices: `#152` promoted parameter binding metadata, `#156` match-definition and upgrade-to-current-definition model actions, `#158` external artifact reference metadata and warnings, `#160` typed asset input/output boundary editing model actions, `#162` bundle/export artifact inclusion previews, and `#218` explicit save-definition actions.
-   - Later likely slices: asset authoring from graph containers or selected connected subgraphs.
+   - Issue-backed slices: `#152` promoted parameter binding metadata, `#156` match-definition and upgrade-to-current-definition model actions, `#158` external artifact reference metadata and warnings, `#160` typed asset input/output boundary editing model actions, `#162` bundle/export artifact inclusion previews, `#218` explicit save-definition actions, and `#220` graph-container asset draft promotion.
+   - Later likely slices: richer asset authoring from selected connected subgraphs.
 
 3. Connection editing semantics.
    - Source ADRs: `0004`, `0006`, `0074`.
