@@ -21,7 +21,8 @@ use self::model::{
     NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot,
     NetworkCommentDisplayMode, NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeKind,
     NodeStatus, PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
-    PythonOperatorDependencyStatus, ReferenceDiagnosticStatus, SourceGalleryIndex,
+    PythonOperatorDependencyStatus, ReferenceDiagnosticStatus, SourceExternalReferenceActionHint,
+    SourceExternalReferenceActionKind, SourceExternalReferenceActionReport, SourceGalleryIndex,
     SourceGalleryItem, SourceGalleryItemKind, SourceLocator, SourceMetadata,
     SubstrateCoordinateContract,
 };
@@ -155,6 +156,7 @@ pub(crate) struct HoudiniGraphPanel {
     source_gallery_checked_ids: Vec<String>,
     source_gallery_index: Option<SourceGalleryIndex>,
     source_gallery_status: Option<String>,
+    source_reference_copied_locator: Option<String>,
     python_uv_executable_path: String,
     python_existing_environment_path: String,
     python_create_environment_path: String,
@@ -226,6 +228,7 @@ impl Default for HoudiniGraphPanel {
             source_gallery_checked_ids: Vec::new(),
             source_gallery_index: None,
             source_gallery_status: None,
+            source_reference_copied_locator: None,
             python_uv_executable_path: String::new(),
             python_existing_environment_path: String::new(),
             python_create_environment_path: String::new(),
@@ -2690,7 +2693,7 @@ impl HoudiniGraphPanel {
             });
     }
 
-    fn source_summary_ui(&self, ui: &mut Ui, graph: &GraphDocument) {
+    fn source_summary_ui(&mut self, ui: &mut Ui, graph: &GraphDocument) {
         egui::Grid::new("houdini_graph_source_summary")
             .num_columns(2)
             .spacing([12.0, 4.0])
@@ -6200,7 +6203,12 @@ impl HoudiniGraphPanel {
         }
     }
 
-    fn source_metadata_ui(&self, ui: &mut Ui, metadata: &SourceMetadata, id_suffix: &'static str) {
+    fn source_metadata_ui(
+        &mut self,
+        ui: &mut Ui,
+        metadata: &SourceMetadata,
+        id_suffix: &'static str,
+    ) {
         let external_reference = metadata.external_reference_report();
         let bundle_preview = metadata.bundle_preview();
         let package_manifest = metadata.package_manifest_preview();
@@ -6308,7 +6316,19 @@ impl HoudiniGraphPanel {
                 ui.end_row();
 
                 ui.weak("Reference action");
-                ui.label(&action_report.recommended.label);
+                ui.horizontal(|ui| {
+                    let locator = metadata.locator.readable();
+                    ui.label(&action_report.recommended.label);
+                    if copy_locator_action_hint(&action_report).is_some()
+                        && ui.small_button("Copy locator").clicked()
+                    {
+                        ui.copy_text(locator.clone());
+                        self.source_reference_copied_locator = Some(locator.clone());
+                    }
+                    if self.source_reference_copied_locator.as_deref() == Some(locator.as_str()) {
+                        ui.weak("Copied locator");
+                    }
+                });
                 ui.end_row();
 
                 ui.weak("Bounds");
@@ -6650,6 +6670,14 @@ fn parms_row(ui: &mut Ui, label: &str, value: &str) {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "Yes" } else { "No" }
+}
+
+fn copy_locator_action_hint(
+    report: &SourceExternalReferenceActionReport,
+) -> Option<&SourceExternalReferenceActionHint> {
+    std::iter::once(&report.recommended)
+        .chain(report.secondary.iter())
+        .find(|hint| hint.kind == SourceExternalReferenceActionKind::CopyLocator)
 }
 
 fn format_list(values: &[String]) -> String {
@@ -8064,10 +8092,12 @@ mod tests {
     use super::{
         ConnectionDragPreview, ConnectionDragState, GraphSearchTarget, GraphWorkbenchPane,
         HoudiniGraphPanel, NodePortKind, OperatorPaletteAction, asset_usage_graph_groups,
-        connection_drag_preview, distance_to_segment, graph_edge_at, layout_node_rects,
+        connection_drag_preview, copy_locator_action_hint, distance_to_segment, graph_edge_at,
+        layout_node_rects,
         model::{
             GraphContainerStatus, NodeKind, ProjectGraphMetadata, ProjectGraphRole,
-            SourceGalleryIndex, SourceLocator,
+            SourceExternalReferenceActionKind, SourceGalleryIndex, SourceLocator, SourceMetadata,
+            SourceProvenance,
         },
         node_indices_in_selection_rect, node_primary_port_at, node_primary_port_rect,
         operator_palette_action_available, operator_palette_entries, source_gallery_filtered_items,
@@ -8083,6 +8113,69 @@ mod tests {
         assert_eq!(distance_to_segment(egui::pos2(20.0, 13.0), start, end), 3.0);
         assert_eq!(distance_to_segment(egui::pos2(5.0, 10.0), start, end), 5.0);
         assert_eq!(distance_to_segment(egui::pos2(35.0, 10.0), start, end), 5.0);
+    }
+
+    #[test]
+    fn copy_locator_action_hint_is_available_for_external_sources() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source_path = temp_dir.path().join("source.csv");
+        std::fs::write(&source_path, b"x0,y0,x1,y1,x2,y2\n0,0,1,0,0,1\n").unwrap();
+        let metadata = SourceMetadata {
+            provenance: SourceProvenance::CsvImport,
+            source_path: Some(source_path.display().to_string()),
+            locator: SourceLocator::from_location(&source_path.display().to_string()),
+            record_count: 0,
+            polygon_count: 0,
+            cubic_bezier_count: 0,
+            bounds: None,
+            attribute_names: Vec::new(),
+            recognized_control_point_columns: Vec::new(),
+        };
+
+        let actions = metadata.external_reference_action_report();
+        let copy_hint =
+            copy_locator_action_hint(&actions).expect("local external source should copy locator");
+
+        assert_eq!(
+            copy_hint.kind,
+            SourceExternalReferenceActionKind::CopyLocator
+        );
+        assert!(
+            copy_hint
+                .detail
+                .contains(&source_path.display().to_string())
+        );
+    }
+
+    #[test]
+    fn copy_locator_action_hint_is_absent_for_generated_and_live_sources() {
+        let graph = GraphDocument::sample();
+        assert!(
+            copy_locator_action_hint(&graph.source.metadata.external_reference_action_report())
+                .is_none()
+        );
+
+        let bridge = crate::ui::houdini_graph_panel::model::RerunQueryBridge {
+            mode: crate::ui::houdini_graph_panel::model::RerunQueryBridgeMode::ProductForkViewOwned,
+            view_id: "view(1234)".to_owned(),
+            space_origin: "/".to_owned(),
+            timeline: "frame".to_owned(),
+            latest_at: 42,
+            matching_entity_count: 1,
+            visualized_entity_count: 1,
+            visible_data_result_count: 1,
+        };
+        let mut live_graph = GraphDocument::sample();
+        live_graph.update_source_from_query_bridge(&bridge);
+        assert!(
+            copy_locator_action_hint(
+                &live_graph
+                    .source
+                    .metadata
+                    .external_reference_action_report()
+            )
+            .is_none()
+        );
     }
 
     #[test]
