@@ -9,6 +9,7 @@
 | `#286` | complete | Internal wiring for selected-set duplication | Copies selected-internal data-flow edges onto duplicated node sets, remapping endpoints to the duplicated stable node IDs while leaving external incoming/outgoing connections unmodified. |
 | `#290` | complete | Graph workbench node clipboard paste | Adds Copy Selected and Paste Nodes actions for project-local graph-node clipboard snapshots, pasting fresh node identities and copied selected-internal wiring while leaving external connections disconnected for later reconnect-policy slices. |
 | `#292` | complete | External connection paste choices | Adds explicit graph-node clipboard paste choices for reconnecting copied nodes to original external inputs and/or outputs when the resulting data-flow edges validate. |
+| `#294` | complete | Presentation-aware duplication | Adds a separate graph workbench duplication action that preserves selected nodes' output participation and output-operator publication metadata while ordinary duplicate and paste remain conservative. |
 
 PRD sources:
 
@@ -17,4 +18,4 @@ PRD sources:
 - `product-prd/source/docs/adr/0002-node-graph-is-the-source-of-truth.md`
 - `product-prd/source/CONTEXT.md`
 
-Deferred follow-up slices: explicit presentation-aware duplication.
+Deferred follow-up slices: none currently tracked for node duplication.
