@@ -31,6 +31,8 @@ const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
 const ATTRIBUTE_TABLE_PREVIEW_ROWS: usize = 200;
 const NETWORK_BOX_FAST_DRAG_PEAK_DELTA_PIXELS: f32 = 18.0;
 const NETWORK_DISPLAY_OPTIONS_ID: &str = "houdini_graph_network_display_options";
+const NATIVE_OPERATOR_PROJECT_TRUST_PROMPT_ID: &str =
+    "houdini_native_operator_project_trust_prompt";
 const SOURCE_GALLERY_INDEX_LIMIT: usize = 256;
 const DEFAULT_ASSET_NAME: &str = "Curve cleanup";
 const DEFAULT_ASSET_DESCRIPTION: &str = "Project-local graph asset.";
@@ -160,6 +162,7 @@ pub(crate) struct HoudiniGraphPanel {
     python_uv_executable_path: String,
     python_existing_environment_path: String,
     python_create_environment_path: String,
+    pending_native_operator_project_trust: Option<PendingNativeOperatorProjectTrust>,
 }
 
 impl Default for HoudiniGraphPanel {
@@ -232,6 +235,7 @@ impl Default for HoudiniGraphPanel {
             python_uv_executable_path: String::new(),
             python_existing_environment_path: String::new(),
             python_create_environment_path: String::new(),
+            pending_native_operator_project_trust: None,
         }
     }
 }
@@ -280,6 +284,13 @@ impl SelectionDragState {
     fn rect(self) -> Rect {
         Rect::from_two_pos(self.start, self.current)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingNativeOperatorProjectTrust {
+    trusted: bool,
+    operator_id: String,
+    display_name: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2155,6 +2166,7 @@ impl HoudiniGraphPanel {
                 self.compact_layer_stack_ui(ui, graph);
             }
         }
+        self.native_operator_project_trust_confirmation_ui(ui, graph);
     }
 
     fn network_view_options_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
@@ -6225,6 +6237,7 @@ impl HoudiniGraphPanel {
                 self.source_metadata_ui(ui, source_metadata, "node_info");
             }
         }
+        self.native_operator_project_trust_confirmation_ui(ui, graph);
     }
 
     fn native_operator_trust_controls_ui(
@@ -6240,7 +6253,12 @@ impl HoudiniGraphPanel {
                 .re_checkbox(&mut project_trusted, "Trust native operators")
                 .changed()
             {
-                graph.set_native_operator_project_trusted(project_trusted);
+                self.pending_native_operator_project_trust =
+                    Some(PendingNativeOperatorProjectTrust {
+                        trusted: project_trusted,
+                        operator_id: native_operator.operator_id.clone(),
+                        display_name: native_operator.display_name.clone(),
+                    });
             }
 
             let mut operator_enabled = native_operator.operator_enabled;
@@ -6291,6 +6309,67 @@ impl HoudiniGraphPanel {
                     ),
                 );
             }
+        }
+    }
+
+    fn native_operator_project_trust_confirmation_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &mut GraphDocument,
+    ) {
+        let Some(pending) = self.pending_native_operator_project_trust.clone() else {
+            return;
+        };
+        if graph.native_operator_trust.project_trusted == pending.trusted {
+            self.pending_native_operator_project_trust = None;
+            return;
+        }
+
+        let mut open = true;
+        let mut close_prompt = false;
+        egui::Window::new("Native operator trust")
+            .id(egui::Id::new(NATIVE_OPERATOR_PROJECT_TRUST_PROMPT_ID))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(360.0);
+                ui.strong(if pending.trusted {
+                    "Trust native operators for this project?"
+                } else {
+                    "Disable project trust for native operators?"
+                });
+                ui.add_space(4.0);
+                ui.label(format!(
+                    "{} ({}) requested the project-level trust change.",
+                    pending.display_name, pending.operator_id
+                ));
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Native operators are trusted local code. This is not a sandbox.",
+                );
+                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(if pending.trusted {
+                            "Trust native operators"
+                        } else {
+                            "Disable trust"
+                        })
+                        .clicked()
+                    {
+                        graph.set_native_operator_project_trusted(pending.trusted);
+                        close_prompt = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close_prompt = true;
+                    }
+                });
+            });
+
+        if close_prompt || !open {
+            self.pending_native_operator_project_trust = None;
         }
     }
 
