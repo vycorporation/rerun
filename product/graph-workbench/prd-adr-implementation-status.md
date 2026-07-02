@@ -37,7 +37,7 @@ This ledger tracks how PRD/ADR material maps to issue-backed implementation in t
 | Node comments, node info, badges, and organization affordances | complete for current v1 graph organization slice | `node-comment-display-mode.md`, command-history tracker | `#65`, `#66`, `#94`, `#100`, `#102`, `#104`, `#106`, `#111`, `#112`, `#120`, `#123` |
 | Node duplication and deletion | complete for ordinary single-node duplicate/delete | `node-duplication.md`, command-history tracker | `#92`, `#108`, `#113` |
 | Connection editing semantics | partial | this ledger until a focused tracker is added | `#136`, `#137`, `#138`, `#180`, `#182`, `#184`, `#186`, `#188`, `#190`, `#192`, `#194` |
-| Dataset/source breadth and external artifact references | partial | this ledger until a focused tracker is added | `#196` |
+| Dataset/source breadth and external artifact references | partial | this ledger until a focused tracker is added | `#196`, `#198` |
 | Malware byteplot starter workflow | complete for current starter graph and raster output slice | `malware-byteplot-workflow.md` | `#75`, `#79` |
 | Project command history | complete through the current command-history batch | `project-command-history.md` | `#88`, `#96`, `#98`, `#100`, `#102`, `#104`, `#106`, `#108`, `#110`, `#111`, `#112`, `#113`, `#114`, `#120`, `#121`, `#122`, `#123` |
 | PRD/ADR implementation status tracking | complete for the initial status ledger | `prd-adr-implementation-status.md` | `#128` |
@@ -78,8 +78,8 @@ issue-backed implementation slices next.
 
 4. Dataset/source breadth and external artifact references.
    - Source ADRs: `0014`, `0015`, `0016`, `0078`.
-   - Issue-backed slices: `#196` source locator metadata model.
-   - Later likely slices: external-reference status, source-format capability records, and packaging/export manifest previews.
+   - Issue-backed slices: `#196` source locator metadata model and `#198` source format capability records.
+   - Later likely slices: external-reference status and packaging/export manifest previews.
 
 5. Minimal graph-backed viewport editing.
    - Source ADRs: `0029`, `0047`, `0050`.
