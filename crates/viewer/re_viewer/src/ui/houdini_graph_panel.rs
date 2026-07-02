@@ -83,6 +83,7 @@ fn shared_houdini_graph_panel_id() -> egui::Id {
 
 pub(crate) struct HoudiniGraphPanel {
     selected_node: usize,
+    selected_nodes: Vec<usize>,
     selected_edge: Option<String>,
     selected_annotation: Option<usize>,
     context_menu_canvas: bool,
@@ -98,6 +99,7 @@ pub(crate) struct HoudiniGraphPanel {
     resizing_annotation: Option<usize>,
     annotation_resize_start_size: Option<GraphPoint>,
     connection_drag: Option<ConnectionDragState>,
+    selection_drag: Option<SelectionDragState>,
     graph_view_zoom: f32,
     graph_view_pan: Vec2,
     pending_frame_selected: bool,
@@ -142,6 +144,7 @@ impl Default for HoudiniGraphPanel {
     fn default() -> Self {
         Self {
             selected_node: 1,
+            selected_nodes: vec![1],
             selected_edge: None,
             selected_annotation: None,
             context_menu_canvas: false,
@@ -157,6 +160,7 @@ impl Default for HoudiniGraphPanel {
             resizing_annotation: None,
             annotation_resize_start_size: None,
             connection_drag: None,
+            selection_drag: None,
             graph_view_zoom: 1.0,
             graph_view_pan: Vec2::ZERO,
             pending_frame_selected: false,
@@ -227,6 +231,18 @@ struct ConnectionDragState {
     from_node_index: usize,
     from_node_id: String,
     from_output: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SelectionDragState {
+    start: Pos2,
+    current: Pos2,
+}
+
+impl SelectionDragState {
+    fn rect(self) -> Rect {
+        Rect::from_two_pos(self.start, self.current)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -923,14 +939,15 @@ impl HoudiniGraphPanel {
     ) -> bool {
         let applied = match action {
             OperatorPaletteAction::AddOutNull => {
-                self.selected_node = graph.add_null_operator_node("OUT_MAIN");
+                let node_index = graph.add_null_operator_node("OUT_MAIN");
+                self.select_single_node(node_index);
                 self.node_info_open = true;
                 self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
                 true
             }
             OperatorPaletteAction::AddReference => {
                 if let Some(index) = graph.add_reference_input_node(self.selected_node) {
-                    self.selected_node = index;
+                    self.select_single_node(index);
                     self.node_info_open = true;
                     self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
                     true
@@ -944,7 +961,7 @@ impl HoudiniGraphPanel {
                         self.selected_node,
                     )
                 {
-                    self.selected_node = index;
+                    self.select_single_node(index);
                     self.node_info_open = true;
                     self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
                     true
@@ -954,7 +971,7 @@ impl HoudiniGraphPanel {
             }
             OperatorPaletteAction::DuplicateSelected => {
                 if let Some(index) = graph.duplicate_node(self.selected_node) {
-                    self.selected_node = index;
+                    self.select_single_node(index);
                     self.selected_annotation = None;
                     self.node_info_open = true;
                     self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
@@ -1071,7 +1088,7 @@ impl HoudiniGraphPanel {
                         .clicked()
                     {
                         *graph = GraphDocument::malware_starter();
-                        self.selected_node = 0;
+                        self.select_single_node(0);
                         self.selected_annotation = None;
                         self.node_info_open = true;
                         self.active_graph_pane = GraphWorkbenchPane::Info;
@@ -1084,7 +1101,7 @@ impl HoudiniGraphPanel {
                         .clicked()
                     {
                         *graph = GraphDocument::sample();
-                        self.selected_node = 0;
+                        self.select_single_node(0);
                         self.selected_annotation = None;
                         self.node_info_open = true;
                         self.active_graph_pane = GraphWorkbenchPane::Info;
@@ -1106,7 +1123,7 @@ impl HoudiniGraphPanel {
                         self.asset_description.trim(),
                         self.asset_help.trim(),
                     );
-                    self.selected_node = node_index;
+                    self.select_single_node(node_index);
                     self.selected_annotation = None;
                     self.active_graph_pane = GraphWorkbenchPane::Info;
                     self.asset_status = Some(format!("Created project asset: {asset_id}"));
@@ -1300,6 +1317,8 @@ impl HoudiniGraphPanel {
 
     fn selected_node_graph_container_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) -> bool {
         let can_collapse = self.selected_node_can_collapse_to_graph_container(graph);
+        let selected_node_set = self.collapsible_selected_node_set(graph);
+        let can_collapse_selection = selected_node_set.len() > 1;
         let mut collapsed = false;
 
         egui::CollapsingHeader::new("Subnet")
@@ -1315,6 +1334,21 @@ impl HoudiniGraphPanel {
                 {
                     collapsed = self.collapse_selected_node_to_graph_container(graph);
                 }
+                if ui
+                    .add_enabled(
+                        can_collapse_selection,
+                        egui::Button::new("Collapse Selection to Subnet"),
+                    )
+                    .on_hover_text(
+                        "Move the selected node set into a new internal graph and rewire compatible external crossings through typed subnet boundaries.",
+                    )
+                    .clicked()
+                {
+                    collapsed = self.collapse_selected_nodes_to_graph_container(graph);
+                }
+                if self.selected_nodes.len() > 1 {
+                    ui.weak(format!("{} selected node(s)", self.selected_nodes.len()));
+                }
                 if !can_collapse {
                     ui.weak("Select a non-output, non-container node in the current graph.");
                 }
@@ -1324,6 +1358,36 @@ impl HoudiniGraphPanel {
             });
 
         collapsed
+    }
+
+    fn select_single_node(&mut self, node_index: usize) {
+        self.selected_node = node_index;
+        self.selected_nodes.clear();
+        self.selected_nodes.push(node_index);
+    }
+
+    fn set_selected_node_set(&mut self, mut node_indices: Vec<usize>) {
+        node_indices.sort_unstable();
+        node_indices.dedup();
+        if let Some(primary) = node_indices.first().copied() {
+            self.selected_node = primary;
+            self.selected_nodes = node_indices;
+        } else {
+            self.selected_nodes.clear();
+        }
+    }
+
+    fn collapsible_selected_node_set(&self, graph: &GraphDocument) -> Vec<usize> {
+        self.selected_nodes
+            .iter()
+            .copied()
+            .filter(|node_index| {
+                graph.nodes.get(*node_index).is_some_and(|node| {
+                    node.parent_graph_id == graph.current_graph_id()
+                        && !matches!(node.kind, NodeKind::Output | NodeKind::GraphContainer)
+                })
+            })
+            .collect()
     }
 
     fn selected_node_can_collapse_to_graph_container(&self, graph: &GraphDocument) -> bool {
@@ -1353,7 +1417,7 @@ impl HoudiniGraphPanel {
             &[self.selected_node],
         ) {
             Ok(container_index) => {
-                self.selected_node = container_index;
+                self.set_selected_node_set(vec![container_index]);
                 self.selected_annotation = None;
                 self.selected_edge = None;
                 self.node_info_open = true;
@@ -1367,6 +1431,46 @@ impl HoudiniGraphPanel {
             Err(err) => {
                 self.graph_container_status = Some(format!(
                     "Subnet collapse failed: {}.",
+                    graph_container_collapse_error_message(&err)
+                ));
+                false
+            }
+        }
+    }
+
+    fn collapse_selected_nodes_to_graph_container(&mut self, graph: &mut GraphDocument) -> bool {
+        let selected_nodes = self.collapsible_selected_node_set(graph);
+        if selected_nodes.len() <= 1 {
+            self.graph_container_status =
+                Some("Select multiple non-output nodes to collapse.".to_owned());
+            return false;
+        }
+
+        let subnet_name = graph
+            .nodes
+            .get(self.selected_node)
+            .map(|node| format!("{} Selection Subnet", node.name))
+            .unwrap_or_else(|| "Selection Subnet".to_owned());
+        let selected_count = selected_nodes.len();
+        match graph.add_graph_container_collapse_manifest_for_node_set(
+            subnet_name.clone(),
+            &selected_nodes,
+        ) {
+            Ok(container_index) => {
+                self.set_selected_node_set(vec![container_index]);
+                self.selected_annotation = None;
+                self.selected_edge = None;
+                self.node_info_open = true;
+                self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
+                self.graph_container_status = Some(format!(
+                    "Collapsed {selected_count} selected nodes into graph container {subnet_name}."
+                ));
+                self.pending_frame_selected = true;
+                true
+            }
+            Err(err) => {
+                self.graph_container_status = Some(format!(
+                    "Selection subnet collapse failed: {}.",
                     graph_container_collapse_error_message(&err)
                 ));
                 false
@@ -2190,11 +2294,12 @@ impl HoudiniGraphPanel {
                     .clicked()
                 && graph.enter_graph_container_node(self.selected_node).is_ok()
             {
-                self.selected_node = graph
+                let node_index = graph
                     .current_graph_node_indices()
                     .first()
                     .copied()
                     .unwrap_or(graph.nodes.len());
+                self.select_single_node(node_index);
                 self.selected_annotation = None;
                 self.node_info_open = true;
                 self.reset_graph_view();
@@ -2707,7 +2812,7 @@ impl HoudiniGraphPanel {
         ui.horizontal(|ui| {
             if ui.button("Load Malware Starter").clicked() {
                 *graph = GraphDocument::malware_starter();
-                self.selected_node = 0;
+                self.select_single_node(0);
                 self.selected_annotation = None;
                 self.node_info_open = true;
                 self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
@@ -3114,7 +3219,7 @@ impl HoudiniGraphPanel {
         match target {
             GraphSearchTarget::Node { index, graph_id } => {
                 let _ = graph.select_graph_by_id(&graph_id);
-                self.selected_node = index;
+                self.select_single_node(index);
                 self.selected_annotation = None;
                 self.context_menu_canvas = false;
                 self.node_info_open = true;
@@ -3122,6 +3227,8 @@ impl HoudiniGraphPanel {
             }
             GraphSearchTarget::Annotation(index) => {
                 self.selected_annotation = Some(index);
+                self.selected_edge = None;
+                self.selected_nodes.clear();
                 self.context_menu_canvas = false;
                 self.pending_frame_selected = true;
                 self.active_graph_pane = GraphWorkbenchPane::Find;
@@ -3191,7 +3298,7 @@ impl HoudiniGraphPanel {
                         .selectable_label(self.selected_node == index, &node.name)
                         .clicked()
                     {
-                        self.selected_node = index;
+                        self.select_single_node(index);
                         self.selected_annotation = None;
                         self.pending_frame_selected = true;
                     }
@@ -3462,11 +3569,12 @@ impl HoudiniGraphPanel {
                 self.dragging_node = None;
                 self.dragging_annotation = None;
                 self.resizing_annotation = None;
+                self.selection_drag = None;
                 let mut hit_node = false;
                 if let Some(port_hit) =
                     node_primary_port_at(graph, &node_rects, pointer_pos, self.graph_view_zoom)
                 {
-                    self.selected_node = port_hit.node_index;
+                    self.select_single_node(port_hit.node_index);
                     self.selected_edge = None;
                     self.selected_annotation = None;
                     self.node_info_open = true;
@@ -3484,7 +3592,7 @@ impl HoudiniGraphPanel {
                 if !hit_node {
                     for (index, node_rect) in node_rects.iter().enumerate() {
                         if let Some(flag_action) = node_flag_action_at(*node_rect, pointer_pos) {
-                            self.selected_node = index;
+                            self.select_single_node(index);
                             self.apply_node_ring_action(graph, index, flag_action);
                             hit_node = true;
                             break;
@@ -3504,13 +3612,13 @@ impl HoudiniGraphPanel {
                             && let Some(ring_action) =
                                 node_ring_action_at(*node_rect, pointer_pos, self.graph_view_zoom)
                         {
-                            self.selected_node = index;
+                            self.select_single_node(index);
                             self.apply_node_ring_action(graph, index, ring_action);
                             hit_node = true;
                             break;
                         }
                         if node_rect.contains(pointer_pos) {
-                            self.selected_node = index;
+                            self.select_single_node(index);
                             self.selected_edge = None;
                             self.selected_annotation = None;
                             self.node_info_open = true;
@@ -3535,12 +3643,14 @@ impl HoudiniGraphPanel {
                             }
                             self.selected_annotation = Some(index);
                             self.selected_edge = None;
+                            self.selected_nodes.clear();
                             hit_annotation = true;
                             break;
                         }
                         if annotation_resize_handle_rect(*annotation_rect).contains(pointer_pos) {
                             self.selected_annotation = Some(index);
                             self.selected_edge = None;
+                            self.selected_nodes.clear();
                             self.resizing_annotation = Some(index);
                             self.annotation_resize_start_size = graph
                                 .annotations
@@ -3552,6 +3662,7 @@ impl HoudiniGraphPanel {
                         if annotation_rect.contains(pointer_pos) {
                             self.selected_annotation = Some(index);
                             self.selected_edge = None;
+                            self.selected_nodes.clear();
                             self.dragging_annotation = Some(index);
                             self.annotation_drag_start_position = graph
                                 .annotations
@@ -3575,6 +3686,7 @@ impl HoudiniGraphPanel {
                     .map(|edge_id| {
                         self.selected_edge = Some(edge_id);
                         self.selected_annotation = None;
+                        self.selected_nodes.clear();
                     })
                     .is_some()
                 } else {
@@ -3590,6 +3702,20 @@ impl HoudiniGraphPanel {
                     self.node_info_open = false;
                     self.selected_annotation = None;
                     self.selected_edge = None;
+                    self.selected_nodes.clear();
+                }
+
+                if response.drag_started_by(egui::PointerButton::Primary)
+                    && !hit_node
+                    && !hit_annotation
+                    && !hit_edge
+                {
+                    self.selected_annotation = None;
+                    self.selected_edge = None;
+                    self.selection_drag = Some(SelectionDragState {
+                        start: pointer_pos,
+                        current: pointer_pos,
+                    });
                 }
             }
 
@@ -3602,6 +3728,7 @@ impl HoudiniGraphPanel {
                     if annotation_rect.contains(pointer_pos) {
                         self.selected_annotation = Some(index);
                         self.selected_edge = None;
+                        self.selected_nodes.clear();
                         self.context_menu_canvas = false;
                         hit_annotation = true;
                         break;
@@ -3611,7 +3738,7 @@ impl HoudiniGraphPanel {
                 if !hit_annotation {
                     for (index, node_rect) in node_rects.iter().enumerate() {
                         if node_rect.contains(pointer_pos) {
-                            self.selected_node = index;
+                            self.select_single_node(index);
                             self.selected_edge = None;
                             self.selected_annotation = None;
                             self.context_menu_canvas = false;
@@ -3633,6 +3760,7 @@ impl HoudiniGraphPanel {
                     self.selected_edge = Some(edge_id.clone());
                     self.context_menu_edge = Some(edge_id);
                     self.selected_annotation = None;
+                    self.selected_nodes.clear();
                     self.context_menu_canvas = false;
                 }
             }
@@ -3686,6 +3814,8 @@ impl HoudiniGraphPanel {
                             y: pointer_delta.y / (layout_rect.height() * self.graph_view_zoom),
                         },
                     );
+                } else if let Some(selection_drag) = self.selection_drag.as_mut() {
+                    selection_drag.current = pointer_pos;
                 }
             }
         }
@@ -3722,6 +3852,23 @@ impl HoudiniGraphPanel {
                 && let Some(start_size) = self.annotation_resize_start_size
             {
                 graph.finish_annotation_resize(resizing_annotation, start_size);
+            }
+            if let Some(selection_drag) = self.selection_drag.take() {
+                let selected_nodes =
+                    node_indices_in_selection_rect(graph, &node_rects, selection_drag.rect());
+                if selected_nodes.is_empty() {
+                    self.selected_nodes.clear();
+                    self.graph_container_status =
+                        Some("Marquee selected no graph nodes.".to_owned());
+                } else {
+                    let selected_count = selected_nodes.len();
+                    self.set_selected_node_set(selected_nodes);
+                    self.selected_annotation = None;
+                    self.selected_edge = None;
+                    self.node_info_open = true;
+                    self.graph_container_status =
+                        Some(format!("Marquee selected {selected_count} graph node(s)."));
+                }
             }
             self.dragging_node = None;
             self.node_drag_start_position = None;
@@ -3847,12 +3994,28 @@ impl HoudiniGraphPanel {
             draw_arrowhead(&painter, pointer_pos, stroke.color);
         }
 
+        if let Some(selection_drag) = self.selection_drag {
+            let selection_rect = selection_drag.rect();
+            painter.rect_filled(
+                selection_rect,
+                0.0,
+                faded_color(ui.visuals().selection.bg_fill, 0.28),
+            );
+            painter.rect_stroke(
+                selection_rect,
+                0.0,
+                Stroke::new(1.5, ui.visuals().selection.stroke.color),
+                StrokeKind::Inside,
+            );
+        }
+
         for layout_node in graph.graph_layout().nodes {
             let Some(node) = graph.nodes.get(layout_node.node_index) else {
                 continue;
             };
             let node_rect = node_rects[layout_node.node_index];
-            let selected = self.selected_node == layout_node.node_index;
+            let selected = self.selected_node == layout_node.node_index
+                || self.selected_nodes.contains(&layout_node.node_index);
             let hovered = response.hovered()
                 && ui.input(|input| {
                     input
@@ -4021,7 +4184,7 @@ impl HoudiniGraphPanel {
             PRIMARY_GEOMETRY_OUTPUT,
         ) {
             Ok(_) => {
-                self.selected_node = port_hit.node_index;
+                self.select_single_node(port_hit.node_index);
                 self.selected_edge = None;
                 self.shelf_status = Some(format!(
                     "Connected {} to {}.",
@@ -4783,7 +4946,7 @@ impl HoudiniGraphPanel {
                                 ui.weak("Target navigation");
                                 ui.push_id(("jump_source", index), |ui| {
                                     if ui.button("Jump source").clicked() {
-                                        self.selected_node = target_node_index;
+                                        self.select_single_node(target_node_index);
                                     }
                                 });
                                 ui.end_row();
@@ -4826,7 +4989,9 @@ impl HoudiniGraphPanel {
                                     ("jump_consumer", consumer.reference_node_index),
                                     |ui| {
                                         if ui.button("Jump consumer").clicked() {
-                                            self.selected_node = consumer.reference_node_index;
+                                            self.select_single_node(
+                                                consumer.reference_node_index,
+                                            );
                                         }
                                     },
                                 );
@@ -6382,6 +6547,24 @@ fn layout_node_rects(
     node_rects
 }
 
+fn node_indices_in_selection_rect(
+    graph: &GraphDocument,
+    node_rects: &[Rect],
+    selection_rect: Rect,
+) -> Vec<usize> {
+    graph
+        .graph_layout()
+        .nodes
+        .iter()
+        .filter_map(|layout_node| {
+            node_rects
+                .get(layout_node.node_index)
+                .filter(|node_rect| node_rect.intersects(selection_rect))
+                .map(|_| layout_node.node_index)
+        })
+        .collect()
+}
+
 fn layout_annotation_rects(graph: &GraphDocument, rect: Rect, zoom: f32, pan: Vec2) -> Vec<Rect> {
     graph
         .annotations
@@ -6631,7 +6814,7 @@ mod tests {
         NodePortKind, connection_drag_preview, distance_to_segment, graph_edge_at,
         layout_node_rects,
         model::{GraphContainerStatus, NodeKind, ProjectGraphMetadata, ProjectGraphRole},
-        node_primary_port_at, node_primary_port_rect,
+        node_indices_in_selection_rect, node_primary_port_at, node_primary_port_rect,
     };
     use crate::ui::houdini_graph_panel::model::{GraphDocument, PRIMARY_GEOMETRY_OUTPUT};
 
@@ -6720,6 +6903,34 @@ mod tests {
         assert_eq!(
             node_primary_port_at(&graph, &node_rects, output_output.center(), 1.0),
             None
+        );
+    }
+
+    #[test]
+    fn marquee_selection_rect_returns_intersecting_graph_nodes() {
+        let graph = GraphDocument::sample();
+        let layout_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(480.0, 220.0));
+        let node_rects = layout_node_rects(
+            &graph,
+            layout_rect,
+            egui::vec2(116.0, 48.0),
+            1.0,
+            egui::Vec2::ZERO,
+        );
+        let selection_rect =
+            egui::Rect::from_min_max(node_rects[1].min, node_rects[2].max).shrink(2.0);
+
+        assert_eq!(
+            node_indices_in_selection_rect(&graph, &node_rects, selection_rect),
+            vec![1, 2]
+        );
+        assert!(
+            node_indices_in_selection_rect(
+                &graph,
+                &node_rects,
+                egui::Rect::from_min_size(egui::pos2(0.0, 200.0), egui::vec2(20.0, 20.0)),
+            )
+            .is_empty()
         );
     }
 
@@ -6838,6 +7049,7 @@ mod tests {
             .expect("sample graph should include filter");
         let mut panel = HoudiniGraphPanel {
             selected_node: filter_index,
+            selected_nodes: vec![filter_index],
             ..HoudiniGraphPanel::default()
         };
 
@@ -6850,6 +7062,7 @@ mod tests {
             .expect("new graph container should be selected");
         assert_eq!(selected.kind, NodeKind::GraphContainer);
         assert_eq!(selected.parent_graph_id, "main");
+        assert_eq!(panel.selected_nodes, vec![panel.selected_node]);
         assert!(
             panel
                 .graph_container_status
@@ -6878,6 +7091,45 @@ mod tests {
         assert_eq!(
             container.internal_graph_path.as_deref(),
             Some("/obj/main/filter_subnet")
+        );
+    }
+
+    #[test]
+    fn selected_node_set_collapse_ui_creates_navigable_graph_container() {
+        let mut graph = GraphDocument::sample();
+        let mut panel = HoudiniGraphPanel::default();
+        panel.set_selected_node_set(vec![1, 2]);
+
+        assert!(panel.collapse_selected_nodes_to_graph_container(&mut graph));
+
+        let container_index = panel.selected_node;
+        let container = graph
+            .selected_node_info(container_index)
+            .expect("container node should inspect")
+            .graph_container
+            .expect("container info should exist");
+        let internal_graph_id = container.internal_graph_id.clone();
+        let collapse_manifest = container
+            .collapse_manifest
+            .as_ref()
+            .expect("selection collapse should record manifest");
+
+        assert_eq!(graph.nodes[container_index].kind, NodeKind::GraphContainer);
+        assert_eq!(panel.selected_nodes, vec![container_index]);
+        assert_eq!(container.status, GraphContainerStatus::Resolved);
+        assert_eq!(
+            collapse_manifest.captured_node_ids,
+            vec!["filter.main".to_owned(), "style.main".to_owned()]
+        );
+        assert_eq!(
+            graph.graph_layout_for_graph(&internal_graph_id).nodes.len(),
+            2
+        );
+        assert!(
+            panel
+                .graph_container_status
+                .as_deref()
+                .is_some_and(|status| status.contains("Collapsed 2 selected nodes"))
         );
     }
 
