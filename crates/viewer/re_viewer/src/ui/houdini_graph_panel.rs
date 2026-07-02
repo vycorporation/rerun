@@ -17,7 +17,7 @@ use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState,
     GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphContainerAssetDraftError,
     GraphContainerCollapseError, GraphDocument, GraphEvaluationMode, GraphNavigationError,
-    GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding, LayerKind,
+    GraphNodeClipboard, GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding, LayerKind,
     NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot,
     NetworkCommentDisplayMode, NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeKind,
     NodeStatus, PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
@@ -160,6 +160,7 @@ pub(crate) struct HoudiniGraphPanel {
     source_gallery_index: Option<SourceGalleryIndex>,
     source_gallery_status: Option<String>,
     source_reference_copied_locator: Option<String>,
+    node_clipboard: Option<GraphNodeClipboard>,
     python_uv_executable_path: String,
     python_existing_environment_path: String,
     python_create_environment_path: String,
@@ -234,6 +235,7 @@ impl Default for HoudiniGraphPanel {
             source_gallery_index: None,
             source_gallery_status: None,
             source_reference_copied_locator: None,
+            node_clipboard: None,
             python_uv_executable_path: String::new(),
             python_existing_environment_path: String::new(),
             python_create_environment_path: String::new(),
@@ -583,6 +585,31 @@ impl HoudiniGraphPanel {
             });
 
             ui.menu_button("Edit", |ui| {
+                if ui
+                    .add_enabled(
+                        self.selected_node < graph.nodes.len(),
+                        egui::Button::new("Copy Selected    Cmd/Ctrl+C"),
+                    )
+                    .on_hover_text("Copy the selected graph nodes to the project-local node clipboard.")
+                    .clicked()
+                {
+                    self.copy_selected_nodes_to_clipboard(graph);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        self.node_clipboard.is_some(),
+                        egui::Button::new("Paste Nodes    Cmd/Ctrl+V"),
+                    )
+                    .on_hover_text(
+                        "Paste copied graph nodes with fresh identities and selected-internal wiring.",
+                    )
+                    .clicked()
+                {
+                    self.paste_copied_nodes(graph);
+                    ui.close();
+                }
+                ui.separator();
                 self.operator_menu_action_ui_with_label(
                     ui,
                     graph,
@@ -1157,6 +1184,35 @@ impl HoudiniGraphPanel {
         }
 
         applied
+    }
+
+    fn copy_selected_nodes_to_clipboard(&mut self, graph: &GraphDocument) -> bool {
+        let selected_nodes = if self.selected_nodes.is_empty() {
+            vec![self.selected_node]
+        } else {
+            self.selected_nodes.clone()
+        };
+        let Some(clipboard) = graph.copy_node_set(&selected_nodes) else {
+            return false;
+        };
+        self.node_clipboard = Some(clipboard);
+        true
+    }
+
+    fn paste_copied_nodes(&mut self, graph: &mut GraphDocument) -> bool {
+        let Some(clipboard) = self.node_clipboard.clone() else {
+            return false;
+        };
+        let pasted_nodes = graph.paste_node_clipboard(&clipboard);
+        if pasted_nodes.is_empty() {
+            return false;
+        }
+        self.set_selected_node_set(pasted_nodes);
+        self.selected_annotation = None;
+        self.selected_edge = None;
+        self.node_info_open = true;
+        self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
+        true
     }
 
     fn record_operator_palette_action(&mut self, action: OperatorPaletteAction) {
@@ -4451,6 +4507,8 @@ impl HoudiniGraphPanel {
                     input.key_pressed(egui::Key::H) && input.modifiers.is_none(),
                     input.key_pressed(egui::Key::F) && input.modifiers.is_none(),
                     input.key_pressed(egui::Key::F) && input.modifiers.command,
+                    input.key_pressed(egui::Key::C) && input.modifiers.command,
+                    input.key_pressed(egui::Key::V) && input.modifiers.command,
                     input.key_pressed(egui::Key::O) && shift_only,
                     input.key_pressed(egui::Key::P) && shift_only,
                     input.key_pressed(egui::Key::M) && shift_only,
@@ -4469,6 +4527,8 @@ impl HoudiniGraphPanel {
                 home_pressed,
                 frame_selected_pressed,
                 find_pressed,
+                copy_selected_pressed,
+                paste_nodes_pressed,
                 add_network_box_pressed,
                 add_sticky_note_pressed,
                 resize_box_pressed,
@@ -4496,6 +4556,12 @@ impl HoudiniGraphPanel {
             }
             if find_pressed {
                 self.active_graph_pane = GraphWorkbenchPane::Find;
+            }
+            if copy_selected_pressed {
+                self.copy_selected_nodes_to_clipboard(graph);
+            }
+            if paste_nodes_pressed {
+                layout_changed |= self.paste_copied_nodes(graph);
             }
             if add_network_box_pressed {
                 layout_changed |=
@@ -5385,6 +5451,27 @@ impl HoudiniGraphPanel {
             self.active_graph_pane = GraphWorkbenchPane::Info;
             ui.close();
         }
+        ui.separator();
+        if ui
+            .add_enabled(
+                self.selected_node < graph.nodes.len(),
+                egui::Button::new("Copy Selected    Cmd/Ctrl+C"),
+            )
+            .clicked()
+        {
+            self.copy_selected_nodes_to_clipboard(graph);
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                self.node_clipboard.is_some(),
+                egui::Button::new("Paste Nodes    Cmd/Ctrl+V"),
+            )
+            .clicked()
+        {
+            self.paste_copied_nodes(graph);
+            ui.close();
+        }
         self.operator_menu_action_ui_with_label(
             ui,
             graph,
@@ -5530,6 +5617,16 @@ impl HoudiniGraphPanel {
                 .input(|input| input.pointer.hover_pos())
                 .unwrap_or_else(|| ui.cursor().min);
             self.open_operator_chooser_at(anchor);
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                self.node_clipboard.is_some(),
+                egui::Button::new("Paste Nodes    Cmd/Ctrl+V"),
+            )
+            .clicked()
+        {
+            self.paste_copied_nodes(graph);
             ui.close();
         }
         self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddOutNull);
@@ -8568,6 +8665,42 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn panel_node_clipboard_paste_selects_pasted_node_set() {
+        let mut graph = GraphDocument::sample();
+        let mut panel = HoudiniGraphPanel::default();
+        let source_node_ids = vec![
+            graph.nodes[0].node_id.clone(),
+            graph.nodes[1].node_id.clone(),
+        ];
+        panel.set_selected_node_set(vec![0, 1]);
+
+        assert!(panel.copy_selected_nodes_to_clipboard(&graph));
+        assert!(panel.node_clipboard.is_some());
+        assert!(panel.paste_copied_nodes(&mut graph));
+
+        assert_eq!(panel.selected_nodes.len(), 2);
+        let selected_node_ids = panel
+            .selected_nodes
+            .iter()
+            .map(|index| graph.nodes[*index].node_id.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            selected_node_ids
+                .iter()
+                .all(|id| !source_node_ids.contains(id))
+        );
+        assert!(graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == selected_node_ids[0] && edge.to_node_id == selected_node_ids[1]
+        }));
+        assert_eq!(panel.selected_node, panel.selected_nodes[0]);
+        assert!(matches!(
+            panel.active_graph_pane,
+            GraphWorkbenchPane::Parameters
+        ));
+        assert!(panel.selected_edge.is_none());
     }
 
     #[test]

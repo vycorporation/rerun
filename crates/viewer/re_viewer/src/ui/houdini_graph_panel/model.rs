@@ -242,6 +242,18 @@ pub(crate) struct GraphDataFlowEdgeDiagnostic {
 }
 
 #[derive(Clone)]
+pub(crate) struct GraphNodeClipboard {
+    nodes: Vec<GraphNode>,
+    data_flow_edges: Vec<GraphDataFlowEdge>,
+}
+
+impl GraphNodeClipboard {
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+}
+
+#[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct ReconnectNodeDeleteResult {
     pub deleted_node: GraphNode,
@@ -4041,22 +4053,19 @@ impl GraphDocument {
         })
     }
 
-    fn duplicate_node_without_history(
-        &mut self,
-        node_index: usize,
-    ) -> Option<NodeDuplicateCommandSnapshot> {
-        let source = self.nodes.get(node_index)?;
-        let source_node_id = source.node_id.clone();
-        let source_name = source.name.clone();
+    fn prepare_node_copy(
+        &self,
+        source: &GraphNode,
+        parent_graph_id: &str,
+        offset: GraphPoint,
+    ) -> GraphNode {
         let mut node = source.clone();
-
         node.node_id = self.unique_node_id(node.kind.duplicate_node_id_prefix());
-        let parent_graph_id = self.node_parent_graph_id(source).to_owned();
-        node.name = self.unique_node_name_in_graph(&source_name, &parent_graph_id, None);
-        node.parent_graph_id = parent_graph_id;
+        node.name = self.unique_node_name_in_graph(&source.name, parent_graph_id, None);
+        node.parent_graph_id = parent_graph_id.to_owned();
         node.layout_position = GraphPoint::new(
-            source.layout_position.x + 0.12,
-            source.layout_position.y + 0.08,
+            source.layout_position.x + offset.x,
+            source.layout_position.y + offset.y,
         );
         node.generated = None;
         node.output_operator = None;
@@ -4087,6 +4096,18 @@ impl GraphDocument {
             native_operator.last_failure_diagnostic = None;
         }
 
+        node
+    }
+
+    fn duplicate_node_without_history(
+        &mut self,
+        node_index: usize,
+    ) -> Option<NodeDuplicateCommandSnapshot> {
+        let source = self.nodes.get(node_index)?;
+        let source_node_id = source.node_id.clone();
+        let source_name = source.name.clone();
+        let parent_graph_id = self.node_parent_graph_id(source).to_owned();
+        let node = self.prepare_node_copy(source, &parent_graph_id, GraphPoint::new(0.12, 0.08));
         let insert_index = (node_index + 1).min(self.nodes.len());
         let duplicated_node = node.clone();
         self.nodes.insert(insert_index, node);
@@ -4149,6 +4170,109 @@ impl GraphDocument {
 
         let mut data_flow_edges_after = data_flow_edges_before.clone();
         for edge in &data_flow_edges_before {
+            let Some(from_node_id) = duplicated_ids_by_source_id.get(&edge.from_node_id) else {
+                continue;
+            };
+            let Some(to_node_id) = duplicated_ids_by_source_id.get(&edge.to_node_id) else {
+                continue;
+            };
+            let copied_edge = GraphDataFlowEdge {
+                edge_id: Self::data_flow_edge_id(
+                    from_node_id,
+                    &edge.from_output,
+                    to_node_id,
+                    &edge.to_input,
+                ),
+                from_node_id: from_node_id.clone(),
+                from_output: edge.from_output.clone(),
+                to_node_id: to_node_id.clone(),
+                to_input: edge.to_input.clone(),
+            };
+            if self
+                .data_flow_edge_addition_diagnostic_with_edges(&copied_edge, &data_flow_edges_after)
+                .is_none()
+            {
+                data_flow_edges_after.push(copied_edge);
+            }
+        }
+
+        self.data_flow_edges = data_flow_edges_after.clone();
+        self.record_project_command(ProjectCommand::NodesDuplicate {
+            duplicated_nodes,
+            data_flow_edges_before,
+            data_flow_edges_after,
+        });
+        duplicated_node_ids
+            .into_iter()
+            .filter_map(|node_id| self.nodes.iter().position(|node| node.node_id == node_id))
+            .collect()
+    }
+
+    pub fn copy_node_set(&self, node_indices: &[usize]) -> Option<GraphNodeClipboard> {
+        let mut source_indices = node_indices
+            .iter()
+            .copied()
+            .filter(|index| self.nodes.get(*index).is_some())
+            .collect::<Vec<_>>();
+        source_indices.sort_unstable();
+        source_indices.dedup();
+        if source_indices.is_empty() {
+            return None;
+        }
+
+        let copied_node_ids = source_indices
+            .iter()
+            .map(|index| self.nodes[*index].node_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let data_flow_edges = self
+            .data_flow_edges
+            .iter()
+            .filter(|edge| {
+                copied_node_ids.contains(edge.from_node_id.as_str())
+                    && copied_node_ids.contains(edge.to_node_id.as_str())
+            })
+            .cloned()
+            .collect();
+
+        Some(GraphNodeClipboard {
+            nodes: source_indices
+                .into_iter()
+                .map(|index| self.nodes[index].clone())
+                .collect(),
+            data_flow_edges,
+        })
+    }
+
+    pub fn paste_node_clipboard(&mut self, clipboard: &GraphNodeClipboard) -> Vec<usize> {
+        if clipboard.is_empty() {
+            return Vec::new();
+        }
+
+        let data_flow_edges_before = self.data_flow_edges.clone();
+        let mut data_flow_edges_after = data_flow_edges_before.clone();
+        let parent_graph_id = self.current_graph_id().to_owned();
+        let mut duplicated_node_ids = Vec::new();
+        let mut duplicated_nodes = Vec::new();
+        let mut duplicated_ids_by_source_id = std::collections::BTreeMap::new();
+
+        for source in &clipboard.nodes {
+            let node =
+                self.prepare_node_copy(source, &parent_graph_id, GraphPoint::new(0.18, 0.12));
+            let insert_index = self.nodes.len();
+            let duplicated_node = node.clone();
+            self.nodes.push(node);
+            duplicated_ids_by_source_id
+                .insert(source.node_id.clone(), duplicated_node.node_id.clone());
+            duplicated_node_ids.push(duplicated_node.node_id.clone());
+            duplicated_nodes.push(NodeDuplicateCommandSnapshot {
+                source_node_id: source.node_id.clone(),
+                source_node_name: source.name.clone(),
+                duplicated_node: Box::new(duplicated_node),
+                insert_index,
+            });
+        }
+
+        for edge in &clipboard.data_flow_edges {
             let Some(from_node_id) = duplicated_ids_by_source_id.get(&edge.from_node_id) else {
                 continue;
             };
@@ -19623,6 +19747,92 @@ mod tests {
             edge.from_node_id == duplicated_node_ids[0] && edge.to_node_id == duplicated_node_ids[1]
         }));
         assert!(graph.duplicate_node_set(&[graph.nodes.len()]).is_empty());
+    }
+
+    #[test]
+    fn node_clipboard_paste_records_one_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let source_indices = vec![0, 1];
+        let source_snapshots = source_indices
+            .iter()
+            .map(|index| {
+                let node = &graph.nodes[*index];
+                (
+                    node.node_id.clone(),
+                    node.name.clone(),
+                    node.parent_graph_id.clone(),
+                    node.layout_position,
+                )
+            })
+            .collect::<Vec<_>>();
+        let original_node_count = graph.nodes.len();
+        let original_edge_count = graph.data_flow_edges.len();
+        let external_target_node_id = graph.nodes[2].node_id.clone();
+
+        let clipboard = graph
+            .copy_node_set(&source_indices)
+            .expect("selected nodes should copy to graph clipboard");
+        assert_eq!(clipboard.nodes.len(), 2);
+
+        let pasted_indices = graph.paste_node_clipboard(&clipboard);
+
+        assert_eq!(pasted_indices.len(), 2);
+        assert_eq!(graph.nodes.len(), original_node_count + 2);
+        let pasted_node_ids = pasted_indices
+            .iter()
+            .map(|index| graph.nodes[*index].node_id.clone())
+            .collect::<Vec<_>>();
+        for (pasted_index, source) in pasted_indices.iter().zip(source_snapshots.iter()) {
+            let pasted_node = &graph.nodes[*pasted_index];
+            assert_ne!(pasted_node.node_id, source.0);
+            assert_ne!(pasted_node.name, source.1);
+            assert_eq!(pasted_node.parent_graph_id, source.2);
+            assert_eq!(
+                pasted_node.layout_position,
+                GraphPoint::new(source.3.x + 0.18, source.3.y + 0.12)
+            );
+            assert!(pasted_node.generated.is_none());
+            assert!(pasted_node.output_operator.is_none());
+            assert_eq!(pasted_node.evaluation, NodeEvaluation::clean());
+            assert!(!pasted_node.participates_in_output);
+        }
+        assert_eq!(graph.data_flow_edges.len(), original_edge_count + 1);
+        assert!(graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == pasted_node_ids[0] && edge.to_node_id == pasted_node_ids[1]
+        }));
+        assert!(!graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == pasted_node_ids[1] && edge.to_node_id == external_target_node_id
+        }));
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NodesDuplicate {
+                duplicated_nodes,
+                data_flow_edges_before,
+                data_flow_edges_after,
+            })
+                if duplicated_nodes.len() == 2
+                    && data_flow_edges_before.len() == original_edge_count
+                    && data_flow_edges_after.len() == original_edge_count + 1
+        ));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Duplicate 2 nodes")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes.len(), original_node_count);
+        assert_eq!(graph.data_flow_edges.len(), original_edge_count);
+        for node_id in &pasted_node_ids {
+            assert!(!graph.nodes.iter().any(|node| node.node_id == *node_id));
+        }
+
+        assert!(graph.redo_project_command());
+        for node_id in &pasted_node_ids {
+            assert!(graph.nodes.iter().any(|node| node.node_id == *node_id));
+        }
+        assert_eq!(graph.data_flow_edges.len(), original_edge_count + 1);
+        assert!(graph.copy_node_set(&[graph.nodes.len()]).is_none());
     }
 
     #[test]
