@@ -17,8 +17,8 @@ use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState,
     GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphContainerAssetDraftError,
     GraphContainerCollapseError, GraphDocument, GraphEvaluationMode, GraphNavigationError,
-    GraphNodeClipboard, GraphNodeClipboardPasteOptions, GraphPoint, GraphStyle,
-    GraphWorkItemStatus, HoudiniNodeBinding, LayerKind, NativeOperatorLoadStatus,
+    GraphNodeClipboard, GraphNodeClipboardPasteOptions, GraphNodeDuplicateOptions, GraphPoint,
+    GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding, LayerKind, NativeOperatorLoadStatus,
     NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot, NetworkCommentDisplayMode,
     NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeKind, NodeStatus,
     PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
@@ -327,6 +327,7 @@ enum OperatorPaletteAction {
     AddReference,
     AddRepairProjection,
     DuplicateSelected,
+    DuplicateSelectedWithPresentation,
     CollapseSelectionToSubnet,
     EnterSelectedSubnet,
     GoUpOneGraph,
@@ -608,6 +609,12 @@ impl HoudiniGraphPanel {
                     graph,
                     OperatorPaletteAction::DuplicateSelected,
                     "Duplicate Selected",
+                );
+                self.operator_menu_action_ui_with_label(
+                    ui,
+                    graph,
+                    OperatorPaletteAction::DuplicateSelectedWithPresentation,
+                    "Duplicate with Presentation",
                 );
                 ui.separator();
                 if ui.button("Parameters").clicked() {
@@ -1128,24 +1135,10 @@ impl HoudiniGraphPanel {
                 }
             }
             OperatorPaletteAction::DuplicateSelected => {
-                let duplicated_nodes = if self.selected_nodes.len() > 1 {
-                    graph.duplicate_node_set(&self.selected_nodes)
-                } else {
-                    graph
-                        .duplicate_node(self.selected_node)
-                        .into_iter()
-                        .collect()
-                };
-                if !duplicated_nodes.is_empty() {
-                    self.set_selected_node_set(duplicated_nodes);
-                    self.selected_annotation = None;
-                    self.node_info_open = true;
-                    self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
-                    true
-                } else {
-                    false
-                }
+                self.duplicate_selected_nodes(graph, GraphNodeDuplicateOptions::ordinary())
             }
+            OperatorPaletteAction::DuplicateSelectedWithPresentation => self
+                .duplicate_selected_nodes(graph, GraphNodeDuplicateOptions::presentation_aware()),
             OperatorPaletteAction::CollapseSelectionToSubnet => {
                 self.collapse_selected_nodes_to_graph_container(graph)
             }
@@ -1181,6 +1174,38 @@ impl HoudiniGraphPanel {
         }
 
         applied
+    }
+
+    fn duplicate_selected_nodes(
+        &mut self,
+        graph: &mut GraphDocument,
+        options: GraphNodeDuplicateOptions,
+    ) -> bool {
+        let duplicated_nodes = if options == GraphNodeDuplicateOptions::ordinary() {
+            if self.selected_nodes.len() > 1 {
+                graph.duplicate_node_set(&self.selected_nodes)
+            } else {
+                graph
+                    .duplicate_node(self.selected_node)
+                    .into_iter()
+                    .collect()
+            }
+        } else if self.selected_nodes.len() > 1 {
+            graph.duplicate_node_set_with_options(&self.selected_nodes, options)
+        } else {
+            graph
+                .duplicate_node_with_options(self.selected_node, options)
+                .into_iter()
+                .collect()
+        };
+        if duplicated_nodes.is_empty() {
+            return false;
+        }
+        self.set_selected_node_set(duplicated_nodes);
+        self.selected_annotation = None;
+        self.node_info_open = true;
+        self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
+        true
     }
 
     fn copy_selected_nodes_to_clipboard(&mut self, graph: &GraphDocument) -> bool {
@@ -7236,6 +7261,9 @@ fn operator_palette_entries(
     entries.push(operator_palette_entry(
         OperatorPaletteAction::DuplicateSelected,
     ));
+    entries.push(operator_palette_entry(
+        OperatorPaletteAction::DuplicateSelectedWithPresentation,
+    ));
     if operator_palette_action_available(
         graph,
         selected_node,
@@ -7302,7 +7330,10 @@ fn operator_palette_action_available(
         OperatorPaletteAction::AddRepairProjection => graph
             .reference_coordinate_repair_summary(selected_node)
             .is_some(),
-        OperatorPaletteAction::DuplicateSelected => selected_node < graph.nodes.len(),
+        OperatorPaletteAction::DuplicateSelected
+        | OperatorPaletteAction::DuplicateSelectedWithPresentation => {
+            selected_node < graph.nodes.len()
+        }
         OperatorPaletteAction::CollapseSelectionToSubnet => {
             collapsible_node_indices_for_selection(graph, selected_nodes).len() > 1
         }
@@ -7368,6 +7399,20 @@ fn operator_palette_entry(action: OperatorPaletteAction) -> OperatorPaletteEntry
             label: "Duplicate Selected",
             detail: "Duplicate the selected node with a new stable node identity.",
             aliases: &["copy", "paste", "clone"],
+        },
+        OperatorPaletteAction::DuplicateSelectedWithPresentation => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::Create,
+            label: "Duplicate with Presentation",
+            detail: "Duplicate selected nodes while preserving output participation and output operator publication metadata.",
+            aliases: &[
+                "copy",
+                "paste",
+                "clone",
+                "output",
+                "presentation",
+                "publication",
+            ],
         },
         OperatorPaletteAction::CollapseSelectionToSubnet => OperatorPaletteEntry {
             action,
@@ -8786,6 +8831,36 @@ mod tests {
                 .as_deref()
                 .is_some_and(|status| status.contains("reconnected 2 external connection(s)"))
         );
+    }
+
+    #[test]
+    fn panel_presentation_aware_duplicate_preserves_publication_state_and_selects_duplicate() {
+        let mut graph = GraphDocument::sample();
+        let mut panel = HoudiniGraphPanel::default();
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output && node.output_operator.is_some())
+            .expect("sample graph should include a published output node");
+        graph.nodes[output_index].participates_in_output = true;
+        panel.select_single_node(output_index);
+        let source_node_id = graph.nodes[output_index].node_id.clone();
+
+        assert!(panel.apply_operator_palette_action(
+            &mut graph,
+            OperatorPaletteAction::DuplicateSelectedWithPresentation
+        ));
+
+        let duplicated_node = &graph.nodes[panel.selected_node];
+        assert_ne!(duplicated_node.node_id, source_node_id);
+        assert!(duplicated_node.participates_in_output);
+        assert!(duplicated_node.output_operator.is_some());
+        assert_eq!(panel.selected_nodes, vec![panel.selected_node]);
+        assert!(matches!(
+            panel.active_graph_pane,
+            GraphWorkbenchPane::Parameters
+        ));
+        assert!(panel.selected_edge.is_none());
     }
 
     #[test]

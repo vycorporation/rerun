@@ -35,7 +35,7 @@ This ledger tracks how PRD/ADR material maps to issue-backed implementation in t
 | Workbench layout presets and browser | complete for current v1 workbench slice | `workbench-layout-presets.md` | `#64`, `#68`, `#72`, `#74` |
 | Shelf tools | complete for built-in shelf tools; custom shelf tools deferred | `shelf-tools.md` | `#90` |
 | Node comments, node info, badges, and organization affordances | complete for current v1 graph organization slice | `node-comment-display-mode.md`, command-history tracker | `#65`, `#66`, `#94`, `#100`, `#102`, `#104`, `#106`, `#111`, `#112`, `#120`, `#123` |
-| Node duplication and deletion | partial; selected-set duplication, internal wiring, clipboard paste, and external reconnect paste choices landed | `node-duplication.md`, command-history tracker | `#92`, `#108`, `#113`, `#284`, `#286`, `#290`, `#292` |
+| Node duplication and deletion | complete for current v1 duplicate/delete spine | `node-duplication.md`, command-history tracker | `#92`, `#108`, `#113`, `#284`, `#286`, `#290`, `#292`, `#294` |
 | Connection editing semantics | partial | this ledger until a focused tracker is added | `#136`, `#137`, `#138`, `#180`, `#182`, `#184`, `#186`, `#188`, `#190`, `#192`, `#194` |
 | Dataset/source breadth and external artifact references | partial | `dataset-source-breadth-tracker.md`, `source-gallery-view-prd.md` | `#196`, `#198`, `#200`, `#202`, `#204`, `#206`, `#208`, `#210`, `#212`, `#214`, `#244`, `#245`, `#246`, `#247`, `#248`, `#249`, `#262`, `#264`, `#266`, `#268` |
 | Minimal graph-backed viewport editing | complete for current v1 selection/subset spine | `viewport-editing-tracker.md` | `#256`, `#257`, `#258` |

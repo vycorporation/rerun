@@ -314,6 +314,25 @@ pub(crate) struct GraphNodeClipboardPasteResult {
     pub skipped_diagnostics: Vec<GraphDataFlowEdgeDiagnostic>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GraphNodeDuplicateOptions {
+    pub preserve_output_participation: bool,
+    pub preserve_output_operator: bool,
+}
+
+impl GraphNodeDuplicateOptions {
+    pub fn ordinary() -> Self {
+        Self::default()
+    }
+
+    pub fn presentation_aware() -> Self {
+        Self {
+            preserve_output_participation: true,
+            preserve_output_operator: true,
+        }
+    }
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct ReconnectNodeDeleteResult {
@@ -4119,6 +4138,7 @@ impl GraphDocument {
         source: &GraphNode,
         parent_graph_id: &str,
         offset: GraphPoint,
+        options: GraphNodeDuplicateOptions,
     ) -> GraphNode {
         let mut node = source.clone();
         node.node_id = self.unique_node_id(node.kind.duplicate_node_id_prefix());
@@ -4129,9 +4149,13 @@ impl GraphDocument {
             source.layout_position.y + offset.y,
         );
         node.generated = None;
-        node.output_operator = None;
+        if !options.preserve_output_operator {
+            node.output_operator = None;
+        }
         node.evaluation = NodeEvaluation::clean();
-        node.participates_in_output = false;
+        if !options.preserve_output_participation {
+            node.participates_in_output = false;
+        }
 
         if let Some(reference_input) = node.reference_input.as_mut() {
             reference_input.targets.clear();
@@ -4163,12 +4187,18 @@ impl GraphDocument {
     fn duplicate_node_without_history(
         &mut self,
         node_index: usize,
+        options: GraphNodeDuplicateOptions,
     ) -> Option<NodeDuplicateCommandSnapshot> {
         let source = self.nodes.get(node_index)?;
         let source_node_id = source.node_id.clone();
         let source_name = source.name.clone();
         let parent_graph_id = self.node_parent_graph_id(source).to_owned();
-        let node = self.prepare_node_copy(source, &parent_graph_id, GraphPoint::new(0.12, 0.08));
+        let node = self.prepare_node_copy(
+            source,
+            &parent_graph_id,
+            GraphPoint::new(0.12, 0.08),
+            options,
+        );
         let insert_index = (node_index + 1).min(self.nodes.len());
         let duplicated_node = node.clone();
         self.nodes.insert(insert_index, node);
@@ -4181,7 +4211,15 @@ impl GraphDocument {
     }
 
     pub fn duplicate_node(&mut self, node_index: usize) -> Option<usize> {
-        let duplicate = self.duplicate_node_without_history(node_index)?;
+        self.duplicate_node_with_options(node_index, GraphNodeDuplicateOptions::ordinary())
+    }
+
+    pub fn duplicate_node_with_options(
+        &mut self,
+        node_index: usize,
+        options: GraphNodeDuplicateOptions,
+    ) -> Option<usize> {
+        let duplicate = self.duplicate_node_without_history(node_index, options)?;
         let insert_index = duplicate.insert_index;
         self.rebuild_default_data_flow_edges();
         self.record_project_command(ProjectCommand::NodeDuplicate {
@@ -4194,6 +4232,14 @@ impl GraphDocument {
     }
 
     pub fn duplicate_node_set(&mut self, node_indices: &[usize]) -> Vec<usize> {
+        self.duplicate_node_set_with_options(node_indices, GraphNodeDuplicateOptions::ordinary())
+    }
+
+    pub fn duplicate_node_set_with_options(
+        &mut self,
+        node_indices: &[usize],
+        options: GraphNodeDuplicateOptions,
+    ) -> Vec<usize> {
         let original_node_count = self.nodes.len();
         let data_flow_edges_before = self.data_flow_edges.clone();
         let mut source_indices = node_indices
@@ -4205,7 +4251,10 @@ impl GraphDocument {
         source_indices.dedup();
 
         if source_indices.len() == 1 {
-            return self.duplicate_node(source_indices[0]).into_iter().collect();
+            return self
+                .duplicate_node_with_options(source_indices[0], options)
+                .into_iter()
+                .collect();
         }
 
         let mut inserted_so_far = 0;
@@ -4214,7 +4263,7 @@ impl GraphDocument {
         let mut duplicated_ids_by_source_id = std::collections::BTreeMap::new();
         for original_source_index in source_indices {
             let source_index = original_source_index + inserted_so_far;
-            if let Some(duplicate) = self.duplicate_node_without_history(source_index) {
+            if let Some(duplicate) = self.duplicate_node_without_history(source_index, options) {
                 duplicated_ids_by_source_id.insert(
                     duplicate.source_node_id.clone(),
                     duplicate.duplicated_node.node_id.clone(),
@@ -4347,8 +4396,12 @@ impl GraphDocument {
         let mut skipped_diagnostics = Vec::new();
 
         for source in &clipboard.nodes {
-            let node =
-                self.prepare_node_copy(source, &parent_graph_id, GraphPoint::new(0.18, 0.12));
+            let node = self.prepare_node_copy(
+                source,
+                &parent_graph_id,
+                GraphPoint::new(0.18, 0.12),
+                GraphNodeDuplicateOptions::ordinary(),
+            );
             let insert_index = self.nodes.len();
             let duplicated_node = node.clone();
             self.nodes.push(node);
@@ -16645,22 +16698,22 @@ mod tests {
         GraphContainerMetadata, GraphContainerStatus, GraphDataFlowEdge,
         GraphDataFlowEdgeDiagnosticStatus, GraphDocument, GraphEvaluationMode,
         GraphNavigationError, GraphNavigationTarget, GraphNode, GraphNodeClipboardPasteOptions,
-        GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniCubicBezierParquetSchema,
-        HoudiniDataKind, HoudiniGeometryKind, HoudiniGeometryRecord, HoudiniGeometrySchema,
-        HoudiniNumericRange, HoudiniOperatorPort, HoudiniParameterBinding,
-        HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
-        NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
-        NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
-        NativeOperatorProvenance, NetworkBadgeVisibility, NetworkCommentDisplayMode,
-        NetworkNodeRingVisibility, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
-        NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
-        OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT,
-        ProceduralAssetArtifactBundleInclusion, ProceduralAssetArtifactInclusionChoice,
-        ProceduralAssetArtifactReference, ProceduralAssetArtifactRole,
-        ProceduralAssetArtifactStatus, ProceduralAssetBoundaryDirection,
-        ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot, ProceduralAssetSource,
-        ProceduralAssetSubgraphReference, ProjectCommand, ProjectGraphMetadata,
-        ProjectGraphRegistry, ProjectGraphRole, PythonDependencyHealth,
+        GraphNodeDuplicateOptions, GraphPoint, GraphStyle, GraphWorkItemStatus,
+        HoudiniCubicBezierParquetSchema, HoudiniDataKind, HoudiniGeometryKind,
+        HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
+        HoudiniParameterBinding, HoudiniParameterDeclaration, HoudiniParameterKind,
+        HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
+        NativeOperatorFailureMode, NativeOperatorImplementation, NativeOperatorLoadStatus,
+        NativeOperatorOutputCounts, NativeOperatorProvenance, NetworkBadgeVisibility,
+        NetworkCommentDisplayMode, NetworkNodeRingVisibility, NodeEvaluation, NodeKind,
+        NodeParameter, NodeParameterKind, NodeStatus, OperatorVersionStatus,
+        OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode, OutputTargetId,
+        PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetArtifactBundleInclusion,
+        ProceduralAssetArtifactInclusionChoice, ProceduralAssetArtifactReference,
+        ProceduralAssetArtifactRole, ProceduralAssetArtifactStatus,
+        ProceduralAssetBoundaryDirection, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
+        ProceduralAssetSource, ProceduralAssetSubgraphReference, ProjectCommand,
+        ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole, PythonDependencyHealth,
         PythonEnvironmentDescriptor, PythonEnvironmentPathMode, PythonEnvironmentPaths,
         PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
         PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
@@ -19796,6 +19849,76 @@ mod tests {
     }
 
     #[test]
+    fn presentation_aware_node_duplicate_preserves_publication_state_without_runtime_state() {
+        let mut graph = GraphDocument::sample();
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .expect("sample graph should include output node");
+        graph.nodes[output_index].output_operator = Some(OutputOperatorNode::generic_scene());
+        graph.nodes[output_index].participates_in_output = true;
+        graph.nodes[output_index].generated = Some(GeneratedNodeInfo::managed(
+            GeneratedNodeSource::AttributeTableCommit,
+        ));
+        graph.nodes[output_index].evaluation = NodeEvaluation {
+            state: EvaluationState::Running,
+            manual: true,
+            message: Some("Publishing output".to_owned()),
+        };
+        let source_node_id = graph.nodes[output_index].node_id.clone();
+        let original_node_count = graph.nodes.len();
+
+        let duplicate_index = graph
+            .duplicate_node_with_options(
+                output_index,
+                GraphNodeDuplicateOptions::presentation_aware(),
+            )
+            .expect("selected output node should duplicate");
+
+        let duplicate = &graph.nodes[duplicate_index];
+        let duplicate_node_id = duplicate.node_id.clone();
+        assert_ne!(duplicate_node_id, source_node_id);
+        assert!(duplicate.participates_in_output);
+        assert_eq!(
+            duplicate
+                .output_operator
+                .as_ref()
+                .map(|operator| operator.kind),
+            Some(OutputOperatorKind::Generic)
+        );
+        assert!(duplicate.generated.is_none());
+        assert_eq!(duplicate.evaluation, NodeEvaluation::clean());
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes.len(), original_node_count);
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|node| node.node_id == duplicate_node_id)
+        );
+
+        assert!(graph.redo_project_command());
+        let restored_duplicate = graph
+            .nodes
+            .iter()
+            .find(|node| node.node_id == duplicate_node_id)
+            .expect("redo should restore presentation-aware duplicate");
+        assert!(restored_duplicate.participates_in_output);
+        assert_eq!(
+            restored_duplicate
+                .output_operator
+                .as_ref()
+                .map(|operator| operator.kind),
+            Some(OutputOperatorKind::Generic)
+        );
+        assert!(restored_duplicate.generated.is_none());
+        assert_eq!(restored_duplicate.evaluation, NodeEvaluation::clean());
+    }
+
+    #[test]
     fn node_set_duplicate_records_one_undoable_project_command() {
         let mut graph = GraphDocument::sample();
         let source_indices = vec![0, 1];
@@ -19902,6 +20025,79 @@ mod tests {
             edge.from_node_id == duplicated_node_ids[0] && edge.to_node_id == duplicated_node_ids[1]
         }));
         assert!(graph.duplicate_node_set(&[graph.nodes.len()]).is_empty());
+    }
+
+    #[test]
+    fn presentation_aware_node_set_duplicate_preserves_publication_state_and_internal_edges() {
+        let mut graph = GraphDocument::sample();
+        let source_indices = vec![0, 1];
+        graph.nodes[source_indices[0]].participates_in_output = true;
+        graph.nodes[source_indices[1]].participates_in_output = true;
+        graph.nodes[source_indices[1]].output_operator = Some(OutputOperatorNode::generic_scene());
+        graph.nodes[source_indices[1]].generated = Some(GeneratedNodeInfo::managed(
+            GeneratedNodeSource::AttributeTableCommit,
+        ));
+        graph.nodes[source_indices[1]].evaluation = NodeEvaluation {
+            state: EvaluationState::Running,
+            manual: true,
+            message: Some("Publishing selected branch".to_owned()),
+        };
+        let original_node_count = graph.nodes.len();
+        let original_edge_count = graph.data_flow_edges.len();
+
+        let duplicate_indices = graph.duplicate_node_set_with_options(
+            &source_indices,
+            GraphNodeDuplicateOptions::presentation_aware(),
+        );
+
+        assert_eq!(duplicate_indices.len(), 2);
+        assert_eq!(graph.nodes.len(), original_node_count + 2);
+        assert_eq!(graph.data_flow_edges.len(), original_edge_count + 1);
+        let duplicated_node_ids = duplicate_indices
+            .iter()
+            .map(|index| graph.nodes[*index].node_id.clone())
+            .collect::<Vec<_>>();
+        assert!(graph.nodes[duplicate_indices[0]].participates_in_output);
+        assert!(graph.nodes[duplicate_indices[0]].output_operator.is_none());
+        assert!(graph.nodes[duplicate_indices[1]].participates_in_output);
+        assert_eq!(
+            graph.nodes[duplicate_indices[1]]
+                .output_operator
+                .as_ref()
+                .map(|operator| operator.kind),
+            Some(OutputOperatorKind::Generic)
+        );
+        assert!(graph.nodes[duplicate_indices[1]].generated.is_none());
+        assert_eq!(
+            graph.nodes[duplicate_indices[1]].evaluation,
+            NodeEvaluation::clean()
+        );
+        assert!(graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == duplicated_node_ids[0] && edge.to_node_id == duplicated_node_ids[1]
+        }));
+        assert!(!graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == duplicated_node_ids[1] && edge.to_node_id == graph.nodes[2].node_id
+        }));
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Duplicate 2 nodes")
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes.len(), original_node_count);
+        assert_eq!(graph.data_flow_edges.len(), original_edge_count);
+        for node_id in &duplicated_node_ids {
+            assert!(!graph.nodes.iter().any(|node| node.node_id == *node_id));
+        }
+
+        assert!(graph.redo_project_command());
+        for node_id in &duplicated_node_ids {
+            assert!(graph.nodes.iter().any(|node| node.node_id == *node_id));
+        }
+        assert!(graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == duplicated_node_ids[0] && edge.to_node_id == duplicated_node_ids[1]
+        }));
     }
 
     #[test]
