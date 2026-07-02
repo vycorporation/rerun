@@ -6273,6 +6273,14 @@ impl HoudiniGraphPanel {
                 && diagnostic.status == native_operator.load_status
             {
                 ui.colored_label(ui.visuals().error_fg_color, diagnostic.warning());
+                ui.horizontal(|ui| {
+                    if ui.button("Retry native operator").clicked() {
+                        graph.retry_work_item_for_node(self.selected_node);
+                    }
+                    if ui.button("Dismiss failure").clicked() {
+                        graph.clear_native_operator_failure_diagnostic(self.selected_node);
+                    }
+                });
             }
             if !native_operator.missing_capability_grants.is_empty() {
                 ui.colored_label(

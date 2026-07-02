@@ -108,3 +108,6 @@ Deferring these surfaces keeps the product fork focused on graph-visible dataflo
 8. #276 - Complete: preserve typed native operator failure diagnostics with
    bounded detail text for load/runtime/timeout/schema failures and surface
    them through node warnings plus inspector failure detail.
+9. #278 - Complete: add native operator diagnostic recovery actions so current
+   failure diagnostics can be retried through the work-item path or dismissed
+   without changing trust policy, cache metadata, or output provenance.

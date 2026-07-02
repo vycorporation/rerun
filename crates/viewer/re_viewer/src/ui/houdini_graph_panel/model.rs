@@ -6002,6 +6002,30 @@ impl GraphDocument {
     }
 
     #[allow(dead_code)]
+    pub fn clear_native_operator_failure_diagnostic(&mut self, node_index: usize) -> bool {
+        let Some(node) = self.nodes.get_mut(node_index) else {
+            return false;
+        };
+        let Some(native_operator) = node.native_operator.as_mut() else {
+            return false;
+        };
+        if native_operator.last_failure_summary.is_none()
+            && native_operator.last_failure_diagnostic.is_none()
+        {
+            return false;
+        }
+
+        native_operator.last_failure_summary = None;
+        native_operator.last_failure_diagnostic = None;
+        if node.evaluation.state == EvaluationState::Failed {
+            node.evaluation.state = EvaluationState::Manual;
+            node.evaluation.manual = true;
+            node.evaluation.message = None;
+        }
+        true
+    }
+
+    #[allow(dead_code)]
     pub fn set_native_operator_project_trusted(&mut self, trusted: bool) -> bool {
         if self.native_operator_trust.project_trusted == trusted {
             return false;
@@ -27173,6 +27197,113 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 .iter()
                 .any(|warning| warning.contains("Project trust"))
         );
+        assert!(
+            !info
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("old stderr tail"))
+        );
+    }
+
+    #[test]
+    fn native_operator_failure_diagnostic_can_be_cleared_without_losing_cache_or_trust() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        trust_sample_native_operator(&mut graph);
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        graph
+            .record_native_operator_output(
+                node_index,
+                NativeOperatorOutputCounts {
+                    geometry_records: 3,
+                    attribute_records: 1,
+                    layer_records: 0,
+                },
+            )
+            .expect("native output should record before failure");
+        let cache_key = graph.nodes[node_index]
+            .native_operator
+            .as_ref()
+            .and_then(|node| node.cache_key.clone())
+            .expect("cache key should exist");
+        let provenance_summary = graph.nodes[node_index]
+            .native_operator
+            .as_ref()
+            .and_then(|node| node.provenance_summary.clone())
+            .expect("provenance summary should exist");
+        assert!(graph.record_native_operator_failure(
+            node_index,
+            NativeOperatorLoadStatus::LoadFailed,
+            "native library could not be loaded",
+            "dlopen: image not found"
+        ));
+
+        assert!(graph.clear_native_operator_failure_diagnostic(node_index));
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist");
+        let native = info.native_operator.expect("native info should exist");
+
+        assert_eq!(info.evaluation.state, EvaluationState::Manual);
+        assert_eq!(info.evaluation.message, None);
+        assert_eq!(native.load_status, NativeOperatorLoadStatus::Ready);
+        assert_eq!(native.last_failure_summary, None);
+        assert_eq!(native.last_failure_diagnostic, None);
+        assert_eq!(
+            graph.nodes[node_index]
+                .native_operator
+                .as_ref()
+                .unwrap()
+                .cache_key,
+            Some(cache_key)
+        );
+        assert_eq!(
+            graph.nodes[node_index]
+                .native_operator
+                .as_ref()
+                .unwrap()
+                .provenance_summary
+                .as_deref(),
+            Some(provenance_summary.as_str())
+        );
+        assert!(graph.native_operator_trust.project_trusted);
+        assert!(!graph.clear_native_operator_failure_diagnostic(node_index));
+    }
+
+    #[test]
+    fn native_operator_retry_routes_through_work_items_without_active_failure_warning() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        trust_sample_native_operator(&mut graph);
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        assert!(graph.record_native_operator_failure(
+            node_index,
+            NativeOperatorLoadStatus::RuntimeFailed,
+            "previous native runtime failure",
+            "old stderr tail"
+        ));
+
+        graph.retry_work_item_for_node(node_index);
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist");
+        let native = info.native_operator.expect("native info should exist");
+        let retry = graph
+            .work_items
+            .iter()
+            .rev()
+            .find(|item| item.node_index == node_index)
+            .expect("retry work item should exist");
+
+        assert_eq!(info.evaluation.state, EvaluationState::Running);
+        assert_eq!(native.load_status, NativeOperatorLoadStatus::Ready);
+        assert!(native.last_failure_diagnostic.is_some());
+        assert_eq!(retry.status, GraphWorkItemStatus::Running);
+        assert_eq!(retry.summary, "Retry requested for current graph request");
         assert!(
             !info
                 .warnings
