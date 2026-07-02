@@ -491,6 +491,10 @@ impl GraphDocument {
             };
             let graph_location = self.graph_location_for_node(node);
             let version_status = self.procedural_asset_version_status_for_instance(asset_node);
+            let declaration = self
+                .procedural_asset_declarations
+                .iter()
+                .find(|declaration| declaration.asset_id == asset_node.asset_id);
             let usage = ProceduralAssetUsageInfo {
                 node_index,
                 node_id: node.node_id.clone(),
@@ -500,6 +504,9 @@ impl GraphDocument {
                 node_path: graph_location.node_path,
                 instance_version: asset_node.instance_version.clone(),
                 contents_unlocked: asset_node.contents_unlocked,
+                can_match_definition: asset_node.contents_unlocked,
+                can_upgrade_to_current_definition: declaration
+                    .is_some_and(|declaration| declaration.version != asset_node.instance_version),
                 version_status,
             };
 
@@ -13149,6 +13156,8 @@ pub(crate) struct ProceduralAssetUsageInfo {
     pub node_path: String,
     pub instance_version: String,
     pub contents_unlocked: bool,
+    pub can_match_definition: bool,
+    pub can_upgrade_to_current_definition: bool,
     pub version_status: OperatorVersionStatus,
 }
 

@@ -3078,6 +3078,30 @@ impl HoudiniGraphPanel {
                 if !asset.can_save_definition {
                     ui.weak("Unlock a procedural asset instance before saving its definition.");
                 }
+                if ui
+                    .add_enabled(
+                        asset.can_match_definition,
+                        egui::Button::new("Match"),
+                    )
+                    .on_hover_text(
+                        "Relock local contents to the pinned asset definition without changing the pinned version.",
+                    )
+                    .clicked()
+                {
+                    self.match_selected_asset_definition(graph);
+                }
+                if ui
+                    .add_enabled(
+                        asset.can_upgrade_to_current_definition,
+                        egui::Button::new("Upgrade"),
+                    )
+                    .on_hover_text(
+                        "Upgrade this asset instance to the current project-local definition version.",
+                    )
+                    .clicked()
+                {
+                    self.upgrade_selected_asset_to_current_definition(graph);
+                }
             });
         } else {
             ui.weak("Select a procedural asset node to save or update its definition.");
@@ -3139,7 +3163,7 @@ impl HoudiniGraphPanel {
                         ui.weak("No instances in this project.");
                     } else {
                         egui::Grid::new(format!("houdini_asset_gallery_usage_{}", entry.asset_id))
-                            .num_columns(5)
+                            .num_columns(7)
                             .spacing([10.0, 4.0])
                             .striped(true)
                             .show(ui, |ui| {
@@ -3147,6 +3171,8 @@ impl HoudiniGraphPanel {
                                 ui.strong("Graph");
                                 ui.strong("Version");
                                 ui.strong("State");
+                                ui.strong("");
+                                ui.strong("");
                                 ui.strong("");
                                 ui.end_row();
 
@@ -3168,6 +3194,33 @@ impl HoudiniGraphPanel {
                                             graph,
                                             usage.node_index,
                                             &usage.graph_id,
+                                        );
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            usage.can_match_definition,
+                                            egui::Button::new("Match"),
+                                        )
+                                        .on_hover_text(
+                                            "Relock local contents to the pinned definition.",
+                                        )
+                                        .clicked()
+                                    {
+                                        self.match_asset_definition(graph, usage.node_index);
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            usage.can_upgrade_to_current_definition,
+                                            egui::Button::new("Upgrade"),
+                                        )
+                                        .on_hover_text(
+                                            "Upgrade this instance to the current definition.",
+                                        )
+                                        .clicked()
+                                    {
+                                        self.upgrade_asset_to_current_definition(
+                                            graph,
+                                            usage.node_index,
                                         );
                                     }
                                     ui.end_row();
@@ -3198,6 +3251,65 @@ impl HoudiniGraphPanel {
             .readable_node_path(node_index)
             .map(|path| format!("Selected asset instance: {path}"));
         true
+    }
+
+    fn match_selected_asset_definition(&mut self, graph: &mut GraphDocument) -> bool {
+        self.match_asset_definition(graph, self.selected_node)
+    }
+
+    fn match_asset_definition(&mut self, graph: &mut GraphDocument, node_index: usize) -> bool {
+        if graph.match_procedural_asset_definition(node_index) {
+            self.asset_status = Some(graph.readable_node_path(node_index).map_or_else(
+                || "Matched selected asset to its pinned definition.".to_owned(),
+                |path| format!("Matched asset instance to pinned definition: {path}"),
+            ));
+            true
+        } else {
+            self.asset_status = Some("Selected asset cannot be matched.".to_owned());
+            false
+        }
+    }
+
+    fn upgrade_selected_asset_to_current_definition(&mut self, graph: &mut GraphDocument) -> bool {
+        self.upgrade_asset_to_current_definition(graph, self.selected_node)
+    }
+
+    fn upgrade_asset_to_current_definition(
+        &mut self,
+        graph: &mut GraphDocument,
+        node_index: usize,
+    ) -> bool {
+        let previous_version = graph
+            .nodes
+            .get(node_index)
+            .and_then(|node| node.procedural_asset.as_ref())
+            .map(|asset| asset.instance_version.clone());
+        if graph.upgrade_procedural_asset_to_current_definition(node_index) {
+            let current_version = graph
+                .nodes
+                .get(node_index)
+                .and_then(|node| node.procedural_asset.as_ref())
+                .map(|asset| asset.instance_version.clone())
+                .unwrap_or_else(|| "current".to_owned());
+            self.asset_status = Some(graph.readable_node_path(node_index).map_or_else(
+                || {
+                    format!(
+                        "Upgraded asset instance from {} to {current_version}.",
+                        previous_version.as_deref().unwrap_or("unknown")
+                    )
+                },
+                |path| {
+                    format!(
+                        "Upgraded {path} from {} to {current_version}.",
+                        previous_version.as_deref().unwrap_or("unknown")
+                    )
+                },
+            ));
+            true
+        } else {
+            self.asset_status = Some("Selected asset cannot be upgraded.".to_owned());
+            false
+        }
     }
 
     fn selected_node_can_create_asset_from_graph_container(&self, graph: &GraphDocument) -> bool {
@@ -7796,6 +7908,96 @@ mod tests {
                 .asset_status
                 .as_deref()
                 .is_some_and(|status| status.contains("/obj/analysis/Asset"))
+        );
+    }
+
+    #[test]
+    fn selected_asset_actions_match_and_upgrade_instances() {
+        let mut graph = GraphDocument::sample();
+        let (_asset_id, node_index) = graph.create_asset_instance_from_graph(
+            "Action Cleanup",
+            "Created for action tests.",
+            "Use from the asset panel.",
+        );
+        let mut panel = HoudiniGraphPanel::default();
+        panel.select_single_node(node_index);
+
+        assert!(graph.set_procedural_asset_contents_unlocked(node_index, true));
+        assert!(panel.match_selected_asset_definition(&mut graph));
+        let matched_asset = graph.nodes[node_index]
+            .procedural_asset
+            .as_ref()
+            .expect("asset node should exist");
+        assert!(!matched_asset.contents_unlocked);
+        assert_eq!(matched_asset.instance_version, "0.1.0");
+        assert!(
+            panel
+                .asset_status
+                .as_deref()
+                .is_some_and(|status| status.contains("pinned definition"))
+        );
+
+        graph.procedural_asset_declarations[0].version = "0.2.0".to_owned();
+        graph.refresh_asset_version_statuses();
+        assert!(panel.upgrade_selected_asset_to_current_definition(&mut graph));
+        let upgraded_asset = graph.nodes[node_index]
+            .procedural_asset
+            .as_ref()
+            .expect("asset node should exist");
+        assert_eq!(upgraded_asset.instance_version, "0.2.0");
+        assert!(!upgraded_asset.contents_unlocked);
+        assert!(
+            panel
+                .asset_status
+                .as_deref()
+                .is_some_and(|status| status.contains("from 0.1.0 to 0.2.0"))
+        );
+    }
+
+    #[test]
+    fn asset_gallery_usage_actions_repair_non_selected_instances() {
+        let mut graph = GraphDocument::sample();
+        let (asset_id, _) = graph.create_asset_instance_from_graph(
+            "Gallery Actions",
+            "Created for gallery action tests.",
+            "Use from the asset gallery.",
+        );
+        let sibling_index = graph.add_procedural_asset_node(asset_id);
+        assert!(graph.set_procedural_asset_contents_unlocked(sibling_index, true));
+        graph.procedural_asset_declarations[0].version = "0.2.0".to_owned();
+        graph.refresh_asset_version_statuses();
+
+        let entry = graph
+            .procedural_asset_gallery_entries()
+            .into_iter()
+            .find(|entry| entry.display_name == "Gallery Actions")
+            .expect("asset gallery entry should exist");
+        let usage = entry
+            .usages
+            .iter()
+            .find(|usage| usage.node_index == sibling_index)
+            .expect("sibling usage should be listed");
+        assert!(usage.can_match_definition);
+        assert!(usage.can_upgrade_to_current_definition);
+
+        let mut panel = HoudiniGraphPanel::default();
+        assert!(panel.match_asset_definition(&mut graph, sibling_index));
+        assert!(
+            !graph.nodes[sibling_index]
+                .procedural_asset
+                .as_ref()
+                .expect("asset node should exist")
+                .contents_unlocked
+        );
+
+        assert!(panel.upgrade_asset_to_current_definition(&mut graph, sibling_index));
+        assert_eq!(
+            graph.nodes[sibling_index]
+                .procedural_asset
+                .as_ref()
+                .expect("asset node should exist")
+                .instance_version,
+            "0.2.0"
         );
     }
 
