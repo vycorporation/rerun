@@ -50,6 +50,7 @@ for the graph hierarchy lane.
 | `#220` | complete | Graph container asset draft promotion | Creates project-local procedural asset drafts from resolved graph containers, preserving typed boundaries, internal graph references, and graph-scoped promoted parameters. |
 | `#222` | complete | Drag marquee multi-select for subnet creation | Adds empty-canvas marquee selection for graph nodes and a Collapse Selection to Subnet command that routes multi-node selections through the existing graph-owned physical collapse path. |
 | `#224` | complete | Tab palette subnet collapse action | Adds a Tab/operator-palette Subnet from Selection action that is only available for multi-node collapsible selections and reuses the graph-owned subnet collapse path. |
+| `#226` | complete | Houdini-style subnet enter/up navigation | Exposes Enter Subnet and Go Up through context menus and the Tab palette, adds Enter/double-click dive and U parent navigation, and keeps navigation routed through graph-owned actions. |
 
 ## Next implementation candidates
 
@@ -81,6 +82,8 @@ for the graph hierarchy lane.
      selected sets into the same physical graph container collapse path.
    - `#224` exposes selected-set subnet creation through the Tab/operator
      palette so the operation behaves like a network-editor command.
+   - `#226` makes created subnets discoverably navigable with visible
+     enter/up actions plus Houdini-style Enter, double-click, and U shortcuts.
    - Keep selected-node collapse separate from network box organization.
 
 3. Typed graph boundary inputs and outputs.

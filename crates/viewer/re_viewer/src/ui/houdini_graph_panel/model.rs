@@ -373,6 +373,51 @@ impl GraphDocument {
         self.select_graph_by_id(&internal_graph_id)
     }
 
+    pub fn exit_current_graph_to_parent_container(
+        &mut self,
+    ) -> Option<GraphParentNavigationChange> {
+        let current_graph_id = self.current_graph_id().to_owned();
+        if current_graph_id == MAIN_GRAPH_ID {
+            return None;
+        }
+        let container_node_id = self
+            .graph_containers
+            .iter()
+            .find(|container| container.internal_graph_id == current_graph_id)?
+            .container_node_id
+            .clone();
+        let container_node_index = self
+            .nodes
+            .iter()
+            .position(|node| node.node_id == container_node_id)?;
+        let parent_graph_id = self
+            .nodes
+            .get(container_node_index)
+            .map(|node| self.node_parent_graph_id(node).to_owned())?;
+        let navigation = self.select_graph_by_id(&parent_graph_id).ok()?;
+
+        Some(GraphParentNavigationChange {
+            navigation,
+            container_node_index,
+        })
+    }
+
+    pub fn current_graph_parent_container_node_index(&self) -> Option<usize> {
+        let current_graph_id = self.current_graph_id();
+        if current_graph_id == MAIN_GRAPH_ID {
+            return None;
+        }
+        let container_node_id = self
+            .graph_containers
+            .iter()
+            .find(|container| container.internal_graph_id == current_graph_id)?
+            .container_node_id
+            .as_str();
+        self.nodes
+            .iter()
+            .position(|node| node.node_id == container_node_id)
+    }
+
     #[allow(dead_code)]
     pub fn graph_local_node_indices(&self, graph_id: &str) -> Vec<usize> {
         let graph_id = if graph_id.is_empty() {
@@ -12617,6 +12662,12 @@ pub(crate) struct GraphNavigationChange {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GraphParentNavigationChange {
+    pub navigation: GraphNavigationChange,
+    pub container_node_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GraphNavigationError {
     MissingGraph {
         graph_id: String,
@@ -19384,6 +19435,38 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(change.selected_graph.path, "/obj/main/cleanup");
         assert_eq!(graph.current_graph_id(), "graph.cleanup");
         assert_eq!(graph.current_graph_path(), "/obj/main/cleanup");
+    }
+
+    #[test]
+    fn exit_current_graph_returns_to_parent_container() {
+        let mut graph = GraphDocument::sample();
+        let container_index = graph.add_graph_container_node(
+            "Cleanup Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.cleanup".to_owned(),
+                name: "Cleanup".to_owned(),
+                path: "/obj/main/cleanup".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+        graph
+            .enter_graph_container_node(container_index)
+            .expect("resolved graph container should be navigable");
+
+        let change = graph
+            .exit_current_graph_to_parent_container()
+            .expect("internal graph should have a parent container");
+
+        assert!(change.navigation.changed);
+        assert_eq!(change.container_node_index, container_index);
+        assert_eq!(change.navigation.previous_graph.graph_id, "graph.cleanup");
+        assert_eq!(change.navigation.selected_graph.graph_id, "main");
+        assert_eq!(graph.current_graph_id(), "main");
+        assert_eq!(
+            graph.current_graph_parent_container_node_index(),
+            None,
+            "top-level graph should not report a parent subnet"
+        );
     }
 
     #[test]
