@@ -50,6 +50,7 @@ for the dataset/source breadth lane.
 | `#262` | complete | Source package writes with copied local artifacts and hashes | Adds an explicit native package write action that creates a package directory, copies eligible local source artifacts to manifest-owned relative paths, records deterministic content hashes, and leaves missing, remote, generated, live, and reference-only artifacts external with diagnostics. |
 | `#264` | complete | Polygon coordinate CSV import | Adds a graph-owned CSV/TSV import path for headered polygon coordinate rows, updates source metadata/capability reporting, and preserves the current source geometry when malformed coordinate files fail to load. |
 | `#266` | complete | GeoJSON polygon import | Adds a graph-owned GeoJSON import path for Polygon and MultiPolygon records, updates source metadata/capability reporting, and preserves the current source geometry when unsupported or malformed GeoJSON fails to load. |
+| `#268` | complete | Copy source locator action | Promotes the external-reference copy-locator action hint into a source metadata command that copies the readable locator to the egui clipboard without relinking, revealing, packaging, or mutating graph/source state. |
 
 ## Next implementation candidates
 
@@ -91,6 +92,8 @@ for the dataset/source breadth lane.
    - Build on `#200`, `#202`, and `#210`.
    - Show missing/includable/reference-only status near source inspection and
      future package/export flows.
+   - `#268` promotes the copy-locator hint into an explicit source metadata
+     command without side effects beyond the clipboard write.
    - Promote action hints to actual UI commands only behind explicit workflows
      such as relink, clipboard copy, local reveal, or package/export.
    - Do not silently embed large data from asset definitions or source nodes.
