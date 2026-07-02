@@ -7545,6 +7545,8 @@ pub(crate) enum HoudiniGeometryKind {
 pub(crate) struct SourceMetadata {
     pub provenance: SourceProvenance,
     pub source_path: Option<String>,
+    #[serde(default)]
+    pub locator: SourceLocator,
     pub record_count: usize,
     pub polygon_count: usize,
     pub cubic_bezier_count: usize,
@@ -7558,6 +7560,7 @@ impl Default for SourceMetadata {
         Self {
             provenance: SourceProvenance::DemoFallback,
             source_path: None,
+            locator: SourceLocator::demo(),
             record_count: 0,
             polygon_count: 0,
             cubic_bezier_count: 0,
@@ -7598,6 +7601,7 @@ impl SourceMetadata {
 
         Self {
             provenance,
+            locator: SourceLocator::for_provenance(provenance, source_path.as_deref()),
             source_path,
             record_count: geometry.len(),
             polygon_count,
@@ -7605,6 +7609,131 @@ impl SourceMetadata {
             bounds,
             attribute_names: vec!["score".to_owned()],
             recognized_control_point_columns,
+        }
+    }
+
+    fn normalized(mut self) -> Self {
+        if self.locator.kind == SourceLocatorKind::Generated
+            && self.locator.location.is_none()
+            && self.locator.label.is_none()
+        {
+            self.locator =
+                SourceLocator::for_provenance(self.provenance, self.source_path.as_deref());
+        }
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SourceLocator {
+    pub kind: SourceLocatorKind,
+    pub location: Option<String>,
+    pub label: Option<String>,
+}
+
+impl Default for SourceLocator {
+    fn default() -> Self {
+        Self {
+            kind: SourceLocatorKind::Generated,
+            location: None,
+            label: None,
+        }
+    }
+}
+
+impl SourceLocator {
+    fn for_provenance(provenance: SourceProvenance, source_path: Option<&str>) -> Self {
+        if let Some(source_path) = source_path.filter(|path| !path.trim().is_empty()) {
+            return Self::from_location(source_path);
+        }
+
+        match provenance {
+            SourceProvenance::DemoFallback => Self::demo(),
+            SourceProvenance::RecordingQuery => Self::recording_query(),
+            SourceProvenance::SyntheticBenchmark => Self::generated("synthetic benchmark"),
+            SourceProvenance::SyntheticMalware => Self::generated("synthetic malware starter"),
+            SourceProvenance::PythonOperator => Self::generated("python operator output"),
+            SourceProvenance::ParquetImport => Self::generated("parquet import"),
+        }
+    }
+
+    fn from_location(location: &str) -> Self {
+        let location = location.to_owned();
+        let kind = if location.contains("://") {
+            SourceLocatorKind::Uri
+        } else {
+            SourceLocatorKind::LocalPath
+        };
+        Self {
+            kind,
+            location: Some(location),
+            label: None,
+        }
+    }
+
+    fn demo() -> Self {
+        Self {
+            kind: SourceLocatorKind::Demo,
+            location: None,
+            label: Some("demo fallback".to_owned()),
+        }
+    }
+
+    fn recording_query() -> Self {
+        Self {
+            kind: SourceLocatorKind::RecordingQuery,
+            location: None,
+            label: Some("active recording query".to_owned()),
+        }
+    }
+
+    fn generated(label: impl Into<String>) -> Self {
+        Self {
+            kind: SourceLocatorKind::Generated,
+            location: None,
+            label: Some(label.into()),
+        }
+    }
+
+    pub fn readable(&self) -> String {
+        self.location
+            .clone()
+            .or_else(|| self.label.clone())
+            .unwrap_or_else(|| self.kind.as_str().to_owned())
+    }
+
+    pub fn is_external_reference(&self) -> bool {
+        matches!(
+            self.kind,
+            SourceLocatorKind::LocalPath | SourceLocatorKind::Uri
+        )
+    }
+
+    pub fn is_generated(&self) -> bool {
+        matches!(
+            self.kind,
+            SourceLocatorKind::Demo | SourceLocatorKind::Generated
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SourceLocatorKind {
+    LocalPath,
+    Uri,
+    RecordingQuery,
+    Generated,
+    Demo,
+}
+
+impl SourceLocatorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalPath => "local path",
+            Self::Uri => "uri",
+            Self::RecordingQuery => "recording query",
+            Self::Generated => "generated",
+            Self::Demo => "demo",
         }
     }
 }
@@ -7725,6 +7854,11 @@ impl GraphSource {
                 } else {
                     SourceProvenance::DemoFallback
                 },
+                locator: if has_recording_input {
+                    SourceLocator::recording_query()
+                } else {
+                    SourceLocator::demo()
+                },
                 record_count: query_bridge.visible_data_result_count,
                 ..Default::default()
             },
@@ -7756,7 +7890,10 @@ impl GraphSource {
     }
 
     fn with_import_error(mut self, source_path: &Path, err: &anyhow::Error) -> Self {
-        self.source_path = Some(source_path.display().to_string());
+        let source_path = source_path.display().to_string();
+        self.source_path = Some(source_path.clone());
+        self.metadata.source_path = Some(source_path.clone());
+        self.metadata.locator = SourceLocator::from_location(&source_path);
         self.import_error = Some(format!("{err}"));
         self
     }
@@ -7886,7 +8023,7 @@ impl HoudiniGraphSidecar {
             matching_entity_count: self.source.matching_entity_count,
             visible_data_result_count: self.source.visible_data_result_count,
             source_path: self.source.source_path,
-            metadata: self.source.metadata,
+            metadata: self.source.metadata.normalized(),
             import_error: self.source.import_error,
         };
         graph.graph_registry = self.graph_registry.normalize();
@@ -12517,9 +12654,9 @@ mod tests {
         PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
         PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
         ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
-        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceProvenance,
-        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
-        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceLocatorKind,
+        SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
+        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -19563,6 +19700,13 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             load.metadata.source_path,
             Some(sample_path.display().to_string())
         );
+        assert_eq!(load.metadata.locator.kind, SourceLocatorKind::LocalPath);
+        assert_eq!(
+            load.metadata.locator.readable(),
+            sample_path.display().to_string()
+        );
+        assert!(load.metadata.locator.is_external_reference());
+        assert!(!load.metadata.locator.is_generated());
         assert_eq!(load.metadata.record_count, 4);
         assert_eq!(load.metadata.polygon_count, 0);
         assert_eq!(load.metadata.cubic_bezier_count, 4);
@@ -19575,6 +19719,27 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         );
         assert_eq!(load.metadata.attribute_names, vec!["score".to_owned()]);
         assert!(load.metadata.bounds.is_some());
+    }
+
+    #[test]
+    fn source_locator_metadata_classifies_generated_and_external_sources() {
+        let graph = GraphDocument::sample();
+        assert_eq!(graph.source.metadata.locator.kind, SourceLocatorKind::Demo);
+        assert!(!graph.source.metadata.locator.is_external_reference());
+        assert!(graph.source.metadata.locator.is_generated());
+
+        let uri_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some("s3://bucket/curves.parquet".to_owned()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        assert_eq!(uri_metadata.locator.kind, SourceLocatorKind::Uri);
+        assert_eq!(
+            uri_metadata.locator.readable(),
+            "s3://bucket/curves.parquet"
+        );
+        assert!(uri_metadata.locator.is_external_reference());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -19728,6 +19893,14 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             restored.source.metadata.provenance,
             SourceProvenance::ParquetImport
         );
+        assert_eq!(
+            restored.source.metadata.locator.kind,
+            SourceLocatorKind::LocalPath
+        );
+        assert_eq!(
+            restored.source.metadata.locator.readable(),
+            sample_path.display().to_string()
+        );
         assert_eq!(restored.source.metadata.record_count, 4);
         assert_eq!(restored.source.metadata.cubic_bezier_count, 4);
         assert_eq!(restored.cubic_bezier_count(), 4);
@@ -19763,6 +19936,37 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
                 stroke_scale: 0.63,
             }
         );
+    }
+
+    #[test]
+    fn legacy_sidecar_without_source_locator_infers_from_source_path() {
+        let mut graph = GraphDocument::sample();
+        let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data/houdini_cubic_sample.parquet");
+        graph
+            .import_cubic_bezier_parquet_path(&sample_path)
+            .unwrap();
+
+        let mut value: serde_json::Value =
+            serde_json::from_str(&graph.to_sidecar_json().unwrap()).unwrap();
+        value["source"]["metadata"]
+            .as_object_mut()
+            .expect("source metadata should be an object")
+            .remove("locator");
+        let legacy_json = serde_json::to_string(&value).unwrap();
+
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&legacy_json).unwrap();
+
+        assert_eq!(
+            restored.source.metadata.locator.kind,
+            SourceLocatorKind::LocalPath
+        );
+        assert_eq!(
+            restored.source.metadata.locator.readable(),
+            sample_path.display().to_string()
+        );
+        assert!(restored.source.metadata.locator.is_external_reference());
     }
 
     #[test]
