@@ -47,6 +47,7 @@ for the graph hierarchy lane.
 | `#176` | complete | Cross-graph search result navigation | Carries graph IDs and readable node paths through workbench search so node results switch to their parent graph before selection. |
 | `#178` | complete | Graph-path reference delete warnings | Adds readable target node paths to reference output change warnings so delete/edit warnings disambiguate graph-local names. |
 | `#216` | complete | Selected-node graph container collapse UI | Adds workbench and node context-menu commands that collapse the current non-output, non-container node into a navigable typed graph container using the physical graph-container storage path without faking multi-selection. |
+| `#220` | complete | Graph container asset draft promotion | Creates project-local procedural asset drafts from resolved graph containers, preserving typed boundaries, internal graph references, and graph-scoped promoted parameters. |
 
 ## Next implementation candidates
 
@@ -72,6 +73,8 @@ for the graph hierarchy lane.
      boundary ports.
    - `#216` exposes the first honest workbench collapse command for the
      currently selected node while leaving multi-selection as a later UI layer.
+   - `#220` lets resolved graph containers become procedural asset drafts
+     without treating network boxes or viewport selection as asset boundaries.
    - Keep selected-node collapse separate from network box organization.
 
 3. Typed graph boundary inputs and outputs.

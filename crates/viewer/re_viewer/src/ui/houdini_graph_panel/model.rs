@@ -4560,14 +4560,80 @@ impl GraphDocument {
             }],
             promoted_parameters: self.promotable_asset_parameters(),
             external_artifacts: Vec::new(),
-            graph_snapshot: ProceduralAssetGraphSnapshot {
-                node_count: self.nodes.len(),
-                edge_count: self.graph_layout().edges.len(),
-                layer_count: self.layers.len(),
-                geometry_contract: "HoudiniGeometryRecord polygons and native cubic Beziers"
-                    .to_owned(),
+            graph_snapshot: self.procedural_asset_graph_snapshot(),
+            wrapped_subgraph: ProceduralAssetSubgraphReference {
+                graph_id: format!("project.asset.{asset_slug}.graph"),
+                output_node_id: "output.main".to_owned(),
+                captures_native_cubic_bezier: true,
+                graph_snapshot: None,
             },
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn create_asset_draft_from_graph_container(
+        &self,
+        node_index: usize,
+        display_name: impl Into<String>,
+        description: impl Into<String>,
+        help: impl Into<String>,
+    ) -> Result<CreateAssetDraft, GraphContainerAssetDraftError> {
+        let node = self
+            .nodes
+            .get(node_index)
+            .ok_or(GraphContainerAssetDraftError::MissingNodeIndex(node_index))?;
+        if node.kind != NodeKind::GraphContainer {
+            return Err(GraphContainerAssetDraftError::NotGraphContainer);
+        }
+        let container = self
+            .graph_container_metadata_for_node(&node.node_id)
+            .ok_or(GraphContainerAssetDraftError::MissingContainerMetadata)?;
+        if self
+            .graph_registry
+            .graph(&container.internal_graph_id)
+            .is_none()
+        {
+            return Err(GraphContainerAssetDraftError::MissingInternalGraph);
+        }
+        if container.boundary.outputs.is_empty() {
+            return Err(GraphContainerAssetDraftError::MissingOutputBoundary);
+        }
+
+        let display_name = display_name.into();
+        let asset_slug = sanitize_asset_id_part(&display_name);
+        let graph_snapshot =
+            self.procedural_asset_graph_snapshot_for_graph(&container.internal_graph_id);
+        let output_node_id = container
+            .boundary
+            .mappings
+            .iter()
+            .find(|mapping| mapping.direction == GraphBoundaryMappingDirection::Output)
+            .map(|mapping| mapping.internal_node_id.clone())
+            .unwrap_or_else(|| "output.main".to_owned());
+
+        Ok(CreateAssetDraft {
+            asset_id: format!("project.asset.{asset_slug}"),
+            display_name,
+            version: "0.1.0".to_owned(),
+            description: description.into(),
+            help: help.into(),
+            inputs: container.boundary.inputs.clone(),
+            outputs: container.boundary.outputs.clone(),
+            promoted_parameters: self
+                .promotable_asset_parameters_for_graph(&container.internal_graph_id),
+            external_artifacts: Vec::new(),
+            graph_snapshot: graph_snapshot.clone(),
+            wrapped_subgraph: ProceduralAssetSubgraphReference {
+                graph_id: container.internal_graph_id.clone(),
+                output_node_id,
+                captures_native_cubic_bezier: container
+                    .boundary
+                    .outputs
+                    .iter()
+                    .any(|output| output.data_kind.preserves_native_cubic_bezier()),
+                graph_snapshot: Some(graph_snapshot),
+            },
+        })
     }
 
     #[allow(dead_code)]
@@ -4937,8 +5003,17 @@ impl GraphDocument {
     }
 
     fn promotable_asset_parameters(&self) -> Vec<HoudiniParameterDeclaration> {
+        self.promotable_asset_parameters_for_graph(self.current_graph_id())
+    }
+
+    fn promotable_asset_parameters_for_graph(
+        &self,
+        graph_id: &str,
+    ) -> Vec<HoudiniParameterDeclaration> {
         let mut parameters = Vec::new();
-        if let Some(filter_node) = self.nodes.iter().find(|node| node.kind == NodeKind::Filter) {
+        if let Some(filter_node) = self.nodes.iter().find(|node| {
+            node.kind == NodeKind::Filter && self.node_parent_graph_id(node) == graph_id
+        }) {
             parameters.push(HoudiniParameterDeclaration {
                 name: "minimum_score".to_owned(),
                 label: Some(filter_node.parameter.name.to_owned()),
@@ -4955,7 +5030,9 @@ impl GraphDocument {
                 help: "Promoted graph filter threshold.".to_owned(),
             });
         }
-        if let Some(style_node) = self.nodes.iter().find(|node| node.kind == NodeKind::Style) {
+        if let Some(style_node) = self.nodes.iter().find(|node| {
+            node.kind == NodeKind::Style && self.node_parent_graph_id(node) == graph_id
+        }) {
             parameters.push(HoudiniParameterDeclaration {
                 name: "stroke_scale".to_owned(),
                 label: Some(style_node.parameter.name.to_owned()),
@@ -4976,9 +5053,17 @@ impl GraphDocument {
     }
 
     fn procedural_asset_graph_snapshot(&self) -> ProceduralAssetGraphSnapshot {
+        self.procedural_asset_graph_snapshot_for_graph(self.current_graph_id())
+    }
+
+    fn procedural_asset_graph_snapshot_for_graph(
+        &self,
+        graph_id: &str,
+    ) -> ProceduralAssetGraphSnapshot {
+        let layout = self.graph_layout_for_graph(graph_id);
         ProceduralAssetGraphSnapshot {
-            node_count: self.nodes.len(),
-            edge_count: self.graph_layout().edges.len(),
+            node_count: layout.nodes.len(),
+            edge_count: layout.edges.len(),
             layer_count: self.layers.len(),
             geometry_contract: "HoudiniGeometryRecord polygons and native cubic Beziers".to_owned(),
         }
@@ -10798,6 +10883,7 @@ pub(crate) struct ProceduralAssetGraphSnapshot {
     pub geometry_contract: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CreateAssetDraft {
     pub asset_id: String,
     pub display_name: String,
@@ -10809,6 +10895,7 @@ pub(crate) struct CreateAssetDraft {
     pub promoted_parameters: Vec<HoudiniParameterDeclaration>,
     pub external_artifacts: Vec<ProceduralAssetArtifactReference>,
     pub graph_snapshot: ProceduralAssetGraphSnapshot,
+    pub wrapped_subgraph: ProceduralAssetSubgraphReference,
 }
 
 pub(crate) struct ProceduralAssetDefinitionSaveResult {
@@ -10818,8 +10905,20 @@ pub(crate) struct ProceduralAssetDefinitionSaveResult {
     pub update_available_instance_count: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GraphContainerAssetDraftError {
+    MissingNodeIndex(usize),
+    NotGraphContainer,
+    MissingContainerMetadata,
+    MissingInternalGraph,
+    MissingOutputBoundary,
+}
+
 impl CreateAssetDraft {
     fn into_declaration(self) -> ProceduralAssetDeclaration {
+        let graph_snapshot = self.graph_snapshot;
+        let mut wrapped_subgraph = self.wrapped_subgraph;
+        wrapped_subgraph.graph_snapshot = Some(graph_snapshot.clone());
         ProceduralAssetDeclaration {
             asset_id: self.asset_id.clone(),
             display_name: self.display_name,
@@ -10833,19 +10932,14 @@ impl CreateAssetDraft {
                 created_at: Some(current_timestamp_millis().to_string()),
                 source_digest: Some(stable_digest(&serde_json::json!({
                     "asset_id": &self.asset_id,
-                    "snapshot": &self.graph_snapshot,
+                    "snapshot": &graph_snapshot,
                 }))),
             },
             inputs: self.inputs,
             outputs: self.outputs,
             promoted_parameters: self.promoted_parameters,
             external_artifacts: self.external_artifacts,
-            wrapped_subgraph: ProceduralAssetSubgraphReference {
-                graph_id: format!("{}.graph", self.asset_id),
-                output_node_id: "output.main".to_owned(),
-                captures_native_cubic_bezier: true,
-                graph_snapshot: Some(self.graph_snapshot),
-            },
+            wrapped_subgraph,
         }
     }
 }
@@ -13555,7 +13649,8 @@ mod tests {
         GeneratedNodeBindingState, GeneratedNodeInfo, GeneratedNodeSource, Geometry,
         GeometryBounds, GeometryKind, GraphAnnotationKind, GraphBoundaryDeclaration,
         GraphBoundaryMapping, GraphBoundaryMappingDirection, GraphBoundaryMappingStatus,
-        GraphColor, GraphContainerCollapseError, GraphContainerStatus, GraphDataFlowEdge,
+        GraphColor, GraphContainerAssetDraftError, GraphContainerCollapseError, GraphContainerKind,
+        GraphContainerMetadata, GraphContainerStatus, GraphDataFlowEdge,
         GraphDataFlowEdgeDiagnosticStatus, GraphDocument, GraphEvaluationMode,
         GraphNavigationError, GraphNavigationTarget, GraphNode, GraphPoint, GraphStyle,
         GraphWorkItemStatus, HoudiniCubicBezierParquetSchema, HoudiniDataKind, HoudiniGeometryKind,
@@ -22422,6 +22517,145 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         );
         assert!(declaration.external_artifacts.is_empty());
         assert!(!graph.to_sidecar_json().unwrap().contains("cached_output"));
+    }
+
+    #[test]
+    fn procedural_asset_draft_from_graph_container_uses_container_boundary() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "filter.main")
+            .expect("sample graph should include filter");
+        let style_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "style.main")
+            .expect("sample graph should include style");
+        let container_index = graph
+            .add_graph_container_collapse_manifest_for_node_set(
+                "Cleanup Subnet",
+                &[filter_index, style_index],
+            )
+            .expect("connected selection should collapse");
+
+        let draft = graph
+            .create_asset_draft_from_graph_container(
+                container_index,
+                "Cleanup Asset",
+                "Promoted from a graph container.",
+                "Use as a reusable cleanup asset.",
+            )
+            .expect("resolved graph container should create an asset draft");
+
+        assert_eq!(draft.asset_id, "project.asset.cleanup_asset");
+        assert_eq!(draft.inputs.len(), 1);
+        assert_eq!(draft.outputs.len(), 1);
+        assert_eq!(draft.inputs[0].name, PRIMARY_GEOMETRY_OUTPUT);
+        assert_eq!(draft.outputs[0].data_kind, HoudiniDataKind::GeometryTable);
+        assert_eq!(draft.wrapped_subgraph.graph_id, "graph.cleanup_subnet");
+        assert_eq!(draft.wrapped_subgraph.output_node_id, "style.main");
+        assert!(draft.wrapped_subgraph.captures_native_cubic_bezier);
+        assert_eq!(draft.graph_snapshot.node_count, 2);
+        assert_eq!(draft.graph_snapshot.edge_count, 1);
+        assert!(
+            draft
+                .promoted_parameters
+                .iter()
+                .any(|parameter| parameter.name == "minimum_score")
+        );
+        assert!(
+            draft
+                .promoted_parameters
+                .iter()
+                .any(|parameter| parameter.name == "stroke_scale")
+        );
+
+        let asset_id = graph.commit_asset_draft(draft);
+        let declaration = graph
+            .procedural_asset_declarations
+            .iter()
+            .find(|declaration| declaration.asset_id == asset_id)
+            .expect("asset declaration should be committed");
+
+        assert_eq!(declaration.display_name, "Cleanup Asset");
+        assert_eq!(declaration.inputs[0].name, PRIMARY_GEOMETRY_OUTPUT);
+        assert_eq!(
+            declaration.wrapped_subgraph.graph_id,
+            "graph.cleanup_subnet"
+        );
+        assert_eq!(declaration.wrapped_subgraph.output_node_id, "style.main");
+        assert_eq!(
+            declaration
+                .wrapped_subgraph
+                .graph_snapshot
+                .as_ref()
+                .expect("asset declaration should retain graph snapshot")
+                .node_count,
+            2
+        );
+    }
+
+    #[test]
+    fn procedural_asset_draft_from_graph_container_rejects_unresolved_targets() {
+        let mut graph = GraphDocument::sample();
+        assert_eq!(
+            graph.create_asset_draft_from_graph_container(
+                usize::MAX,
+                "Missing",
+                "Missing node.",
+                "Missing node.",
+            ),
+            Err(GraphContainerAssetDraftError::MissingNodeIndex(usize::MAX))
+        );
+        assert_eq!(
+            graph.create_asset_draft_from_graph_container(
+                0,
+                "Source",
+                "Not a graph container.",
+                "Not a graph container.",
+            ),
+            Err(GraphContainerAssetDraftError::NotGraphContainer)
+        );
+
+        let container_index = graph.add_graph_container_node(
+            "Broken Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.broken_asset".to_owned(),
+                name: "Broken Asset".to_owned(),
+                path: "/obj/main/broken_asset".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+        graph.graph_containers.clear();
+        assert_eq!(
+            graph.create_asset_draft_from_graph_container(
+                container_index,
+                "Broken",
+                "Missing metadata.",
+                "Missing metadata.",
+            ),
+            Err(GraphContainerAssetDraftError::MissingContainerMetadata)
+        );
+
+        let container_node_id = graph.nodes[container_index].node_id.clone();
+        graph.graph_containers.push(GraphContainerMetadata {
+            container_node_id,
+            internal_graph_id: "graph.missing_internal".to_owned(),
+            kind: GraphContainerKind::Subnet,
+            boundary: GraphBoundaryDeclaration::geometry_passthrough(),
+            collapse_manifest: None,
+            navigable: true,
+        });
+        assert_eq!(
+            graph.create_asset_draft_from_graph_container(
+                container_index,
+                "Broken",
+                "Missing graph.",
+                "Missing graph.",
+            ),
+            Err(GraphContainerAssetDraftError::MissingInternalGraph)
+        );
     }
 
     #[test]

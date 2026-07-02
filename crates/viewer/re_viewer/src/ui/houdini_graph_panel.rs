@@ -10,13 +10,14 @@ pub(crate) mod model;
 
 use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState,
-    GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphContainerCollapseError,
-    GraphDocument, GraphEvaluationMode, GraphPoint, GraphStyle, GraphWorkItemStatus,
-    HoudiniNodeBinding, LayerKind, NativeOperatorLoadStatus, NetworkBadgeVisibility,
-    NetworkBoxOrganizationSnapshot, NetworkCommentDisplayMode, NetworkNodeRingVisibility,
-    NetworkViewDisplayOptions, NodeKind, NodeStatus, PRIMARY_GEOMETRY_OUTPUT,
-    PythonEnvironmentResolveTrigger, PythonEnvironmentStatus, PythonOperatorDependencyStatus,
-    ReferenceDiagnosticStatus, SourceMetadata, SubstrateCoordinateContract,
+    GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphContainerAssetDraftError,
+    GraphContainerCollapseError, GraphDocument, GraphEvaluationMode, GraphPoint, GraphStyle,
+    GraphWorkItemStatus, HoudiniNodeBinding, LayerKind, NativeOperatorLoadStatus,
+    NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot, NetworkCommentDisplayMode,
+    NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeKind, NodeStatus,
+    PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
+    PythonOperatorDependencyStatus, ReferenceDiagnosticStatus, SourceMetadata,
+    SubstrateCoordinateContract,
 };
 
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
@@ -2782,6 +2783,43 @@ impl HoudiniGraphPanel {
             let asset_id = graph.commit_asset_draft(draft);
             self.asset_status = Some(format!("Created project asset: {asset_id}"));
         }
+        let selected_graph_container = graph
+            .nodes
+            .get(self.selected_node)
+            .is_some_and(|node| node.kind == NodeKind::GraphContainer);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    selected_graph_container,
+                    egui::Button::new("Create Asset from Subnet"),
+                )
+                .on_hover_text("Create a project-local asset definition from the selected graph container boundary.")
+                .clicked()
+            {
+                match graph.create_asset_draft_from_graph_container(
+                    self.selected_node,
+                    self.asset_name.trim(),
+                    self.asset_description.trim(),
+                    self.asset_help.trim(),
+                ) {
+                    Ok(draft) => {
+                        let asset_id = graph.commit_asset_draft(draft);
+                        self.asset_status = Some(format!(
+                            "Created project asset from selected subnet: {asset_id}"
+                        ));
+                    }
+                    Err(err) => {
+                        self.asset_status = Some(format!(
+                            "Subnet asset creation failed: {}.",
+                            graph_container_asset_draft_error_message(&err)
+                        ));
+                    }
+                }
+            }
+            if !selected_graph_container {
+                ui.weak("Select a subnet to create an asset from its boundary.");
+            }
+        });
 
         ui.add_space(6.0);
         ui.strong("Selected Asset");
@@ -6549,6 +6587,26 @@ fn graph_container_collapse_error_message(error: &GraphContainerCollapseError) -
         }
         GraphContainerCollapseError::UntypedExternalEdge(edge_id) => {
             format!("external edge {edge_id} has no typed data kind")
+        }
+    }
+}
+
+fn graph_container_asset_draft_error_message(error: &GraphContainerAssetDraftError) -> String {
+    match error {
+        GraphContainerAssetDraftError::MissingNodeIndex(index) => {
+            format!("node index {index} is missing")
+        }
+        GraphContainerAssetDraftError::NotGraphContainer => {
+            "selected node is not a subnet".to_owned()
+        }
+        GraphContainerAssetDraftError::MissingContainerMetadata => {
+            "selected subnet has no graph container metadata".to_owned()
+        }
+        GraphContainerAssetDraftError::MissingInternalGraph => {
+            "selected subnet points to a missing internal graph".to_owned()
+        }
+        GraphContainerAssetDraftError::MissingOutputBoundary => {
+            "selected subnet has no typed output boundary".to_owned()
         }
     }
 }
