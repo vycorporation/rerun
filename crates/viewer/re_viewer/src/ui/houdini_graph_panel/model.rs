@@ -8115,7 +8115,7 @@ impl SourceLocator {
         }
     }
 
-    fn from_location(location: &str) -> Self {
+    pub(crate) fn from_location(location: &str) -> Self {
         let location = location.to_owned();
         let kind = if location.contains("://") {
             SourceLocatorKind::Uri
@@ -8482,6 +8482,16 @@ impl SourceGalleryThumbnailStatus {
             SourceExternalReferenceStatus::UriUnverified => Self::RemoteUnverified,
             SourceExternalReferenceStatus::RecordingQuery => Self::RuntimeInput,
             SourceExternalReferenceStatus::NotExternal => Self::GenericOnly,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DecodeReady => "decode ready",
+            Self::GenericOnly => "generic",
+            Self::MissingSource => "missing",
+            Self::RemoteUnverified => "remote unverified",
+            Self::RuntimeInput => "runtime input",
         }
     }
 }

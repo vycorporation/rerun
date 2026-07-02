@@ -26,8 +26,9 @@ pub(crate) use self::houdini_graph_panel::{
 };
 pub(crate) use self::houdini_graph_view::{
     HoudiniAssetsView, HoudiniDataView, HoudiniDisplayView, HoudiniExecutionView, HoudiniFindView,
-    HoudiniGraphView, HoudiniInfoView, HoudiniLayersView, HoudiniNetworkView, HoudiniOperatorsView,
-    HoudiniOutputsView, HoudiniParametersView, HoudiniProjectView, HoudiniShelfView,
+    HoudiniGalleryView, HoudiniGraphView, HoudiniInfoView, HoudiniLayersView, HoudiniNetworkView,
+    HoudiniOperatorsView, HoudiniOutputsView, HoudiniParametersView, HoudiniProjectView,
+    HoudiniShelfView,
 };
 pub(crate) use self::houdini_workbench_layout::houdini_workbench_toolbar_ui;
 pub(crate) use self::mobile_warning_ui::mobile_warning_ui;

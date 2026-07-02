@@ -72,7 +72,8 @@ Track the richer named personal/project workbench browser in #74.
 Initial implementation slice: bundled workbench layout loading is available from the viewport
 Workbench menu, using native Rerun blueprint views, splits, tab containers, and named containers.
 Bundled presets currently cover Network + Inspector, Houdini Default, Graph Review, Data
-Inspection, and Output / Debug workbenches.
+Inspection, and Output / Debug workbenches. Issue #247 adds the Gallery workbench view to the
+bundled presets so source browsing can sit beside Project, Data, Assets, and Output surfaces.
 The Workbench toolbar also exposes `.rbl`-backed open/save-as actions so users can load a saved
 layout file or duplicate the current edited layout without leaving the graph workspace.
 

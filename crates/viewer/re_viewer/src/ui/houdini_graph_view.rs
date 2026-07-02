@@ -54,6 +54,9 @@ pub(crate) struct HoudiniLayersView;
 pub(crate) struct HoudiniAssetsView;
 
 #[derive(Default)]
+pub(crate) struct HoudiniGalleryView;
+
+#[derive(Default)]
 pub(crate) struct HoudiniDataView;
 
 #[derive(Default)]
@@ -453,6 +456,13 @@ houdini_workbench_view_class!(
     "Assets",
     "Project-local Houdini asset definitions and graph usage navigation.",
     show_assets_view
+);
+houdini_workbench_view_class!(
+    HoudiniGalleryView,
+    "HoudiniGallery",
+    "Gallery",
+    "Source gallery for local and URL-backed files and manifests.",
+    show_gallery_view
 );
 houdini_workbench_view_class!(
     HoudiniShelfView,

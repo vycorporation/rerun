@@ -5,8 +5,9 @@ use re_viewport_blueprint::{ViewBlueprint, ViewportBlueprint};
 
 use crate::ui::{
     HoudiniAssetsView, HoudiniDataView, HoudiniDisplayView, HoudiniExecutionView, HoudiniFindView,
-    HoudiniGraphView, HoudiniInfoView, HoudiniLayersView, HoudiniNetworkView, HoudiniOperatorsView,
-    HoudiniOutputsView, HoudiniParametersView, HoudiniProjectView, HoudiniShelfView,
+    HoudiniGalleryView, HoudiniGraphView, HoudiniInfoView, HoudiniLayersView, HoudiniNetworkView,
+    HoudiniOperatorsView, HoudiniOutputsView, HoudiniParametersView, HoudiniProjectView,
+    HoudiniShelfView,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -32,6 +33,7 @@ struct PresetViews {
     find: ViewId,
     layers: ViewId,
     assets: ViewId,
+    gallery: ViewId,
     data: ViewId,
     outputs: ViewId,
     shelf: ViewId,
@@ -753,6 +755,11 @@ fn resolve_preset_views(
         view_spec::<HoudiniAssetsView>("Assets"),
         &mut views_to_add,
     );
+    let gallery = resolve_view(
+        viewport_blueprint,
+        view_spec::<HoudiniGalleryView>("Gallery"),
+        &mut views_to_add,
+    );
     let data = resolve_view(
         viewport_blueprint,
         view_spec::<HoudiniDataView>("Data"),
@@ -794,6 +801,7 @@ fn resolve_preset_views(
             find,
             layers,
             assets,
+            gallery,
             data,
             outputs,
             shelf,
@@ -855,6 +863,7 @@ fn build_preset_tree(
                     views.operators,
                     views.find,
                     views.assets,
+                    views.gallery,
                     views.layers,
                 ],
             );
@@ -868,14 +877,15 @@ fn build_preset_tree(
         HoudiniWorkbenchPreset::HoudiniDefault => {
             let graph = tiles.insert_pane(views.graph);
             let shelf = tiles.insert_pane(views.shelf);
+            let gallery = tiles.insert_pane(views.gallery);
             let assets = tiles.insert_pane(views.assets);
             let parameters = tiles.insert_pane(views.parameters);
             let network = tiles.insert_pane(views.network);
             let right_side = insert_named_vertical(
                 &mut tiles,
                 &mut container_display_names,
-                "Shelf + Assets + Parameters + Network",
-                vec![shelf, assets, parameters, network],
+                "Shelf + Gallery + Assets + Parameters + Network",
+                vec![shelf, gallery, assets, parameters, network],
             );
             insert_named_horizontal(
                 &mut tiles,
@@ -895,6 +905,7 @@ fn build_preset_tree(
                     views.data,
                     views.outputs,
                     views.execution,
+                    views.gallery,
                     views.assets,
                     views.project,
                 ],
@@ -928,6 +939,7 @@ fn build_preset_tree(
                     views.shelf,
                     views.data,
                     views.execution,
+                    views.gallery,
                     views.assets,
                     views.project,
                     views.info,
@@ -957,6 +969,7 @@ fn build_preset_tree(
                     views.shelf,
                     views.outputs,
                     views.execution,
+                    views.gallery,
                     views.assets,
                     views.display,
                     views.layers,
@@ -1052,13 +1065,20 @@ mod tests {
             find: view_id(6),
             layers: view_id(7),
             assets: view_id(8),
-            data: view_id(9),
-            outputs: view_id(10),
-            shelf: view_id(11),
-            execution: view_id(12),
-            project: view_id(13),
-            graph: view_id(14),
+            gallery: view_id(9),
+            data: view_id(10),
+            outputs: view_id(11),
+            shelf: view_id(12),
+            execution: view_id(13),
+            project: view_id(14),
+            graph: view_id(15),
         }
+    }
+
+    fn tree_contains_pane(tree: &egui_tiles::Tree<ViewId>, view_id: ViewId) -> bool {
+        tree.tiles
+            .iter()
+            .any(|(_, tile)| tile == &Tile::Pane(view_id))
     }
 
     #[test]
@@ -1069,7 +1089,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            10
+            11
         );
         assert!(names.iter().any(|(_, name)| name == "Network Workbench"));
         assert!(names.iter().any(|(_, name)| name == "Inspector"));
@@ -1082,7 +1102,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            11
+            12
         );
         assert!(
             names
@@ -1101,7 +1121,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            5
+            6
         );
         assert!(
             names
@@ -1111,7 +1131,7 @@ mod tests {
         assert!(
             names
                 .iter()
-                .any(|(_, name)| name == "Shelf + Assets + Parameters + Network")
+                .any(|(_, name)| name == "Shelf + Gallery + Assets + Parameters + Network")
         );
 
         let root_id = tree.root().expect("preset should have a root tile");
@@ -1127,6 +1147,7 @@ mod tests {
             tree.tiles.get(root_children[0]),
             Some(&Tile::Pane(preset_views().graph))
         );
+        assert!(tree_contains_pane(&tree, preset_views().gallery));
     }
 
     #[test]
@@ -1137,7 +1158,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            8
+            9
         );
         assert!(
             names
@@ -1155,7 +1176,7 @@ mod tests {
         assert!(tree.root().is_some());
         assert_eq!(
             tree.tiles.iter().filter(|(_, tile)| tile.is_pane()).count(),
-            10
+            11
         );
         assert!(
             names

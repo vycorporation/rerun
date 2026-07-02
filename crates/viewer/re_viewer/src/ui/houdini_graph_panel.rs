@@ -16,7 +16,8 @@ use self::model::{
     NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot,
     NetworkCommentDisplayMode, NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeKind,
     NodeStatus, PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
-    PythonOperatorDependencyStatus, ReferenceDiagnosticStatus, SourceMetadata,
+    PythonOperatorDependencyStatus, ReferenceDiagnosticStatus, SourceGalleryIndex,
+    SourceGalleryItem, SourceGalleryItemKind, SourceLocator, SourceMetadata,
     SubstrateCoordinateContract,
 };
 
@@ -24,6 +25,7 @@ const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
 const ATTRIBUTE_TABLE_PREVIEW_ROWS: usize = 200;
 const NETWORK_BOX_FAST_DRAG_PEAK_DELTA_PIXELS: f32 = 18.0;
 const NETWORK_DISPLAY_OPTIONS_ID: &str = "houdini_graph_network_display_options";
+const SOURCE_GALLERY_INDEX_LIMIT: usize = 256;
 const DEFAULT_ASSET_NAME: &str = "Curve cleanup";
 const DEFAULT_ASSET_DESCRIPTION: &str = "Project-local graph asset.";
 const DEFAULT_ASSET_HELP: &str = "Created from the current Houdini graph.";
@@ -139,6 +141,12 @@ pub(crate) struct HoudiniGraphPanel {
     asset_help: String,
     asset_gallery_filter: String,
     asset_status: Option<String>,
+    source_gallery_location: String,
+    source_gallery_manifest_json: String,
+    source_gallery_filter: String,
+    source_gallery_selected_id: Option<String>,
+    source_gallery_index: Option<SourceGalleryIndex>,
+    source_gallery_status: Option<String>,
     python_uv_executable_path: String,
     python_existing_environment_path: String,
     python_create_environment_path: String,
@@ -201,6 +209,12 @@ impl Default for HoudiniGraphPanel {
             asset_help: DEFAULT_ASSET_HELP.to_owned(),
             asset_gallery_filter: String::new(),
             asset_status: None,
+            source_gallery_location: String::new(),
+            source_gallery_manifest_json: String::new(),
+            source_gallery_filter: String::new(),
+            source_gallery_selected_id: None,
+            source_gallery_index: None,
+            source_gallery_status: None,
             python_uv_executable_path: String::new(),
             python_existing_environment_path: String::new(),
             python_create_environment_path: String::new(),
@@ -213,6 +227,7 @@ enum GraphWorkbenchPane {
     Operators,
     Find,
     Assets,
+    Gallery,
     Parameters,
     Info,
     Display,
@@ -225,6 +240,7 @@ impl GraphWorkbenchPane {
             Self::Operators => "Ops",
             Self::Find => "Find",
             Self::Assets => "Assets",
+            Self::Gallery => "Gallery",
             Self::Parameters => "Parms",
             Self::Info => "Info",
             Self::Display => "Display",
@@ -397,6 +413,10 @@ impl HoudiniGraphPanel {
 
     pub(crate) fn show_assets_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
         self.show_workbench_view(ui, shared_graph, GraphWorkbenchPane::Assets);
+    }
+
+    pub(crate) fn show_gallery_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
+        self.show_workbench_view(ui, shared_graph, GraphWorkbenchPane::Gallery);
     }
 
     pub(crate) fn show_data_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
@@ -588,6 +608,10 @@ impl HoudiniGraphPanel {
                 }
                 if ui.button("Assets").clicked() {
                     self.show_graph_workbench_pane(GraphWorkbenchPane::Assets);
+                    ui.close();
+                }
+                if ui.button("Gallery").clicked() {
+                    self.show_graph_workbench_pane(GraphWorkbenchPane::Gallery);
                     ui.close();
                 }
                 if ui.button("Parameters").clicked() {
@@ -2063,6 +2087,9 @@ impl HoudiniGraphPanel {
             GraphWorkbenchPane::Assets => {
                 self.asset_gallery_ui(ui, graph);
             }
+            GraphWorkbenchPane::Gallery => {
+                self.source_gallery_ui(ui, graph);
+            }
             GraphWorkbenchPane::Parameters => {
                 self.selected_node_controls_ui(ui, graph);
             }
@@ -3268,6 +3295,207 @@ impl HoudiniGraphPanel {
                     }
                 });
         }
+    }
+
+    fn source_gallery_ui(&mut self, ui: &mut Ui, _graph: &mut GraphDocument) {
+        ui.strong("Source Gallery");
+        ui.add_space(4.0);
+
+        egui::Grid::new("houdini_source_gallery_entry_controls")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.weak("Source");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.source_gallery_location)
+                        .hint_text("path, file URL, or manifest URL")
+                        .desired_width(340.0),
+                );
+                ui.end_row();
+
+                ui.weak("Manifest JSON");
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.source_gallery_manifest_json)
+                        .hint_text(r#"{"items":["https://example.test/frame.png"]}"#)
+                        .desired_rows(4)
+                        .desired_width(340.0),
+                );
+                ui.end_row();
+            });
+
+        ui.horizontal(|ui| {
+            if ui.button("Index").clicked() {
+                self.rebuild_source_gallery_index();
+            }
+            if ui.button("Clear").clicked() {
+                self.source_gallery_index = None;
+                self.source_gallery_selected_id = None;
+                self.source_gallery_status = None;
+            }
+            if let Some(status) = &self.source_gallery_status {
+                ui.weak(status);
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.weak("Find");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.source_gallery_filter)
+                    .hint_text("name, kind, status, format, or locator"),
+            );
+        });
+        ui.add_space(6.0);
+
+        let Some(index) = self.source_gallery_index.as_ref() else {
+            ui.weak("No source gallery indexed.");
+            return;
+        };
+
+        for warning in &index.warnings {
+            ui.weak(warning);
+        }
+
+        let filtered_items = source_gallery_filtered_items(index, &self.source_gallery_filter)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if filtered_items.is_empty() {
+            ui.weak("No gallery items match the current filter.");
+            return;
+        }
+
+        ui.horizontal(|ui| {
+            ui.weak(format!(
+                "{} of {} item(s)",
+                filtered_items.len(),
+                index.items.len()
+            ));
+            if index.truncated {
+                ui.weak(format!("limited to {}", index.limit));
+            }
+        });
+
+        egui::Grid::new("houdini_source_gallery_thumbnail_grid")
+            .num_columns(3)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                for (item_index, item) in filtered_items.iter().enumerate() {
+                    let selected =
+                        self.source_gallery_selected_id.as_deref() == Some(item.stable_id.as_str());
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(172.0, 94.0),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            if ui
+                                .selectable_label(selected, source_gallery_thumbnail_label(item))
+                                .clicked()
+                            {
+                                self.source_gallery_selected_id = Some(item.stable_id.clone());
+                            }
+                            ui.label(&item.display_name);
+                            ui.weak(source_gallery_tile_detail(item));
+                        },
+                    );
+                    if (item_index + 1) % 3 == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+
+        let selected_id = self
+            .source_gallery_selected_id
+            .as_deref()
+            .or_else(|| filtered_items.first().map(|item| item.stable_id.as_str()));
+        if let Some(selected_item) = source_gallery_selected_item(index, selected_id) {
+            ui.add_space(8.0);
+            self.source_gallery_metadata_ui(ui, selected_item);
+        }
+    }
+
+    fn rebuild_source_gallery_index(&mut self) {
+        let location = self.source_gallery_location.trim();
+        if location.is_empty() {
+            self.source_gallery_status = Some("Enter a source locator.".to_owned());
+            return;
+        }
+
+        let source = SourceLocator::from_location(location);
+        let manifest_json = self.source_gallery_manifest_json.trim();
+        let result = if manifest_json.is_empty() {
+            Ok(SourceGalleryIndex::from_locator(
+                source,
+                SOURCE_GALLERY_INDEX_LIMIT,
+            ))
+        } else {
+            SourceGalleryIndex::from_manifest_json(
+                source,
+                manifest_json,
+                SOURCE_GALLERY_INDEX_LIMIT,
+            )
+        };
+
+        match result {
+            Ok(index) => {
+                self.source_gallery_selected_id =
+                    index.items.first().map(|item| item.stable_id.clone());
+                self.source_gallery_status =
+                    Some(format!("Indexed {} item(s).", index.items.len()));
+                self.source_gallery_index = Some(index);
+            }
+            Err(error) => {
+                self.source_gallery_status = Some(error.to_string());
+            }
+        }
+    }
+
+    fn source_gallery_metadata_ui(&self, ui: &mut Ui, item: &SourceGalleryItem) {
+        ui.strong("Selected Source");
+        egui::Grid::new("houdini_source_gallery_selected_metadata")
+            .num_columns(2)
+            .spacing([12.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.weak("Name");
+                ui.label(&item.display_name);
+                ui.end_row();
+
+                ui.weak("Kind");
+                ui.label(item.kind.as_str());
+                ui.end_row();
+
+                ui.weak("Availability");
+                ui.label(item.external_reference_status.as_str());
+                ui.end_row();
+
+                ui.weak("Thumbnail");
+                ui.label(item.thumbnail_intent.status().as_str());
+                ui.end_row();
+
+                ui.weak("Format");
+                ui.label(
+                    item.format_kind
+                        .map(|kind| kind.as_str())
+                        .unwrap_or("unknown"),
+                );
+                ui.end_row();
+
+                ui.weak("Support");
+                ui.label(
+                    item.format_support_status
+                        .map(|status| status.as_str())
+                        .unwrap_or("not inferred"),
+                );
+                ui.end_row();
+
+                ui.weak("Locator");
+                ui.monospace(item.locator.readable());
+                ui.end_row();
+
+                ui.weak("Stable id");
+                ui.monospace(&item.stable_id);
+                ui.end_row();
+            });
     }
 
     fn filtered_asset_gallery_entries(
@@ -7463,6 +7691,75 @@ fn graph_container_asset_draft_error_message(error: &GraphContainerAssetDraftErr
     }
 }
 
+fn source_gallery_filtered_items<'a>(
+    index: &'a SourceGalleryIndex,
+    filter: &str,
+) -> Vec<&'a SourceGalleryItem> {
+    index
+        .items
+        .iter()
+        .filter(|item| source_gallery_item_matches_filter(item, filter))
+        .collect()
+}
+
+fn source_gallery_item_matches_filter(item: &SourceGalleryItem, filter: &str) -> bool {
+    let filter = filter.trim().to_ascii_lowercase();
+    if filter.is_empty() {
+        return true;
+    }
+
+    let mut haystack = vec![
+        item.display_name.to_ascii_lowercase(),
+        item.locator.readable().to_ascii_lowercase(),
+        item.kind.as_str().to_owned(),
+        item.external_reference_status.as_str().to_owned(),
+        item.thumbnail_intent.status().as_str().to_owned(),
+    ];
+    if let Some(kind) = item.format_kind {
+        haystack.push(kind.as_str().to_ascii_lowercase());
+    }
+    if let Some(status) = item.format_support_status {
+        haystack.push(status.as_str().to_ascii_lowercase());
+    }
+
+    haystack.iter().any(|candidate| candidate.contains(&filter))
+}
+
+fn source_gallery_selected_item<'a>(
+    index: &'a SourceGalleryIndex,
+    selected_id: Option<&str>,
+) -> Option<&'a SourceGalleryItem> {
+    selected_id.and_then(|selected_id| {
+        index
+            .items
+            .iter()
+            .find(|item| item.stable_id == selected_id)
+    })
+}
+
+fn source_gallery_thumbnail_label(item: &SourceGalleryItem) -> String {
+    let kind = match item.kind {
+        SourceGalleryItemKind::Image => "IMG",
+        SourceGalleryItemKind::Table => "TABLE",
+        SourceGalleryItemKind::PolygonTable => "POLY",
+        SourceGalleryItemKind::Recording => "RRD",
+        SourceGalleryItemKind::PointCloud => "POINT",
+        SourceGalleryItemKind::Manifest => "LIST",
+        SourceGalleryItemKind::Generated => "GEN",
+        SourceGalleryItemKind::LiveRecording => "LIVE",
+        SourceGalleryItemKind::Unknown => "FILE",
+    };
+    format!("{kind}  {}", item.thumbnail_intent.status().as_str())
+}
+
+fn source_gallery_tile_detail(item: &SourceGalleryItem) -> String {
+    let format = item
+        .format_kind
+        .map(|kind| kind.as_str())
+        .unwrap_or_else(|| item.kind.as_str());
+    format!("{} / {}", format, item.external_reference_status.as_str())
+}
+
 fn draw_arrowhead(painter: &egui::Painter, tip: Pos2, color: Color32) {
     let size = 5.0;
     painter.add(egui::Shape::convex_polygon(
@@ -7482,9 +7779,13 @@ mod tests {
         ConnectionDragPreview, ConnectionDragState, GraphSearchTarget, GraphWorkbenchPane,
         HoudiniGraphPanel, NodePortKind, OperatorPaletteAction, asset_usage_graph_groups,
         connection_drag_preview, distance_to_segment, graph_edge_at, layout_node_rects,
-        model::{GraphContainerStatus, NodeKind, ProjectGraphMetadata, ProjectGraphRole},
+        model::{
+            GraphContainerStatus, NodeKind, ProjectGraphMetadata, ProjectGraphRole,
+            SourceGalleryIndex, SourceLocator,
+        },
         node_indices_in_selection_rect, node_primary_port_at, node_primary_port_rect,
-        operator_palette_action_available, operator_palette_entries,
+        operator_palette_action_available, operator_palette_entries, source_gallery_filtered_items,
+        source_gallery_selected_item, source_gallery_thumbnail_label, source_gallery_tile_detail,
     };
     use crate::ui::houdini_graph_panel::model::{GraphDocument, PRIMARY_GEOMETRY_OUTPUT};
 
@@ -7707,6 +8008,50 @@ mod tests {
         assert_eq!(panel.selected_node, analysis_node_index);
         assert!(panel.selected_annotation.is_none());
         assert!(panel.node_info_open);
+    }
+
+    #[test]
+    fn source_gallery_filter_selection_and_tile_labels_cover_visible_view_contract() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let image_path = temp_dir.path().join("frame.png");
+        let table_path = temp_dir.path().join("polygons.geoparquet");
+        std::fs::write(&image_path, b"image bytes").unwrap();
+        std::fs::write(&table_path, b"table bytes").unwrap();
+        let index = SourceGalleryIndex::from_locations(
+            SourceLocator::from_location("inline-gallery"),
+            vec![
+                SourceLocator::from_location(&image_path.display().to_string()),
+                SourceLocator::from_location(&table_path.display().to_string()),
+                SourceLocator::from_location("https://example.test/remote.png"),
+            ],
+            16,
+        );
+
+        assert_eq!(source_gallery_filtered_items(&index, "").len(), 3);
+
+        let image_matches = source_gallery_filtered_items(&index, "image");
+        assert_eq!(image_matches.len(), 2);
+        assert!(
+            image_matches
+                .iter()
+                .any(|item| source_gallery_thumbnail_label(item).contains("IMG"))
+        );
+
+        let polygon_matches = source_gallery_filtered_items(&index, "polygon table");
+        assert_eq!(polygon_matches.len(), 1);
+        assert!(source_gallery_tile_detail(polygon_matches[0]).contains("GeoParquet"));
+
+        let remote_matches = source_gallery_filtered_items(&index, "remote unverified");
+        assert_eq!(remote_matches.len(), 1);
+        assert_eq!(remote_matches[0].display_name, "remote.png");
+
+        assert!(source_gallery_filtered_items(&index, "no-such-source").is_empty());
+
+        let selected_id = polygon_matches[0].stable_id.as_str();
+        let selected = source_gallery_selected_item(&index, Some(selected_id))
+            .expect("selected source gallery item should resolve by stable id");
+        assert_eq!(selected.display_name, "polygons.geoparquet");
+        assert!(source_gallery_selected_item(&index, Some("missing")).is_none());
     }
 
     #[test]
