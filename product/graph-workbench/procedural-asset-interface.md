@@ -110,3 +110,4 @@ Python-backed assets are deferred until the Python operator lane is implemented.
 9. #162 - Complete: add artifact bundle/export preview metadata with inclusion choices, expected size, remaining external references, and reproducibility warnings without copying artifacts.
 10. #218 - Complete: add explicit Save Asset Definition model and workbench UI actions for unlocked procedural asset instances while preserving exact-version pins.
 11. #220 - Complete: create project-local procedural asset drafts from resolved graph containers using their typed boundary and internal graph reference.
+12. #228 - Complete: expose asset draft creation from the selected subnet through the Tab/operator palette while reusing the graph-container asset draft path.
