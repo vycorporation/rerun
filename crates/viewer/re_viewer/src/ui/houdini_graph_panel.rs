@@ -108,6 +108,7 @@ pub(crate) struct HoudiniGraphPanel {
     parquet_status: Option<String>,
     graph_document_status: Option<String>,
     recording_status: Option<String>,
+    package_manifest_status: Option<String>,
     benchmark_status: Option<String>,
     shelf_status: Option<String>,
     benchmark_curve_count: usize,
@@ -165,6 +166,7 @@ impl Default for HoudiniGraphPanel {
             parquet_status: None,
             graph_document_status: None,
             recording_status: None,
+            package_manifest_status: None,
             benchmark_status: None,
             shelf_status: None,
             benchmark_curve_count: 10_000,
@@ -2731,15 +2733,44 @@ impl HoudiniGraphPanel {
                         }
                     }
                 }
+
+                if ui.button("Save Source Manifest...").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("JSON manifest", &["json"])
+                        .set_file_name("houdini-source-package-manifest.json")
+                        .save_file()
+                {
+                    match graph.save_source_package_manifest(&path) {
+                        Ok(manifest) => {
+                            self.package_manifest_status = Some(format!(
+                                "Saved source manifest: {} ({} artifacts, {} external references, {} missing, {} warnings). Source files were not copied or hashed.",
+                                manifest.path.display(),
+                                manifest.artifact_count,
+                                manifest.remaining_external_reference_count,
+                                manifest.missing_reference_count,
+                                manifest.reproducibility_warning_count
+                            ));
+                        }
+                        Err(err) => {
+                            self.package_manifest_status =
+                                Some(format!("Source manifest save failed: {err}"));
+                        }
+                    }
+                }
             });
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            ui.weak("Recording export is available in the native viewer.");
+            ui.weak(
+                "Recording export and source manifest writing are available in the native viewer.",
+            );
         }
 
         if let Some(status) = &self.recording_status {
+            ui.weak(status);
+        }
+        if let Some(status) = &self.package_manifest_status {
             ui.weak(status);
         }
     }
