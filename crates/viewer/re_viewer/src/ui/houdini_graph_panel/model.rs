@@ -281,6 +281,79 @@ impl GraphDataFlowEdgeDiagnosticStatus {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct GraphRecordIdentity {
+    pub graph_id: String,
+    pub node_id: String,
+    pub readable_path: String,
+    pub output_name: String,
+    pub source_provenance: SourceProvenance,
+    pub geometry_kind: GeometryKind,
+    pub layer: LayerKind,
+    pub geometry_fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
+pub(crate) struct TransientViewportSelection {
+    pub graph_id: String,
+    pub output_node_id: String,
+    pub output_name: String,
+    pub record: TransientViewportRecordTarget,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
+pub(crate) enum TransientViewportRecordTarget {
+    GeometryFingerprint(String),
+    ViewportPickId(String),
+    RowPosition(usize),
+    ScreenPosition(GraphPoint),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct TransientViewportSelectionReport {
+    pub status: TransientViewportSelectionStatus,
+    pub identities: Vec<GraphRecordIdentity>,
+    pub diagnostics: Vec<String>,
+}
+
+impl TransientViewportSelectionReport {
+    #[allow(dead_code)]
+    fn diagnostic(status: TransientViewportSelectionStatus, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            identities: Vec::new(),
+            diagnostics: vec![message.into()],
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum TransientViewportSelectionStatus {
+    Resolved,
+    Ambiguous,
+    Unsupported,
+    MissingOutput,
+    MissingRecord,
+}
+
+impl TransientViewportSelectionStatus {
+    #[allow(dead_code)]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolved => "resolved",
+            Self::Ambiguous => "ambiguous",
+            Self::Unsupported => "unsupported",
+            Self::MissingOutput => "missing output",
+            Self::MissingRecord => "missing record",
+        }
+    }
+}
+
 impl GraphDocument {
     pub fn current_graph_id(&self) -> &str {
         self.graph_registry
@@ -294,6 +367,128 @@ impl GraphDocument {
             .selected_graph()
             .map(|graph| graph.path.as_str())
             .unwrap_or("/obj/main")
+    }
+
+    #[allow(dead_code)]
+    pub fn transient_viewport_selection_for_record(
+        &self,
+        node_index: usize,
+        record_index: usize,
+    ) -> Option<TransientViewportSelection> {
+        if !self.node_has_primary_geometry_output(node_index) {
+            return None;
+        }
+        let node = self.nodes.get(node_index)?;
+        let geometry = self.active_geometry().get(record_index)?;
+        if !self.emits(geometry) {
+            return None;
+        }
+
+        Some(TransientViewportSelection {
+            graph_id: self.node_parent_graph_id(node).to_owned(),
+            output_node_id: node.node_id.clone(),
+            output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            record: TransientViewportRecordTarget::GeometryFingerprint(
+                geometry_record_fingerprint(geometry),
+            ),
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn resolve_transient_viewport_selection(
+        &self,
+        selection: &TransientViewportSelection,
+    ) -> TransientViewportSelectionReport {
+        if selection.output_name != PRIMARY_GEOMETRY_OUTPUT {
+            return TransientViewportSelectionReport::diagnostic(
+                TransientViewportSelectionStatus::Unsupported,
+                format!(
+                    "Viewport selection output '{}' is not a supported graph geometry output.",
+                    selection.output_name
+                ),
+            );
+        }
+
+        let Some((node_index, node)) = self.nodes.iter().enumerate().find(|(_, node)| {
+            node.node_id == selection.output_node_id
+                && self.node_parent_graph_id(node) == selection.graph_id
+        }) else {
+            return TransientViewportSelectionReport::diagnostic(
+                TransientViewportSelectionStatus::MissingOutput,
+                format!(
+                    "Viewport selection output node '{}' is missing from graph '{}'.",
+                    selection.output_node_id, selection.graph_id
+                ),
+            );
+        };
+
+        if !self.node_has_primary_geometry_output(node_index) {
+            return TransientViewportSelectionReport::diagnostic(
+                TransientViewportSelectionStatus::Unsupported,
+                format!(
+                    "Viewport selection target '{}' does not expose a primary geometry output.",
+                    self.readable_node_path_for_node(node)
+                ),
+            );
+        }
+
+        let TransientViewportRecordTarget::GeometryFingerprint(fingerprint) = &selection.record
+        else {
+            return TransientViewportSelectionReport::diagnostic(
+                TransientViewportSelectionStatus::Unsupported,
+                match &selection.record {
+                    TransientViewportRecordTarget::ViewportPickId(pick_id) => {
+                        format!(
+                            "Viewport pick id '{pick_id}' is transient renderer state, not graph record identity."
+                        )
+                    }
+                    TransientViewportRecordTarget::RowPosition(row_position) => {
+                        format!(
+                            "Row position {row_position} is transient table state, not graph record identity."
+                        )
+                    }
+                    TransientViewportRecordTarget::ScreenPosition(position) => {
+                        format!(
+                            "Screen position ({:.3}, {:.3}) is transient viewport state, not graph record identity.",
+                            position.x, position.y
+                        )
+                    }
+                    TransientViewportRecordTarget::GeometryFingerprint(_) => unreachable!(),
+                },
+            );
+        };
+
+        let identities = self
+            .active_geometry()
+            .iter()
+            .filter(|geometry| self.emits(geometry))
+            .filter(|geometry| geometry_record_fingerprint(geometry) == *fingerprint)
+            .map(|geometry| self.graph_record_identity(node, &selection.output_name, geometry))
+            .collect::<Vec<_>>();
+
+        match identities.len() {
+            0 => TransientViewportSelectionReport::diagnostic(
+                TransientViewportSelectionStatus::MissingRecord,
+                format!(
+                    "Viewport selection record fingerprint '{}' did not match any visible graph record.",
+                    fingerprint
+                ),
+            ),
+            1 => TransientViewportSelectionReport {
+                status: TransientViewportSelectionStatus::Resolved,
+                identities,
+                diagnostics: Vec::new(),
+            },
+            _ => TransientViewportSelectionReport {
+                status: TransientViewportSelectionStatus::Ambiguous,
+                diagnostics: vec![format!(
+                    "Viewport selection record fingerprint '{}' matched {} visible graph records.",
+                    fingerprint,
+                    identities.len()
+                )],
+                identities,
+            },
+        }
     }
 
     #[allow(dead_code)]
@@ -1260,6 +1455,25 @@ impl GraphDocument {
             .find(|node| node.node_id == node_id)
             .map(|node| self.readable_node_path_for_node(node))
             .unwrap_or_else(|| format!("{}/<missing:{node_id}>", self.current_graph_path()))
+    }
+
+    #[allow(dead_code)]
+    fn graph_record_identity(
+        &self,
+        node: &GraphNode,
+        output_name: &str,
+        geometry: &Geometry,
+    ) -> GraphRecordIdentity {
+        GraphRecordIdentity {
+            graph_id: self.node_parent_graph_id(node).to_owned(),
+            node_id: node.node_id.clone(),
+            readable_path: format!("{}:{output_name}", self.readable_node_path_for_node(node)),
+            output_name: output_name.to_owned(),
+            source_provenance: self.source.metadata.provenance,
+            geometry_kind: geometry.kind(),
+            layer: geometry.layer(),
+            geometry_fingerprint: geometry_record_fingerprint(geometry),
+        }
     }
 
     pub fn sample() -> Self {
@@ -13201,6 +13415,16 @@ fn stable_digest(value: &serde_json::Value) -> String {
 }
 
 #[allow(dead_code)]
+fn geometry_record_fingerprint(geometry: &Geometry) -> String {
+    stable_digest(&serde_json::json!({
+        "kind": geometry.kind(),
+        "layer": geometry.layer(),
+        "score": geometry.score(),
+        "geometry": geometry,
+    }))
+}
+
+#[allow(dead_code)]
 fn current_timestamp_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -14833,8 +15057,10 @@ mod tests {
         SourceGalleryThumbnailStatus, SourceLocator, SourceLocatorKind,
         SourcePackageManifestArtifactRole, SourcePackageManifestExternalStatus,
         SourcePackageManifestInclusionChoice, SourcePackageManifestPreview, SourceProvenance,
-        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
-        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
+        TransientViewportRecordTarget, TransientViewportSelection,
+        TransientViewportSelectionStatus, ViewerGeometry, load_cubic_bezier_parquet,
+        load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -17091,6 +17317,125 @@ mod tests {
                 .value
                 .as_f32(),
             Some(0.55)
+        );
+    }
+
+    #[test]
+    fn transient_viewport_selection_resolves_visible_record_identity() {
+        let graph = GraphDocument::sample();
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Style)
+            .expect("sample graph should include style node");
+        let selection = graph
+            .transient_viewport_selection_for_record(output_index, 0)
+            .expect("visible output record should create transient viewport target");
+
+        assert!(matches!(
+            selection.record,
+            TransientViewportRecordTarget::GeometryFingerprint(_)
+        ));
+
+        let report = graph.resolve_transient_viewport_selection(&selection);
+
+        assert_eq!(report.status, TransientViewportSelectionStatus::Resolved);
+        assert_eq!(report.status.as_str(), "resolved");
+        assert!(report.diagnostics.is_empty());
+        assert_eq!(report.identities.len(), 1);
+        let identity = &report.identities[0];
+        assert_eq!(identity.graph_id, graph.current_graph_id());
+        assert_eq!(identity.output_name, PRIMARY_GEOMETRY_OUTPUT);
+        assert!(identity.readable_path.ends_with(":geometry"));
+        assert_eq!(identity.geometry_kind, GeometryKind::Polygon);
+        assert_eq!(identity.layer, LayerKind::Polygons);
+        assert_eq!(identity.source_provenance, SourceProvenance::DemoFallback);
+    }
+
+    #[test]
+    fn transient_viewport_selection_reports_ambiguous_record_identity() {
+        let mut graph = GraphDocument::sample();
+        graph.geometry.push(graph.geometry[0].clone());
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Style)
+            .expect("sample graph should include style node");
+        let selection = graph
+            .transient_viewport_selection_for_record(output_index, 0)
+            .expect("visible output record should create transient viewport target");
+
+        let report = graph.resolve_transient_viewport_selection(&selection);
+
+        assert_eq!(report.status, TransientViewportSelectionStatus::Ambiguous);
+        assert_eq!(report.identities.len(), 2);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("matched 2 visible graph records"))
+        );
+    }
+
+    #[test]
+    fn transient_viewport_selection_rejects_renderer_and_row_state() {
+        let graph = GraphDocument::sample();
+        let output = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Style)
+            .expect("sample graph should include style node");
+        let base = TransientViewportSelection {
+            graph_id: graph.current_graph_id().to_owned(),
+            output_node_id: output.node_id.clone(),
+            output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            record: TransientViewportRecordTarget::ViewportPickId("pick-17".to_owned()),
+        };
+
+        let pick_report = graph.resolve_transient_viewport_selection(&base);
+        assert_eq!(
+            pick_report.status,
+            TransientViewportSelectionStatus::Unsupported
+        );
+        assert!(pick_report.identities.is_empty());
+        assert!(
+            pick_report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("transient renderer state"))
+        );
+
+        let row_report = graph.resolve_transient_viewport_selection(&TransientViewportSelection {
+            record: TransientViewportRecordTarget::RowPosition(0),
+            ..base.clone()
+        });
+        assert_eq!(
+            row_report.status,
+            TransientViewportSelectionStatus::Unsupported
+        );
+        assert!(row_report.identities.is_empty());
+        assert!(
+            row_report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("transient table state"))
+        );
+
+        let screen_report =
+            graph.resolve_transient_viewport_selection(&TransientViewportSelection {
+                record: TransientViewportRecordTarget::ScreenPosition(GraphPoint::new(12.0, 42.0)),
+                ..base
+            });
+        assert_eq!(
+            screen_report.status,
+            TransientViewportSelectionStatus::Unsupported
+        );
+        assert!(screen_report.identities.is_empty());
+        assert!(
+            screen_report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("transient viewport state"))
         );
     }
 
