@@ -111,3 +111,6 @@ Deferring these surfaces keeps the product fork focused on graph-visible dataflo
 9. #278 - Complete: add native operator diagnostic recovery actions so current
    failure diagnostics can be retried through the work-item path or dismissed
    without changing trust policy, cache metadata, or output provenance.
+10. #280 - Complete: require a selected-inspector confirmation prompt before
+    changing project-wide native operator trust, then route confirmation through
+    the existing graph-owned project trust command.
