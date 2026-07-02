@@ -4600,6 +4600,78 @@ impl GraphDocument {
     }
 
     #[allow(dead_code)]
+    pub fn save_procedural_asset_definition(
+        &mut self,
+        node_index: usize,
+    ) -> Option<ProceduralAssetDefinitionSaveResult> {
+        let asset_node = self
+            .nodes
+            .get(node_index)?
+            .procedural_asset
+            .as_ref()?
+            .clone();
+        if !asset_node.contents_unlocked {
+            return None;
+        }
+
+        let declaration_index = self
+            .procedural_asset_declarations
+            .iter()
+            .position(|declaration| declaration.asset_id == asset_node.asset_id)?;
+        let previous_version = self.procedural_asset_declarations[declaration_index]
+            .version
+            .clone();
+        let new_version = next_asset_definition_version(&previous_version);
+        let graph_snapshot = self.procedural_asset_graph_snapshot();
+        let promoted_parameters = self.promotable_asset_parameters();
+        let update_available_instance_count = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(index, node)| {
+                *index != node_index
+                    && node.procedural_asset.as_ref().is_some_and(|candidate| {
+                        candidate.asset_id == asset_node.asset_id
+                            && candidate.instance_version == previous_version
+                            && !candidate.contents_unlocked
+                    })
+            })
+            .count();
+
+        {
+            let declaration = &mut self.procedural_asset_declarations[declaration_index];
+            declaration.version = new_version.clone();
+            declaration.promoted_parameters = promoted_parameters;
+            declaration.source.source_digest = Some(stable_digest(&serde_json::json!({
+                "asset_id": &declaration.asset_id,
+                "version": &declaration.version,
+                "snapshot": &graph_snapshot,
+            })));
+            declaration.wrapped_subgraph.graph_snapshot = Some(graph_snapshot);
+        }
+
+        self.refresh_asset_version_statuses();
+
+        let node = self.nodes.get_mut(node_index)?;
+        let saved_asset_node = node.procedural_asset.as_mut()?;
+        saved_asset_node.instance_version = new_version.clone();
+        saved_asset_node.version_status = OperatorVersionStatus::Current;
+        saved_asset_node.contents_unlocked = false;
+        node.evaluation.state = EvaluationState::Stale;
+        node.evaluation.message = Some(format!(
+            "Saved asset definition {} as version {}.",
+            asset_node.asset_id, new_version
+        ));
+
+        Some(ProceduralAssetDefinitionSaveResult {
+            asset_id: asset_node.asset_id,
+            previous_version,
+            new_version,
+            update_available_instance_count,
+        })
+    }
+
+    #[allow(dead_code)]
     pub fn refresh_asset_version_statuses(&mut self) {
         for node in &mut self.nodes {
             let Some(asset_node) = node.procedural_asset.as_mut() else {
@@ -4901,6 +4973,15 @@ impl GraphDocument {
             });
         }
         parameters
+    }
+
+    fn procedural_asset_graph_snapshot(&self) -> ProceduralAssetGraphSnapshot {
+        ProceduralAssetGraphSnapshot {
+            node_count: self.nodes.len(),
+            edge_count: self.graph_layout().edges.len(),
+            layer_count: self.layers.len(),
+            geometry_contract: "HoudiniGeometryRecord polygons and native cubic Beziers".to_owned(),
+        }
     }
 
     #[allow(dead_code)]
@@ -6484,6 +6565,7 @@ impl GraphDocument {
                         instance_version: asset_node.instance_version.clone(),
                         current_version: declaration.map(|declaration| declaration.version.clone()),
                         contents_unlocked: asset_node.contents_unlocked,
+                        can_save_definition: asset_node.contents_unlocked && declaration.is_some(),
                         can_match_definition: asset_node.contents_unlocked,
                         can_upgrade_to_current_definition: declaration.is_some_and(|declaration| {
                             declaration.version != asset_node.instance_version
@@ -10729,6 +10811,13 @@ pub(crate) struct CreateAssetDraft {
     pub graph_snapshot: ProceduralAssetGraphSnapshot,
 }
 
+pub(crate) struct ProceduralAssetDefinitionSaveResult {
+    pub asset_id: String,
+    pub previous_version: String,
+    pub new_version: String,
+    pub update_available_instance_count: usize,
+}
+
 impl CreateAssetDraft {
     fn into_declaration(self) -> ProceduralAssetDeclaration {
         ProceduralAssetDeclaration {
@@ -10890,6 +10979,25 @@ fn default_bundled_artifact_path(asset_id: &str, locator: &str) -> String {
         .filter(|filename| !filename.is_empty())
         .unwrap_or("artifact");
     format!("bundles/assets/{asset_slug}/artifacts/{filename}")
+}
+
+fn next_asset_definition_version(version: &str) -> String {
+    let parts = version.split('.').collect::<Vec<_>>();
+    if let [major, minor, patch] = parts.as_slice()
+        && let (Ok(major), Ok(minor), Ok(patch)) = (
+            major.parse::<u64>(),
+            minor.parse::<u64>(),
+            patch.parse::<u64>(),
+        )
+    {
+        return format!("{major}.{minor}.{}", patch + 1);
+    }
+
+    if version.trim().is_empty() || version == "unknown" {
+        "0.1.0".to_owned()
+    } else {
+        format!("{version}.1")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -12658,6 +12766,8 @@ pub(crate) struct ProceduralAssetNodeInfo {
     pub instance_version: String,
     pub current_version: Option<String>,
     pub contents_unlocked: bool,
+    #[allow(dead_code)]
+    pub can_save_definition: bool,
     #[allow(dead_code)]
     pub can_match_definition: bool,
     #[allow(dead_code)]
@@ -22009,11 +22119,85 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
     }
 
     #[test]
+    fn procedural_asset_save_definition_relocks_source_instance_and_preserves_other_pins() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .procedural_asset_declarations
+            .push(sample_procedural_asset_declaration());
+        let saved_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        let sibling_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
+        let previous_digest = graph.procedural_asset_declarations[0]
+            .source
+            .source_digest
+            .clone();
+        assert!(graph.set_procedural_asset_contents_unlocked(saved_index, true));
+
+        let unlocked_info = graph
+            .selected_node_info(saved_index)
+            .expect("asset info should exist")
+            .procedural_asset
+            .expect("asset node info should exist");
+        assert!(unlocked_info.can_save_definition);
+
+        let result = graph
+            .save_procedural_asset_definition(saved_index)
+            .expect("unlocked asset should save its definition");
+
+        assert_eq!(result.asset_id, "vy.asset.curve_cleanup");
+        assert_eq!(result.previous_version, "0.1.0");
+        assert_eq!(result.new_version, "0.1.1");
+        assert_eq!(result.update_available_instance_count, 1);
+        assert_eq!(graph.procedural_asset_declarations[0].version, "0.1.1");
+        assert_ne!(
+            graph.procedural_asset_declarations[0].source.source_digest,
+            previous_digest
+        );
+        assert_eq!(
+            graph.procedural_asset_declarations[0]
+                .wrapped_subgraph
+                .graph_snapshot
+                .as_ref()
+                .expect("saved definition should keep a graph snapshot")
+                .node_count,
+            graph.nodes.len()
+        );
+
+        let saved_info = graph
+            .selected_node_info(saved_index)
+            .expect("saved asset info should exist")
+            .procedural_asset
+            .expect("saved asset node info should exist");
+        assert_eq!(saved_info.instance_version, "0.1.1");
+        assert_eq!(saved_info.current_version.as_deref(), Some("0.1.1"));
+        assert_eq!(saved_info.version_status, OperatorVersionStatus::Current);
+        assert!(!saved_info.contents_unlocked);
+        assert!(!saved_info.can_save_definition);
+
+        let sibling_info = graph
+            .selected_node_info(sibling_index)
+            .expect("sibling asset info should exist")
+            .procedural_asset
+            .expect("sibling asset node info should exist");
+        assert_eq!(sibling_info.instance_version, "0.1.0");
+        assert_eq!(sibling_info.current_version.as_deref(), Some("0.1.1"));
+        assert_eq!(
+            sibling_info.version_status,
+            OperatorVersionStatus::NewerAvailable
+        );
+        assert!(sibling_info.can_upgrade_to_current_definition);
+    }
+
+    #[test]
     fn asset_instance_actions_reject_missing_or_current_definitions() {
         let mut graph = GraphDocument::sample();
         let missing_index = graph.add_procedural_asset_node("vy.asset.missing");
         assert!(!graph.match_procedural_asset_definition(missing_index));
         assert!(!graph.upgrade_procedural_asset_to_current_definition(missing_index));
+        assert!(
+            graph
+                .save_procedural_asset_definition(missing_index)
+                .is_none()
+        );
 
         graph
             .procedural_asset_declarations
@@ -22021,6 +22205,11 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         let current_index = graph.add_procedural_asset_node("vy.asset.curve_cleanup");
         assert!(!graph.match_procedural_asset_definition(current_index));
         assert!(!graph.upgrade_procedural_asset_to_current_definition(current_index));
+        assert!(
+            graph
+                .save_procedural_asset_definition(current_index)
+                .is_none()
+        );
     }
 
     #[test]
