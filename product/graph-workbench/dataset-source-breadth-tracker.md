@@ -44,7 +44,7 @@ for the dataset/source breadth lane.
 | `#244` | complete | Source gallery view PRD | Adds a product PRD for a Houdini workbench gallery that browses local or URL-backed source collections, renders image thumbnails or generic typed thumbnails, and defines explicit follow-up actions for Rerun views and graph source nodes. |
 | `#245` | complete | Source gallery indexing model | Normalizes bounded local paths, explicit URLs, and manifest-like source lists into stable gallery item records with locator, kind, capability, availability, and thumbnail intent without live network fetches or graph mutation. |
 | `#246` | complete | Source gallery thumbnail intents | Distinguishes image thumbnail intents from generic typed thumbnails for tables, polygon tables, recordings, point clouds, manifests, missing entries, unknown sources, and runtime-only thumbnail cache state. |
-| `#247` | planned | Source Gallery workbench view | Register a movable Gallery view that presents the source gallery index, filters, selection, and selected-item metadata. |
+| `#247` | complete | Source Gallery workbench view | Registers a movable Gallery workbench view that presents source entry controls, manifest input, filtered thumbnail tiles, selection, and selected-item metadata. |
 | `#248` | planned | Source-gallery open-in-Rerun actions | Add explicit context actions for supported selected items to route through suitable Rerun-native image, 2D, or recording pathways. |
 | `#249` | planned | Source-gallery source-node actions | Add explicit graph-owned source node and source collection node creation actions from selected gallery entries. |
 
