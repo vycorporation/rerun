@@ -271,6 +271,7 @@ enum OperatorPaletteAction {
     AddReference,
     AddRepairProjection,
     DuplicateSelected,
+    CollapseSelectionToSubnet,
     AddNetworkBox,
     AddStickyNote,
     DuplicatePolygons,
@@ -778,7 +779,12 @@ impl HoudiniGraphPanel {
         action: OperatorPaletteAction,
         label: &str,
     ) {
-        if !operator_palette_action_available(graph, self.selected_node, action) {
+        if !operator_palette_action_available(
+            graph,
+            self.selected_node,
+            &self.selected_nodes,
+            action,
+        ) {
             return;
         }
         let entry = operator_palette_entry(action);
@@ -794,7 +800,12 @@ impl HoudiniGraphPanel {
         graph: &mut GraphDocument,
         action: OperatorPaletteAction,
     ) {
-        if !operator_palette_action_available(graph, self.selected_node, action) {
+        if !operator_palette_action_available(
+            graph,
+            self.selected_node,
+            &self.selected_nodes,
+            action,
+        ) {
             return;
         }
         let entry = operator_palette_entry(action);
@@ -833,7 +844,12 @@ impl HoudiniGraphPanel {
                         ) {
                             continue;
                         }
-                        if !operator_palette_action_available(graph, self.selected_node, action) {
+                        if !operator_palette_action_available(
+                            graph,
+                            self.selected_node,
+                            &self.selected_nodes,
+                            action,
+                        ) {
                             continue;
                         }
                         let entry = operator_palette_entry(action);
@@ -853,6 +869,7 @@ impl HoudiniGraphPanel {
         let entries = operator_palette_entries(
             graph,
             self.selected_node,
+            &self.selected_nodes,
             options.include_organization,
             options.include_layers,
         );
@@ -918,6 +935,7 @@ impl HoudiniGraphPanel {
         let entries = operator_palette_entries(
             graph,
             self.selected_node,
+            &self.selected_nodes,
             include_organization,
             include_layers,
         );
@@ -979,6 +997,9 @@ impl HoudiniGraphPanel {
                 } else {
                     false
                 }
+            }
+            OperatorPaletteAction::CollapseSelectionToSubnet => {
+                self.collapse_selected_nodes_to_graph_container(graph)
             }
             OperatorPaletteAction::AddNetworkBox => {
                 self.selected_annotation = graph.add_network_box_for_node(self.selected_node);
@@ -1378,16 +1399,7 @@ impl HoudiniGraphPanel {
     }
 
     fn collapsible_selected_node_set(&self, graph: &GraphDocument) -> Vec<usize> {
-        self.selected_nodes
-            .iter()
-            .copied()
-            .filter(|node_index| {
-                graph.nodes.get(*node_index).is_some_and(|node| {
-                    node.parent_graph_id == graph.current_graph_id()
-                        && !matches!(node.kind, NodeKind::Output | NodeKind::GraphContainer)
-                })
-            })
-            .collect()
+        collapsible_node_indices_for_selection(graph, &self.selected_nodes)
     }
 
     fn selected_node_can_collapse_to_graph_container(&self, graph: &GraphDocument) -> bool {
@@ -5685,9 +5697,26 @@ fn operator_matches(filter: &str, label: &str, aliases: &[&str]) -> bool {
         || aliases.iter().any(|alias| alias.contains(filter))
 }
 
+fn collapsible_node_indices_for_selection(
+    graph: &GraphDocument,
+    selected_nodes: &[usize],
+) -> Vec<usize> {
+    selected_nodes
+        .iter()
+        .copied()
+        .filter(|node_index| {
+            graph.nodes.get(*node_index).is_some_and(|node| {
+                node.parent_graph_id == graph.current_graph_id()
+                    && !matches!(node.kind, NodeKind::Output | NodeKind::GraphContainer)
+            })
+        })
+        .collect()
+}
+
 fn operator_palette_entries(
     graph: &GraphDocument,
     selected_node: usize,
+    selected_nodes: &[usize],
     include_organization: bool,
     include_layers: bool,
 ) -> Vec<OperatorPaletteEntry> {
@@ -5707,6 +5736,16 @@ fn operator_palette_entries(
     entries.push(operator_palette_entry(
         OperatorPaletteAction::DuplicateSelected,
     ));
+    if operator_palette_action_available(
+        graph,
+        selected_node,
+        selected_nodes,
+        OperatorPaletteAction::CollapseSelectionToSubnet,
+    ) {
+        entries.push(operator_palette_entry(
+            OperatorPaletteAction::CollapseSelectionToSubnet,
+        ));
+    }
 
     if include_organization {
         entries.extend([
@@ -5728,6 +5767,7 @@ fn operator_palette_entries(
 fn operator_palette_action_available(
     graph: &GraphDocument,
     selected_node: usize,
+    selected_nodes: &[usize],
     action: OperatorPaletteAction,
 ) -> bool {
     match action {
@@ -5735,6 +5775,9 @@ fn operator_palette_action_available(
             .reference_coordinate_repair_summary(selected_node)
             .is_some(),
         OperatorPaletteAction::DuplicateSelected => selected_node < graph.nodes.len(),
+        OperatorPaletteAction::CollapseSelectionToSubnet => {
+            collapsible_node_indices_for_selection(graph, selected_nodes).len() > 1
+        }
         OperatorPaletteAction::AddOutNull
         | OperatorPaletteAction::AddReference
         | OperatorPaletteAction::AddNetworkBox
@@ -5785,6 +5828,19 @@ fn operator_palette_entry(action: OperatorPaletteAction) -> OperatorPaletteEntry
             label: "Duplicate Selected",
             detail: "Duplicate the selected node with a new stable node identity.",
             aliases: &["copy", "paste", "clone"],
+        },
+        OperatorPaletteAction::CollapseSelectionToSubnet => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::Create,
+            label: "Subnet from Selection",
+            detail: "Move the selected node set into a typed graph container.",
+            aliases: &[
+                "subnet",
+                "collapse",
+                "graph container",
+                "digital asset",
+                "asset",
+            ],
         },
         OperatorPaletteAction::AddNetworkBox => OperatorPaletteEntry {
             action,
@@ -6811,10 +6867,11 @@ fn draw_arrowhead(painter: &egui::Painter, tip: Pos2, color: Color32) {
 mod tests {
     use super::{
         ConnectionDragPreview, ConnectionDragState, GraphSearchTarget, HoudiniGraphPanel,
-        NodePortKind, connection_drag_preview, distance_to_segment, graph_edge_at,
-        layout_node_rects,
+        NodePortKind, OperatorPaletteAction, connection_drag_preview, distance_to_segment,
+        graph_edge_at, layout_node_rects,
         model::{GraphContainerStatus, NodeKind, ProjectGraphMetadata, ProjectGraphRole},
         node_indices_in_selection_rect, node_primary_port_at, node_primary_port_rect,
+        operator_palette_action_available, operator_palette_entries,
     };
     use crate::ui::houdini_graph_panel::model::{GraphDocument, PRIMARY_GEOMETRY_OUTPUT};
 
@@ -7130,6 +7187,57 @@ mod tests {
                 .graph_container_status
                 .as_deref()
                 .is_some_and(|status| status.contains("Collapsed 2 selected nodes"))
+        );
+    }
+
+    #[test]
+    fn operator_palette_exposes_subnet_action_for_selected_node_set() {
+        let graph = GraphDocument::sample();
+        let selected_nodes = vec![1, 2];
+
+        assert!(operator_palette_action_available(
+            &graph,
+            1,
+            &selected_nodes,
+            OperatorPaletteAction::CollapseSelectionToSubnet,
+        ));
+        assert!(!operator_palette_action_available(
+            &graph,
+            1,
+            &[1],
+            OperatorPaletteAction::CollapseSelectionToSubnet,
+        ));
+
+        let entries = operator_palette_entries(&graph, 1, &selected_nodes, true, false);
+        let subnet_entry = entries
+            .iter()
+            .find(|entry| entry.action == OperatorPaletteAction::CollapseSelectionToSubnet)
+            .expect("selected node set should expose subnet action");
+
+        assert_eq!(subnet_entry.label, "Subnet from Selection");
+        assert!(subnet_entry.aliases.contains(&"subnet"));
+        assert!(subnet_entry.aliases.contains(&"digital asset"));
+    }
+
+    #[test]
+    fn operator_palette_subnet_action_collapses_selected_node_set() {
+        let mut graph = GraphDocument::sample();
+        let mut panel = HoudiniGraphPanel::default();
+        panel.set_selected_node_set(vec![1, 2]);
+
+        assert!(panel.apply_operator_palette_action(
+            &mut graph,
+            OperatorPaletteAction::CollapseSelectionToSubnet,
+        ));
+
+        assert_eq!(
+            graph.nodes[panel.selected_node].kind,
+            NodeKind::GraphContainer
+        );
+        assert_eq!(panel.selected_nodes, vec![panel.selected_node]);
+        assert_eq!(
+            panel.operator_history.first(),
+            Some(&OperatorPaletteAction::CollapseSelectionToSubnet)
         );
     }
 
