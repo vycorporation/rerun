@@ -274,6 +274,7 @@ enum OperatorPaletteAction {
     CollapseSelectionToSubnet,
     EnterSelectedSubnet,
     GoUpOneGraph,
+    CreateAssetFromSelectedSubnet,
     AddNetworkBox,
     AddStickyNote,
     DuplicatePolygons,
@@ -1015,6 +1016,9 @@ impl HoudiniGraphPanel {
                 self.enter_selected_graph_container(graph)
             }
             OperatorPaletteAction::GoUpOneGraph => self.exit_current_graph_to_parent(graph),
+            OperatorPaletteAction::CreateAssetFromSelectedSubnet => {
+                self.create_asset_from_selected_graph_container(graph)
+            }
             OperatorPaletteAction::AddNetworkBox => {
                 self.selected_annotation = graph.add_network_box_for_node(self.selected_node);
                 self.show_graph_workbench_pane(GraphWorkbenchPane::Operators);
@@ -2960,10 +2964,8 @@ impl HoudiniGraphPanel {
             let asset_id = graph.commit_asset_draft(draft);
             self.asset_status = Some(format!("Created project asset: {asset_id}"));
         }
-        let selected_graph_container = graph
-            .nodes
-            .get(self.selected_node)
-            .is_some_and(|node| node.kind == NodeKind::GraphContainer);
+        let selected_graph_container =
+            self.selected_node_can_create_asset_from_graph_container(graph);
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
@@ -2973,25 +2975,7 @@ impl HoudiniGraphPanel {
                 .on_hover_text("Create a project-local asset definition from the selected graph container boundary.")
                 .clicked()
             {
-                match graph.create_asset_draft_from_graph_container(
-                    self.selected_node,
-                    self.asset_name.trim(),
-                    self.asset_description.trim(),
-                    self.asset_help.trim(),
-                ) {
-                    Ok(draft) => {
-                        let asset_id = graph.commit_asset_draft(draft);
-                        self.asset_status = Some(format!(
-                            "Created project asset from selected subnet: {asset_id}"
-                        ));
-                    }
-                    Err(err) => {
-                        self.asset_status = Some(format!(
-                            "Subnet asset creation failed: {}.",
-                            graph_container_asset_draft_error_message(&err)
-                        ));
-                    }
-                }
+                self.create_asset_from_selected_graph_container(graph);
             }
             if !selected_graph_container {
                 ui.weak("Select a subnet to create an asset from its boundary.");
@@ -3066,6 +3050,38 @@ impl HoudiniGraphPanel {
         }
         if let Some(status) = &self.asset_status {
             ui.weak(status);
+        }
+    }
+
+    fn selected_node_can_create_asset_from_graph_container(&self, graph: &GraphDocument) -> bool {
+        graph
+            .selected_node_info(self.selected_node)
+            .and_then(|info| info.graph_container)
+            .is_some_and(|container| container.navigable && !container.outputs.is_empty())
+    }
+
+    fn create_asset_from_selected_graph_container(&mut self, graph: &mut GraphDocument) -> bool {
+        match graph.create_asset_draft_from_graph_container(
+            self.selected_node,
+            self.asset_name.trim(),
+            self.asset_description.trim(),
+            self.asset_help.trim(),
+        ) {
+            Ok(draft) => {
+                let asset_id = graph.commit_asset_draft(draft);
+                self.asset_status = Some(format!(
+                    "Created project asset from selected subnet: {asset_id}"
+                ));
+                self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
+                true
+            }
+            Err(err) => {
+                self.asset_status = Some(format!(
+                    "Subnet asset creation failed: {}.",
+                    graph_container_asset_draft_error_message(&err)
+                ));
+                false
+            }
         }
     }
 
@@ -4423,6 +4439,11 @@ impl HoudiniGraphPanel {
             graph,
             OperatorPaletteAction::GoUpOneGraph,
             "Go Up    U",
+        );
+        self.operator_menu_action_ui(
+            ui,
+            graph,
+            OperatorPaletteAction::CreateAssetFromSelectedSubnet,
         );
         if ui.button("Run Selected").clicked() {
             graph.request_node_run(self.selected_node);
@@ -5853,6 +5874,16 @@ fn operator_palette_entries(
         graph,
         selected_node,
         selected_nodes,
+        OperatorPaletteAction::CreateAssetFromSelectedSubnet,
+    ) {
+        entries.push(operator_palette_entry(
+            OperatorPaletteAction::CreateAssetFromSelectedSubnet,
+        ));
+    }
+    if operator_palette_action_available(
+        graph,
+        selected_node,
+        selected_nodes,
         OperatorPaletteAction::CollapseSelectionToSubnet,
     ) {
         entries.push(operator_palette_entry(
@@ -5898,6 +5929,10 @@ fn operator_palette_action_available(
         OperatorPaletteAction::GoUpOneGraph => {
             graph.current_graph_parent_container_node_index().is_some()
         }
+        OperatorPaletteAction::CreateAssetFromSelectedSubnet => graph
+            .selected_node_info(selected_node)
+            .and_then(|info| info.graph_container)
+            .is_some_and(|container| container.navigable && !container.outputs.is_empty()),
         OperatorPaletteAction::AddOutNull
         | OperatorPaletteAction::AddReference
         | OperatorPaletteAction::AddNetworkBox
@@ -5976,6 +6011,13 @@ fn operator_palette_entry(action: OperatorPaletteAction) -> OperatorPaletteEntry
             label: "Go Up",
             detail: "Return to the parent graph and select the containing subnet.",
             aliases: &["up", "parent", "out", "back", "network"],
+        },
+        OperatorPaletteAction::CreateAssetFromSelectedSubnet => OperatorPaletteEntry {
+            action,
+            category: OperatorPaletteCategory::Create,
+            label: "Asset from Subnet",
+            detail: "Create a project-local asset definition from the selected subnet boundary.",
+            aliases: &["asset", "hda", "digital asset", "definition", "subnet"],
         },
         OperatorPaletteAction::AddNetworkBox => OperatorPaletteEntry {
             action,
@@ -7438,6 +7480,47 @@ mod tests {
         assert_eq!(graph.current_graph_id(), "main");
         assert_eq!(panel.selected_node, container_index);
         assert_eq!(panel.selected_nodes, vec![container_index]);
+    }
+
+    #[test]
+    fn operator_palette_creates_asset_from_selected_subnet() {
+        let mut graph = GraphDocument::sample();
+        let mut panel = HoudiniGraphPanel::default();
+        panel.set_selected_node_set(vec![1, 2]);
+        assert!(panel.apply_operator_palette_action(
+            &mut graph,
+            OperatorPaletteAction::CollapseSelectionToSubnet,
+        ));
+        let container_index = panel.selected_node;
+
+        assert!(operator_palette_action_available(
+            &graph,
+            container_index,
+            &panel.selected_nodes,
+            OperatorPaletteAction::CreateAssetFromSelectedSubnet,
+        ));
+        assert!(panel.apply_operator_palette_action(
+            &mut graph,
+            OperatorPaletteAction::CreateAssetFromSelectedSubnet,
+        ));
+
+        assert_eq!(graph.procedural_asset_declarations.len(), 1);
+        assert_eq!(
+            graph.procedural_asset_declarations[0].asset_id,
+            "project.asset.curve_cleanup"
+        );
+        assert_eq!(
+            graph.procedural_asset_declarations[0]
+                .wrapped_subgraph
+                .graph_id,
+            "graph.filter_selection_subnet"
+        );
+        assert!(
+            panel
+                .asset_status
+                .as_deref()
+                .is_some_and(|status| status.contains("Created project asset from selected subnet"))
+        );
     }
 
     #[test]
