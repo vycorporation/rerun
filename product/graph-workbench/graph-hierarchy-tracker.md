@@ -48,6 +48,7 @@ for the graph hierarchy lane.
 | `#178` | complete | Graph-path reference delete warnings | Adds readable target node paths to reference output change warnings so delete/edit warnings disambiguate graph-local names. |
 | `#216` | complete | Selected-node graph container collapse UI | Adds workbench and node context-menu commands that collapse the current non-output, non-container node into a navigable typed graph container using the physical graph-container storage path without faking multi-selection. |
 | `#220` | complete | Graph container asset draft promotion | Creates project-local procedural asset drafts from resolved graph containers, preserving typed boundaries, internal graph references, and graph-scoped promoted parameters. |
+| `#222` | complete | Drag marquee multi-select for subnet creation | Adds empty-canvas marquee selection for graph nodes and a Collapse Selection to Subnet command that routes multi-node selections through the existing graph-owned physical collapse path. |
 
 ## Next implementation candidates
 
@@ -75,6 +76,8 @@ for the graph hierarchy lane.
      currently selected node while leaving multi-selection as a later UI layer.
    - `#220` lets resolved graph containers become procedural asset drafts
      without treating network boxes or viewport selection as asset boundaries.
+   - `#222` adds graph-node marquee multi-selection and routes multi-node
+     selected sets into the same physical graph container collapse path.
    - Keep selected-node collapse separate from network box organization.
 
 3. Typed graph boundary inputs and outputs.
