@@ -4,7 +4,12 @@ use egui::{
     Align2, Color32, DragValue, FontId, Pos2, Rect, Response, Sense, Slider, Stroke, StrokeKind,
     Ui, Vec2,
 };
+use re_log_channel::RecordingOpenBehavior;
 use re_ui::UiExt as _;
+use re_viewer_context::{
+    ViewerContext,
+    open_url::{OpenUrlOptions, ViewerOpenUrl},
+};
 
 pub(crate) mod model;
 
@@ -415,8 +420,28 @@ impl HoudiniGraphPanel {
         self.show_workbench_view(ui, shared_graph, GraphWorkbenchPane::Assets);
     }
 
-    pub(crate) fn show_gallery_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
-        self.show_workbench_view(ui, shared_graph, GraphWorkbenchPane::Gallery);
+    pub(crate) fn show_gallery_view(
+        &mut self,
+        ui: &mut Ui,
+        shared_graph: &SharedHoudiniGraph,
+        viewer_ctx: Option<&ViewerContext<'_>>,
+    ) {
+        self.active_graph_pane = GraphWorkbenchPane::Gallery;
+        install_shared_houdini_graph(ui.ctx(), shared_graph);
+        let mut graph = lock_houdini_graph(shared_graph);
+        egui::Frame {
+            inner_margin: egui::Margin::same(8),
+            ..Default::default()
+        }
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("houdini_graph_workbench_view_Gallery")
+                .auto_shrink([false, false])
+                .max_height(ui.available_height().max(240.0))
+                .show(ui, |ui| {
+                    self.source_gallery_ui(ui, &mut graph, viewer_ctx);
+                });
+        });
     }
 
     pub(crate) fn show_data_view(&mut self, ui: &mut Ui, shared_graph: &SharedHoudiniGraph) {
@@ -2088,7 +2113,7 @@ impl HoudiniGraphPanel {
                 self.asset_gallery_ui(ui, graph);
             }
             GraphWorkbenchPane::Gallery => {
-                self.source_gallery_ui(ui, graph);
+                self.source_gallery_ui(ui, graph, None);
             }
             GraphWorkbenchPane::Parameters => {
                 self.selected_node_controls_ui(ui, graph);
@@ -3297,7 +3322,12 @@ impl HoudiniGraphPanel {
         }
     }
 
-    fn source_gallery_ui(&mut self, ui: &mut Ui, _graph: &mut GraphDocument) {
+    fn source_gallery_ui(
+        &mut self,
+        ui: &mut Ui,
+        _graph: &mut GraphDocument,
+        viewer_ctx: Option<&ViewerContext<'_>>,
+    ) {
         ui.strong("Source Gallery");
         ui.add_space(4.0);
 
@@ -3408,8 +3438,74 @@ impl HoudiniGraphPanel {
             .as_deref()
             .or_else(|| filtered_items.first().map(|item| item.stable_id.as_str()));
         if let Some(selected_item) = source_gallery_selected_item(index, selected_id) {
+            let selected_item = selected_item.clone();
             ui.add_space(8.0);
-            self.source_gallery_metadata_ui(ui, selected_item);
+            self.source_gallery_actions_ui(ui, &selected_item, viewer_ctx);
+            ui.add_space(4.0);
+            self.source_gallery_metadata_ui(ui, &selected_item);
+        }
+    }
+
+    fn source_gallery_actions_ui(
+        &mut self,
+        ui: &mut Ui,
+        item: &SourceGalleryItem,
+        viewer_ctx: Option<&ViewerContext<'_>>,
+    ) {
+        let action = item.open_action_report();
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(action.enabled, egui::Button::new(action.label))
+                .on_hover_text(&action.status)
+                .clicked()
+            {
+                self.execute_source_gallery_open_action(item, viewer_ctx);
+            }
+            ui.weak(&action.status);
+        });
+    }
+
+    fn execute_source_gallery_open_action(
+        &mut self,
+        item: &SourceGalleryItem,
+        viewer_ctx: Option<&ViewerContext<'_>>,
+    ) -> bool {
+        let action = item.open_action_report();
+        if !action.enabled {
+            self.source_gallery_status = Some(action.status);
+            return false;
+        }
+
+        let Some(viewer_ctx) = viewer_ctx else {
+            self.source_gallery_status =
+                Some("Source action requires an active Rerun viewer context.".to_owned());
+            return false;
+        };
+
+        let locator = item.locator.readable();
+        let options = re_data_source::FromUriOptions {
+            follow: false,
+            accept_extensionless_http: false,
+        };
+        match ViewerOpenUrl::parse_with_options(&locator, &options) {
+            Ok(open_url) => {
+                open_url.open(
+                    viewer_ctx.egui_ctx(),
+                    &OpenUrlOptions {
+                        follow: false,
+                        recording_open_behavior: RecordingOpenBehavior::OpenAndSelect,
+                        show_loader: true,
+                    },
+                    viewer_ctx.command_sender(),
+                );
+                self.source_gallery_status = Some(format!("Requested {}: {locator}", action.label));
+                true
+            }
+            Err(error) => {
+                self.source_gallery_status =
+                    Some(format!("Cannot open `{locator}` in Rerun: {error}"));
+                false
+            }
         }
     }
 
@@ -8052,6 +8148,37 @@ mod tests {
             .expect("selected source gallery item should resolve by stable id");
         assert_eq!(selected.display_name, "polygons.geoparquet");
         assert!(source_gallery_selected_item(&index, Some("missing")).is_none());
+    }
+
+    #[test]
+    fn source_gallery_disabled_open_action_does_not_mutate_graph_state() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing_path = temp_dir.path().join("missing.png");
+        let index = SourceGalleryIndex::from_locator(
+            SourceLocator::from_location(&missing_path.display().to_string()),
+            16,
+        );
+        let item = index
+            .items
+            .first()
+            .expect("missing source should be indexed");
+        let graph = GraphDocument::sample();
+        let undo_count_before = graph.command_history.undo_stack.len();
+        let redo_count_before = graph.command_history.redo_stack.len();
+        let node_count_before = graph.nodes.len();
+        let mut panel = HoudiniGraphPanel::default();
+
+        assert!(!panel.execute_source_gallery_open_action(item, None));
+
+        assert_eq!(graph.command_history.undo_stack.len(), undo_count_before);
+        assert_eq!(graph.command_history.redo_stack.len(), redo_count_before);
+        assert_eq!(graph.nodes.len(), node_count_before);
+        assert!(
+            panel
+                .source_gallery_status
+                .as_deref()
+                .is_some_and(|status| status.contains("missing"))
+        );
     }
 
     #[test]

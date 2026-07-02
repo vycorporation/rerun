@@ -458,13 +458,6 @@ houdini_workbench_view_class!(
     show_assets_view
 );
 houdini_workbench_view_class!(
-    HoudiniGalleryView,
-    "HoudiniGallery",
-    "Gallery",
-    "Source gallery for local and URL-backed files and manifests.",
-    show_gallery_view
-);
-houdini_workbench_view_class!(
     HoudiniShelfView,
     "HoudiniShelf",
     "Shelf",
@@ -478,6 +471,83 @@ houdini_workbench_view_class!(
     "Work items for demand-driven Houdini graph evaluation.",
     show_execution_view
 );
+
+impl ViewClass for HoudiniGalleryView {
+    fn identifier() -> ViewClassIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewClassIdentifier,
+            "HoudiniGallery"
+        )
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Gallery"
+    }
+
+    fn default_spawned_display_name(&self) -> Option<&'static str> {
+        Some("Gallery")
+    }
+
+    fn default_spawned_tab_group(&self) -> Option<&'static str> {
+        Some("Inspector")
+    }
+
+    fn is_experimental(&self) -> bool {
+        true
+    }
+
+    fn icon(&self) -> &'static re_ui::Icon {
+        &icons::VIEW_GENERIC
+    }
+
+    fn help(&self, _os: egui::os::OperatingSystem) -> Help {
+        Help::new("Gallery")
+            .markdown("Source gallery for local and URL-backed files and manifests.")
+    }
+
+    fn on_register(
+        &self,
+        _system_registry: &mut ViewSystemRegistrator<'_>,
+    ) -> Result<(), ViewClassRegistryError> {
+        Ok(())
+    }
+
+    fn new_state(&self) -> Box<dyn ViewState> {
+        Box::<HoudiniPanelViewState>::default()
+    }
+
+    fn preferred_tile_aspect_ratio(&self, _state: &dyn ViewState) -> Option<f32> {
+        Some(4.0 / 5.0)
+    }
+
+    fn layout_priority(&self) -> ViewClassLayoutPriority {
+        ViewClassLayoutPriority::Medium
+    }
+
+    fn spawn_heuristics(
+        &self,
+        _ctx: &ViewerContext<'_>,
+        _include_entity: &dyn Fn(&EntityPath) -> bool,
+    ) -> ViewSpawnHeuristics {
+        ViewSpawnHeuristics::root().with_max_views_spawned(1)
+    }
+
+    fn ui(
+        &self,
+        ctx: &ViewerContext<'_>,
+        _missing_chunk_reporter: &re_viewer_context::MissingChunkReporter,
+        ui: &mut egui::Ui,
+        state: &mut dyn ViewState,
+        _query: &ViewQuery<'_>,
+        _system_output: SystemExecutionOutput,
+    ) -> Result<(), ViewSystemExecutionError> {
+        state.downcast_ref::<HoudiniPanelViewState>()?;
+        show_houdini_panel_view(ui, |panel, ui, graph| {
+            panel.show_gallery_view(ui, graph, Some(ctx));
+        });
+        Ok(())
+    }
+}
 
 impl ViewClass for HoudiniDataView {
     fn identifier() -> ViewClassIdentifier {

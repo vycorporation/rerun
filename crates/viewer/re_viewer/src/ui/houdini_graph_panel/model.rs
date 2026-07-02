@@ -8331,6 +8331,100 @@ impl SourceGalleryItem {
             format_support_status: format_report.support_status,
         }
     }
+
+    pub fn open_action_report(&self) -> SourceGalleryOpenActionReport {
+        SourceGalleryOpenActionReport::from_item(self)
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceGalleryOpenActionReport {
+    pub kind: SourceGalleryOpenActionKind,
+    pub enabled: bool,
+    pub label: &'static str,
+    pub status: String,
+}
+
+#[allow(dead_code)]
+impl SourceGalleryOpenActionReport {
+    fn from_item(item: &SourceGalleryItem) -> Self {
+        if item.external_reference_status == SourceExternalReferenceStatus::LocalMissing {
+            return Self::disabled(
+                SourceGalleryOpenActionKind::Unavailable,
+                "Open in Rerun",
+                "Source is missing on this machine.",
+            );
+        }
+
+        match item.kind {
+            SourceGalleryItemKind::Image => Self::enabled(
+                SourceGalleryOpenActionKind::OpenImage2D,
+                "Open Image",
+                "Open through Rerun's file/URL loader and let the viewer select the image view.",
+            ),
+            SourceGalleryItemKind::Recording => Self::enabled(
+                SourceGalleryOpenActionKind::OpenRecording,
+                "Open Recording",
+                "Open this .rrd through the existing Rerun recording loader.",
+            ),
+            SourceGalleryItemKind::LiveRecording => Self::disabled(
+                SourceGalleryOpenActionKind::AlreadyLive,
+                "Open Recording",
+                "Live recording query sources are already viewer inputs.",
+            ),
+            SourceGalleryItemKind::Table
+            | SourceGalleryItemKind::PolygonTable
+            | SourceGalleryItemKind::PointCloud => Self::disabled(
+                SourceGalleryOpenActionKind::Unsupported,
+                "Open in Rerun",
+                "This source type is cataloged here but is not opened directly by the gallery yet.",
+            ),
+            SourceGalleryItemKind::Manifest => Self::disabled(
+                SourceGalleryOpenActionKind::Unsupported,
+                "Open Manifest",
+                "Use the manifest as a gallery source; individual manifest items can be opened.",
+            ),
+            SourceGalleryItemKind::Generated => Self::disabled(
+                SourceGalleryOpenActionKind::Unavailable,
+                "Open in Rerun",
+                "Generated sources do not have an external locator to open.",
+            ),
+            SourceGalleryItemKind::Unknown => Self::disabled(
+                SourceGalleryOpenActionKind::Unsupported,
+                "Open in Rerun",
+                "Unknown source format cannot be opened directly from the gallery.",
+            ),
+        }
+    }
+
+    fn enabled(kind: SourceGalleryOpenActionKind, label: &'static str, status: &str) -> Self {
+        Self {
+            kind,
+            enabled: true,
+            label,
+            status: status.to_owned(),
+        }
+    }
+
+    fn disabled(kind: SourceGalleryOpenActionKind, label: &'static str, status: &str) -> Self {
+        Self {
+            kind,
+            enabled: false,
+            label,
+            status: status.to_owned(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceGalleryOpenActionKind {
+    OpenImage2D,
+    OpenRecording,
+    AlreadyLive,
+    Unsupported,
+    Unavailable,
 }
 
 #[allow(dead_code)]
@@ -14523,9 +14617,10 @@ mod tests {
         SourceExternalReferenceActionKind, SourceExternalReferenceStatus,
         SourceFormatInferenceStatus, SourceFormatKind, SourceFormatSupportStatus,
         SourceGalleryDecodedThumbnail, SourceGalleryIndex, SourceGalleryItemKind,
-        SourceGalleryManifestError, SourceGalleryThumbnailCache, SourceGalleryThumbnailCacheState,
-        SourceGalleryThumbnailIntent, SourceGalleryThumbnailStatus, SourceLocator,
-        SourceLocatorKind, SourcePackageManifestArtifactRole, SourcePackageManifestExternalStatus,
+        SourceGalleryManifestError, SourceGalleryOpenActionKind, SourceGalleryThumbnailCache,
+        SourceGalleryThumbnailCacheState, SourceGalleryThumbnailIntent,
+        SourceGalleryThumbnailStatus, SourceLocator, SourceLocatorKind,
+        SourcePackageManifestArtifactRole, SourcePackageManifestExternalStatus,
         SourcePackageManifestInclusionChoice, SourcePackageManifestPreview, SourceProvenance,
         SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
         load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
@@ -21825,6 +21920,103 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             unknown.thumbnail_intent.status(),
             SourceGalleryThumbnailStatus::GenericOnly
         );
+    }
+
+    #[test]
+    fn source_gallery_open_actions_follow_kind_and_availability() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let image_path = temp_dir.path().join("frame.png");
+        let recording_path = temp_dir.path().join("scene.rrd");
+        let table_path = temp_dir.path().join("curves.parquet");
+        let missing_path = temp_dir.path().join("missing.png");
+        std::fs::write(&image_path, b"image placeholder").unwrap();
+        std::fs::write(&recording_path, b"rrd placeholder").unwrap();
+        std::fs::write(&table_path, b"parquet placeholder").unwrap();
+
+        let index = SourceGalleryIndex::from_locations(
+            SourceLocator::from_location("inline-gallery"),
+            vec![
+                SourceLocator::from_location(&image_path.display().to_string()),
+                SourceLocator::from_location(&recording_path.display().to_string()),
+                SourceLocator::from_location(&table_path.display().to_string()),
+                SourceLocator::from_location(&missing_path.display().to_string()),
+                SourceLocator::from_location("https://example.test/frame.png"),
+                SourceLocator::generated("synthetic source"),
+            ],
+            16,
+        );
+
+        let image = index
+            .items
+            .iter()
+            .find(|item| {
+                item.display_name == "frame.png"
+                    && item.locator.kind == SourceLocatorKind::LocalPath
+            })
+            .unwrap();
+        let image_action = image.open_action_report();
+        assert!(image_action.enabled);
+        assert_eq!(image_action.kind, SourceGalleryOpenActionKind::OpenImage2D);
+
+        let remote_image = index
+            .items
+            .iter()
+            .find(|item| item.locator.readable() == "https://example.test/frame.png")
+            .unwrap();
+        let remote_action = remote_image.open_action_report();
+        assert!(remote_action.enabled);
+        assert_eq!(remote_action.kind, SourceGalleryOpenActionKind::OpenImage2D);
+        assert_eq!(
+            remote_image.external_reference_status,
+            SourceExternalReferenceStatus::UriUnverified
+        );
+
+        let recording = index
+            .items
+            .iter()
+            .find(|item| item.display_name == "scene.rrd")
+            .unwrap();
+        let recording_action = recording.open_action_report();
+        assert!(recording_action.enabled);
+        assert_eq!(
+            recording_action.kind,
+            SourceGalleryOpenActionKind::OpenRecording
+        );
+
+        let table = index
+            .items
+            .iter()
+            .find(|item| item.display_name == "curves.parquet")
+            .unwrap();
+        let table_action = table.open_action_report();
+        assert!(!table_action.enabled);
+        assert_eq!(table_action.kind, SourceGalleryOpenActionKind::Unsupported);
+
+        let missing = index
+            .items
+            .iter()
+            .find(|item| item.display_name == "missing.png")
+            .unwrap();
+        let missing_action = missing.open_action_report();
+        assert!(!missing_action.enabled);
+        assert_eq!(
+            missing_action.kind,
+            SourceGalleryOpenActionKind::Unavailable
+        );
+        assert!(missing_action.status.contains("missing"));
+
+        let generated = index
+            .items
+            .iter()
+            .find(|item| item.display_name == "synthetic source")
+            .unwrap();
+        let generated_action = generated.open_action_report();
+        assert!(!generated_action.enabled);
+        assert_eq!(
+            generated_action.kind,
+            SourceGalleryOpenActionKind::Unavailable
+        );
+        assert!(generated_action.status.contains("external locator"));
     }
 
     #[test]

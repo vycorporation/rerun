@@ -45,7 +45,7 @@ for the dataset/source breadth lane.
 | `#245` | complete | Source gallery indexing model | Normalizes bounded local paths, explicit URLs, and manifest-like source lists into stable gallery item records with locator, kind, capability, availability, and thumbnail intent without live network fetches or graph mutation. |
 | `#246` | complete | Source gallery thumbnail intents | Distinguishes image thumbnail intents from generic typed thumbnails for tables, polygon tables, recordings, point clouds, manifests, missing entries, unknown sources, and runtime-only thumbnail cache state. |
 | `#247` | complete | Source Gallery workbench view | Registers a movable Gallery workbench view that presents source entry controls, manifest input, filtered thumbnail tiles, selection, and selected-item metadata. |
-| `#248` | planned | Source-gallery open-in-Rerun actions | Add explicit context actions for supported selected items to route through suitable Rerun-native image, 2D, or recording pathways. |
+| `#248` | complete | Source-gallery open-in-Rerun actions | Adds explicit selected-item actions that route image and recording sources through Rerun's native file/URL loader while leaving missing, live, generated, manifest, and unsupported data sources disabled with explanatory status. |
 | `#249` | planned | Source-gallery source-node actions | Add explicit graph-owned source node and source collection node creation actions from selected gallery entries. |
 
 ## Next implementation candidates
@@ -58,8 +58,8 @@ for the dataset/source breadth lane.
      provider-specific browsing.
    - Keep decoded thumbnails and fetch attempts out of durable graph sidecar
      state.
-   - Promote context actions to graph commands or Rerun-native view actions only
-     after gallery indexing is stable.
+   - `#248` routes supported image and recording gallery items through Rerun's
+     native file/URL loader without creating graph nodes or copying files.
 
 2. Package/export manifest writing.
    - Build on `#202` bundle metadata and `#206` manifest preview records.
