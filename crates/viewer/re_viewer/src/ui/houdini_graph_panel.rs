@@ -4865,6 +4865,7 @@ impl HoudiniGraphPanel {
         let external_reference = metadata.external_reference_report();
         let bundle_preview = metadata.bundle_preview();
         let package_manifest = metadata.package_manifest_preview();
+        let format_report = metadata.source_format_inference_report();
         egui::Grid::new(("houdini_graph_source_metadata", id_suffix))
             .num_columns(2)
             .spacing([12.0, 4.0])
@@ -4946,6 +4947,24 @@ impl HoudiniGraphPanel {
 
                 ui.weak("Manifest missing");
                 ui.label(package_manifest.missing_reference_count.to_string());
+                ui.end_row();
+
+                ui.weak("Source format");
+                ui.label(
+                    format_report
+                        .kind
+                        .map(|kind| kind.as_str())
+                        .unwrap_or_else(|| format_report.status.as_str()),
+                );
+                ui.end_row();
+
+                ui.weak("Format support");
+                ui.label(
+                    format_report
+                        .support_status
+                        .map(|status| status.as_str())
+                        .unwrap_or("not applicable"),
+                );
                 ui.end_row();
 
                 ui.weak("Bounds");
