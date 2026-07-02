@@ -10,13 +10,13 @@ pub(crate) mod model;
 
 use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState,
-    GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphDocument,
-    GraphEvaluationMode, GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding,
-    LayerKind, NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot,
-    NetworkCommentDisplayMode, NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeStatus,
-    PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
-    PythonOperatorDependencyStatus, ReferenceDiagnosticStatus, SourceMetadata,
-    SubstrateCoordinateContract,
+    GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphContainerCollapseError,
+    GraphDocument, GraphEvaluationMode, GraphPoint, GraphStyle, GraphWorkItemStatus,
+    HoudiniNodeBinding, LayerKind, NativeOperatorLoadStatus, NetworkBadgeVisibility,
+    NetworkBoxOrganizationSnapshot, NetworkCommentDisplayMode, NetworkNodeRingVisibility,
+    NetworkViewDisplayOptions, NodeKind, NodeStatus, PRIMARY_GEOMETRY_OUTPUT,
+    PythonEnvironmentResolveTrigger, PythonEnvironmentStatus, PythonOperatorDependencyStatus,
+    ReferenceDiagnosticStatus, SourceMetadata, SubstrateCoordinateContract,
 };
 
 const LARGE_ATTRIBUTE_TABLE_ROW_LIMIT: usize = 2_500;
@@ -111,6 +111,7 @@ pub(crate) struct HoudiniGraphPanel {
     package_manifest_status: Option<String>,
     benchmark_status: Option<String>,
     shelf_status: Option<String>,
+    graph_container_status: Option<String>,
     benchmark_curve_count: usize,
     benchmark_polygon_count: usize,
     operator_filter: String,
@@ -169,6 +170,7 @@ impl Default for HoudiniGraphPanel {
             package_manifest_status: None,
             benchmark_status: None,
             shelf_status: None,
+            graph_container_status: None,
             benchmark_curve_count: 10_000,
             benchmark_polygon_count: 1_000,
             operator_filter: String::new(),
@@ -1248,6 +1250,9 @@ impl HoudiniGraphPanel {
 
         self.project_command_history_ui(ui, graph);
         self.selected_node_identity_ui(ui, graph, &info);
+        if self.selected_node_graph_container_ui(ui, graph) {
+            return;
+        }
         self.selected_node_parameter_ui(ui, graph, &info);
         self.selected_node_flags_ui(ui, graph, &info);
         self.selected_node_evaluation_ui(ui, graph, &info);
@@ -1290,6 +1295,82 @@ impl HoudiniGraphPanel {
                 });
                 ui.weak("Restores project intent; runtime work items and caches are not restored.");
             });
+    }
+
+    fn selected_node_graph_container_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) -> bool {
+        let can_collapse = self.selected_node_can_collapse_to_graph_container(graph);
+        let mut collapsed = false;
+
+        egui::CollapsingHeader::new("Subnet")
+            .id_salt("houdini_graph_parms_subnet")
+            .default_open(true)
+            .show(ui, |ui| {
+                if ui
+                    .add_enabled(can_collapse, egui::Button::new("Collapse to Subnet"))
+                    .on_hover_text(
+                        "Move the selected node into a new internal graph and leave a typed graph-container node in this graph.",
+                    )
+                    .clicked()
+                {
+                    collapsed = self.collapse_selected_node_to_graph_container(graph);
+                }
+                if !can_collapse {
+                    ui.weak("Select a non-output, non-container node in the current graph.");
+                }
+                if let Some(status) = &self.graph_container_status {
+                    ui.weak(status);
+                }
+            });
+
+        collapsed
+    }
+
+    fn selected_node_can_collapse_to_graph_container(&self, graph: &GraphDocument) -> bool {
+        graph.nodes.get(self.selected_node).is_some_and(|node| {
+            node.parent_graph_id == graph.current_graph_id()
+                && !matches!(node.kind, NodeKind::Output | NodeKind::GraphContainer)
+        })
+    }
+
+    fn collapse_selected_node_to_graph_container(&mut self, graph: &mut GraphDocument) -> bool {
+        let Some(node) = graph.nodes.get(self.selected_node) else {
+            self.graph_container_status = Some("Select a node to collapse.".to_owned());
+            return false;
+        };
+        if !self.selected_node_can_collapse_to_graph_container(graph) {
+            self.graph_container_status = Some(format!(
+                "Cannot collapse selected {} node.",
+                node.kind.as_str()
+            ));
+            return false;
+        }
+
+        let original_node_name = node.name.clone();
+        let subnet_name = format!("{original_node_name} Subnet");
+        match graph.add_graph_container_collapse_manifest_for_node_set(
+            subnet_name.clone(),
+            &[self.selected_node],
+        ) {
+            Ok(container_index) => {
+                self.selected_node = container_index;
+                self.selected_annotation = None;
+                self.selected_edge = None;
+                self.node_info_open = true;
+                self.show_graph_workbench_pane(GraphWorkbenchPane::Info);
+                self.graph_container_status = Some(format!(
+                    "Collapsed {original_node_name} into graph container {subnet_name}."
+                ));
+                self.pending_frame_selected = true;
+                true
+            }
+            Err(err) => {
+                self.graph_container_status = Some(format!(
+                    "Subnet collapse failed: {}.",
+                    graph_container_collapse_error_message(&err)
+                ));
+                false
+            }
+        }
     }
 
     fn selected_node_identity_ui(
@@ -3983,6 +4064,17 @@ impl HoudiniGraphPanel {
             graph.demand_output_evaluation();
             ui.close();
         }
+        if ui
+            .add_enabled(
+                self.selected_node_can_collapse_to_graph_container(graph),
+                egui::Button::new("Collapse to Subnet"),
+            )
+            .on_hover_text("Move the selected node into a new typed graph container.")
+            .clicked()
+        {
+            self.collapse_selected_node_to_graph_container(graph);
+            ui.close();
+        }
 
         ui.separator();
         ui.weak("Node Flags");
@@ -6379,6 +6471,21 @@ fn format_sticky_note_text(text: &str) -> String {
     }
 }
 
+fn graph_container_collapse_error_message(error: &GraphContainerCollapseError) -> String {
+    match error {
+        GraphContainerCollapseError::EmptySelection => "selection is empty".to_owned(),
+        GraphContainerCollapseError::MissingNodeIndex(index) => {
+            format!("node index {index} is missing")
+        }
+        GraphContainerCollapseError::DisconnectedSelection => {
+            "selected nodes are not connected".to_owned()
+        }
+        GraphContainerCollapseError::UntypedExternalEdge(edge_id) => {
+            format!("external edge {edge_id} has no typed data kind")
+        }
+    }
+}
+
 fn draw_arrowhead(painter: &egui::Painter, tip: Pos2, color: Color32) {
     let size = 5.0;
     painter.add(egui::Shape::convex_polygon(
@@ -6398,7 +6505,7 @@ mod tests {
         ConnectionDragPreview, ConnectionDragState, GraphSearchTarget, HoudiniGraphPanel,
         NodePortKind, connection_drag_preview, distance_to_segment, graph_edge_at,
         layout_node_rects,
-        model::{ProjectGraphMetadata, ProjectGraphRole},
+        model::{GraphContainerStatus, NodeKind, ProjectGraphMetadata, ProjectGraphRole},
         node_primary_port_at, node_primary_port_rect,
     };
     use crate::ui::houdini_graph_panel::model::{GraphDocument, PRIMARY_GEOMETRY_OUTPUT};
@@ -6594,5 +6701,74 @@ mod tests {
         assert_eq!(panel.selected_node, analysis_node_index);
         assert!(panel.selected_annotation.is_none());
         assert!(panel.node_info_open);
+    }
+
+    #[test]
+    fn selected_node_collapse_ui_creates_navigable_graph_container() {
+        let mut graph = GraphDocument::sample();
+        let filter_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.node_id == "filter.main")
+            .expect("sample graph should include filter");
+        let mut panel = HoudiniGraphPanel {
+            selected_node: filter_index,
+            ..HoudiniGraphPanel::default()
+        };
+
+        assert!(panel.selected_node_can_collapse_to_graph_container(&graph));
+        assert!(panel.collapse_selected_node_to_graph_container(&mut graph));
+
+        let selected = graph
+            .nodes
+            .get(panel.selected_node)
+            .expect("new graph container should be selected");
+        assert_eq!(selected.kind, NodeKind::GraphContainer);
+        assert_eq!(selected.parent_graph_id, "main");
+        assert!(
+            panel
+                .graph_container_status
+                .as_deref()
+                .is_some_and(|status| status.contains("Collapsed Filter"))
+        );
+        assert!(panel.selected_annotation.is_none());
+        assert!(panel.selected_edge.is_none());
+        assert!(panel.node_info_open);
+
+        let filter = graph
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "filter.main")
+            .expect("filter node should stay graph-owned");
+        assert_eq!(filter.parent_graph_id, "graph.filter_subnet");
+
+        let info = graph
+            .selected_node_info(panel.selected_node)
+            .expect("container should inspect");
+        let container = info
+            .graph_container
+            .expect("container metadata should be exposed");
+        assert_eq!(container.status, GraphContainerStatus::Resolved);
+        assert_eq!(container.internal_graph_id, "graph.filter_subnet");
+        assert_eq!(
+            container.internal_graph_path.as_deref(),
+            Some("/obj/main/filter_subnet")
+        );
+    }
+
+    #[test]
+    fn selected_node_collapse_ui_rejects_output_node() {
+        let graph = GraphDocument::sample();
+        let output_index = graph
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .expect("sample graph should include output");
+        let panel = HoudiniGraphPanel {
+            selected_node: output_index,
+            ..HoudiniGraphPanel::default()
+        };
+
+        assert!(!panel.selected_node_can_collapse_to_graph_container(&graph));
     }
 }

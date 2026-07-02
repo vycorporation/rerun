@@ -46,6 +46,7 @@ for the graph hierarchy lane.
 | `#174` | complete | Selected graph data-flow diagnostics | Adds graph-scoped data-flow diagnostic queries and surfaces selected-graph invalid/cyclic connection diagnostics in the workbench Info pane. |
 | `#176` | complete | Cross-graph search result navigation | Carries graph IDs and readable node paths through workbench search so node results switch to their parent graph before selection. |
 | `#178` | complete | Graph-path reference delete warnings | Adds readable target node paths to reference output change warnings so delete/edit warnings disambiguate graph-local names. |
+| `#216` | complete | Selected-node graph container collapse UI | Adds workbench and node context-menu commands that collapse the current non-output, non-container node into a navigable typed graph container using the physical graph-container storage path without faking multi-selection. |
 
 ## Next implementation candidates
 
@@ -69,6 +70,8 @@ for the graph hierarchy lane.
    - `#170` moves connected collapsed node sets into the internal graph and
      rewires compatible external crossings through typed graph-container
      boundary ports.
+   - `#216` exposes the first honest workbench collapse command for the
+     currently selected node while leaving multi-selection as a later UI layer.
    - Keep selected-node collapse separate from network box organization.
 
 3. Typed graph boundary inputs and outputs.
