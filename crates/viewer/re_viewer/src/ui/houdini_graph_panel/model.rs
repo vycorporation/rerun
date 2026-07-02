@@ -1733,6 +1733,22 @@ impl GraphDocument {
         layers
     }
 
+    #[allow(dead_code)]
+    pub fn source_format_capabilities(&self) -> Vec<SourceFormatCapability> {
+        source_format_capabilities()
+    }
+
+    #[allow(dead_code)]
+    pub fn source_format_capabilities_with_status(
+        &self,
+        status: SourceFormatSupportStatus,
+    ) -> Vec<SourceFormatCapability> {
+        source_format_capabilities()
+            .into_iter()
+            .filter(|capability| capability.status == status)
+            .collect()
+    }
+
     pub fn duplicate_layer_view(&mut self, kind: LayerKind, name: impl Into<String>) -> bool {
         let Some(source_layer) = self.layers.iter().find(|layer| layer.kind == kind) else {
             return false;
@@ -7738,6 +7754,146 @@ impl SourceLocatorKind {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SourceFormatCapability {
+    pub kind: SourceFormatKind,
+    pub status: SourceFormatSupportStatus,
+    pub geometry_kinds: Vec<HoudiniGeometryKind>,
+    pub notes: String,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SourceFormatKind {
+    Parquet,
+    GeoParquetLike,
+    GeoJson,
+    FlatGeobuf,
+    CsvCoordinates,
+    LasLazPointCloud,
+    SqliteTableOrView,
+    GeoPackage,
+    SpatiaLite,
+    Shapefile,
+}
+
+#[allow(dead_code)]
+impl SourceFormatKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Parquet => "Parquet",
+            Self::GeoParquetLike => "GeoParquet-like table",
+            Self::GeoJson => "GeoJSON",
+            Self::FlatGeobuf => "FlatGeobuf",
+            Self::CsvCoordinates => "CSV coordinates",
+            Self::LasLazPointCloud => "LAS/LAZ point cloud",
+            Self::SqliteTableOrView => "SQLite table/view",
+            Self::GeoPackage => "GeoPackage",
+            Self::SpatiaLite => "SpatiaLite",
+            Self::Shapefile => "Shapefile",
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SourceFormatSupportStatus {
+    Supported,
+    PlannedV1,
+    LaterCompatibility,
+    Deferred,
+}
+
+#[allow(dead_code)]
+impl SourceFormatSupportStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::PlannedV1 => "planned v1",
+            Self::LaterCompatibility => "later compatibility",
+            Self::Deferred => "deferred",
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn source_format_capabilities() -> Vec<SourceFormatCapability> {
+    use SourceFormatKind as Kind;
+    use SourceFormatSupportStatus as Status;
+
+    vec![
+        SourceFormatCapability {
+            kind: Kind::Parquet,
+            status: Status::Supported,
+            geometry_kinds: vec![HoudiniGeometryKind::CubicBezier],
+            notes: "Current native cubic Bezier import path expects eight control-point columns."
+                .to_owned(),
+        },
+        SourceFormatCapability {
+            kind: Kind::GeoParquetLike,
+            status: Status::PlannedV1,
+            geometry_kinds: vec![HoudiniGeometryKind::Polygon, HoudiniGeometryKind::CubicBezier],
+            notes: "Planned as tabular geometry source metadata without changing native cubic storage."
+                .to_owned(),
+        },
+        SourceFormatCapability {
+            kind: Kind::GeoJson,
+            status: Status::PlannedV1,
+            geometry_kinds: vec![HoudiniGeometryKind::Polygon],
+            notes: "Planned v1 source format for polygon-heavy exploration workflows.".to_owned(),
+        },
+        SourceFormatCapability {
+            kind: Kind::FlatGeobuf,
+            status: Status::PlannedV1,
+            geometry_kinds: vec![HoudiniGeometryKind::Polygon],
+            notes: "Planned v1 source format for portable feature datasets.".to_owned(),
+        },
+        SourceFormatCapability {
+            kind: Kind::CsvCoordinates,
+            status: Status::PlannedV1,
+            geometry_kinds: vec![HoudiniGeometryKind::Polygon],
+            notes: "Planned v1 source format when coordinate or geometry columns are configured."
+                .to_owned(),
+        },
+        SourceFormatCapability {
+            kind: Kind::LasLazPointCloud,
+            status: Status::PlannedV1,
+            geometry_kinds: Vec::new(),
+            notes: "Planned v1 source family; point-cloud geometry records are not modeled in this slice."
+                .to_owned(),
+        },
+        SourceFormatCapability {
+            kind: Kind::SqliteTableOrView,
+            status: Status::PlannedV1,
+            geometry_kinds: vec![HoudiniGeometryKind::Polygon],
+            notes: "Planned v1 source format for generic tables or views with configurable geometry columns."
+                .to_owned(),
+        },
+        SourceFormatCapability {
+            kind: Kind::GeoPackage,
+            status: Status::LaterCompatibility,
+            geometry_kinds: vec![HoudiniGeometryKind::Polygon],
+            notes: "Later compatibility layer, not the first v1 source-format implementation."
+                .to_owned(),
+        },
+        SourceFormatCapability {
+            kind: Kind::SpatiaLite,
+            status: Status::LaterCompatibility,
+            geometry_kinds: vec![HoudiniGeometryKind::Polygon],
+            notes: "Later compatibility layer after the projection-agnostic source model is stable."
+                .to_owned(),
+        },
+        SourceFormatCapability {
+            kind: Kind::Shapefile,
+            status: Status::Deferred,
+            geometry_kinds: vec![HoudiniGeometryKind::Polygon],
+            notes: "Explicitly deferred because legacy packaging, encoding, and CRS expectations conflict with v1 scope."
+                .to_owned(),
+        },
+    ]
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum SourceProvenance {
     DemoFallback,
@@ -12630,7 +12786,7 @@ mod tests {
         GraphColor, GraphContainerCollapseError, GraphContainerStatus, GraphDataFlowEdge,
         GraphDataFlowEdgeDiagnosticStatus, GraphDocument, GraphEvaluationMode,
         GraphNavigationError, GraphNavigationTarget, GraphNode, GraphPoint, GraphStyle,
-        GraphWorkItemStatus, HoudiniCubicBezierParquetSchema, HoudiniDataKind,
+        GraphWorkItemStatus, HoudiniCubicBezierParquetSchema, HoudiniDataKind, HoudiniGeometryKind,
         HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
         HoudiniParameterBinding, HoudiniParameterDeclaration, HoudiniParameterKind,
         HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
@@ -12654,9 +12810,10 @@ mod tests {
         PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
         PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
         ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
-        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceLocatorKind,
-        SourceProvenance, SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
-        ViewerGeometry, load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
+        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceFormatKind,
+        SourceFormatSupportStatus, SourceLocatorKind, SourceProvenance,
+        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
+        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -19740,6 +19897,71 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             "s3://bucket/curves.parquet"
         );
         assert!(uri_metadata.locator.is_external_reference());
+    }
+
+    #[test]
+    fn source_format_capabilities_record_adr_0015_statuses() {
+        let graph = GraphDocument::sample();
+        let capabilities = graph.source_format_capabilities();
+
+        let parquet = capabilities
+            .iter()
+            .find(|capability| capability.kind == SourceFormatKind::Parquet)
+            .expect("Parquet capability should be present");
+        assert_eq!(parquet.status, SourceFormatSupportStatus::Supported);
+        assert_eq!(
+            parquet.geometry_kinds,
+            vec![HoudiniGeometryKind::CubicBezier]
+        );
+        assert!(parquet.notes.contains("eight control-point columns"));
+
+        let planned =
+            graph.source_format_capabilities_with_status(SourceFormatSupportStatus::PlannedV1);
+        assert!(
+            planned
+                .iter()
+                .any(|capability| capability.kind == SourceFormatKind::GeoJson)
+        );
+        assert!(
+            planned
+                .iter()
+                .any(|capability| capability.kind == SourceFormatKind::FlatGeobuf)
+        );
+        assert!(
+            planned
+                .iter()
+                .any(|capability| capability.kind == SourceFormatKind::CsvCoordinates)
+        );
+        assert!(
+            planned
+                .iter()
+                .any(|capability| capability.kind == SourceFormatKind::LasLazPointCloud)
+        );
+        assert!(
+            planned
+                .iter()
+                .any(|capability| capability.kind == SourceFormatKind::SqliteTableOrView)
+        );
+
+        let later = graph
+            .source_format_capabilities_with_status(SourceFormatSupportStatus::LaterCompatibility);
+        assert_eq!(later.len(), 2);
+        assert!(
+            later
+                .iter()
+                .any(|capability| capability.kind == SourceFormatKind::GeoPackage)
+        );
+        assert!(
+            later
+                .iter()
+                .any(|capability| capability.kind == SourceFormatKind::SpatiaLite)
+        );
+
+        let deferred =
+            graph.source_format_capabilities_with_status(SourceFormatSupportStatus::Deferred);
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].kind, SourceFormatKind::Shapefile);
+        assert!(deferred[0].notes.contains("CRS expectations"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
