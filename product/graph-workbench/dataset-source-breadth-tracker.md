@@ -37,6 +37,7 @@ for the dataset/source breadth lane.
 | `#202` | complete | Source bundle preview metadata | Adds preview-only source bundle metadata for inclusion status, expected local size, missing references, remaining external references, and reproducibility warnings without copying or hashing. |
 | `#204` | complete | Focused dataset/source tracker | Adds this tracker and points the main PRD/ADR status ledger at it. |
 | `#206` | complete | Source package manifest preview records | Adds serializable preview records for package/export manifests with source role, original locator, bundled path placeholder, expected size, hash availability, provenance, and external status without writing or copying files. |
+| `#208` | complete | Source format inference reports | Adds graph-owned source format inference reports from locator suffixes to ADR-backed capability records, including generated, live, unknown, supported, planned, later compatibility, and deferred statuses without adding parsers. |
 
 ## Next implementation candidates
 
@@ -48,7 +49,7 @@ for the dataset/source breadth lane.
    - Keep content hashing and copying explicit, bounded, and testable.
 
 2. Source-format import breadth.
-   - Build on `#198` capability records.
+   - Build on `#198` capability records and `#208` inference reports.
    - Add one parser family at a time.
    - Keep source records and prepared representations inspectable.
    - Avoid GIS/CRS expansion unless a source-specific issue explicitly reopens

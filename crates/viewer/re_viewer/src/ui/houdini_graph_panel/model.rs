@@ -7650,6 +7650,10 @@ impl SourceMetadata {
     pub fn package_manifest_preview(&self) -> SourcePackageManifestPreview {
         SourcePackageManifestPreview::from_source_metadata(self, self.bundle_preview())
     }
+
+    pub fn source_format_inference_report(&self) -> SourceFormatInferenceReport {
+        SourceFormatInferenceReport::from_metadata(self)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -8140,6 +8144,113 @@ impl SourceFormatSupportStatus {
             Self::LaterCompatibility => "later compatibility",
             Self::Deferred => "deferred",
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SourceFormatInferenceReport {
+    pub status: SourceFormatInferenceStatus,
+    pub readable_locator: String,
+    pub kind: Option<SourceFormatKind>,
+    pub support_status: Option<SourceFormatSupportStatus>,
+    pub notes: String,
+}
+
+impl SourceFormatInferenceReport {
+    fn from_metadata(metadata: &SourceMetadata) -> Self {
+        let readable_locator = metadata.locator.readable();
+        match metadata.locator.kind {
+            SourceLocatorKind::Demo | SourceLocatorKind::Generated => Self {
+                status: SourceFormatInferenceStatus::Generated,
+                readable_locator,
+                kind: None,
+                support_status: None,
+                notes: "Generated graph sources do not require a dataset parser.".to_owned(),
+            },
+            SourceLocatorKind::RecordingQuery => Self {
+                status: SourceFormatInferenceStatus::LiveInput,
+                readable_locator,
+                kind: None,
+                support_status: None,
+                notes: "Recording query sources are live viewer inputs, not source files."
+                    .to_owned(),
+            },
+            SourceLocatorKind::LocalPath | SourceLocatorKind::Uri => {
+                let Some(kind) = infer_source_format_kind(&readable_locator) else {
+                    return Self {
+                        status: SourceFormatInferenceStatus::Unknown,
+                        readable_locator,
+                        kind: None,
+                        support_status: None,
+                        notes: "No known v1 source format could be inferred from the locator."
+                            .to_owned(),
+                    };
+                };
+
+                let capability = source_format_capabilities()
+                    .into_iter()
+                    .find(|capability| capability.kind == kind);
+                let (support_status, notes) = capability
+                    .map(|capability| (Some(capability.status), capability.notes))
+                    .unwrap_or_else(|| {
+                        (
+                            None,
+                            "No source capability record exists for the inferred format."
+                                .to_owned(),
+                        )
+                    });
+
+                Self {
+                    status: SourceFormatInferenceStatus::Inferred,
+                    readable_locator,
+                    kind: Some(kind),
+                    support_status,
+                    notes,
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SourceFormatInferenceStatus {
+    Generated,
+    LiveInput,
+    Inferred,
+    Unknown,
+}
+
+impl SourceFormatInferenceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generated => "generated",
+            Self::LiveInput => "live input",
+            Self::Inferred => "inferred",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+fn infer_source_format_kind(locator: &str) -> Option<SourceFormatKind> {
+    let without_query = locator.split(['?', '#']).next().unwrap_or(locator);
+    let lower = without_query.to_ascii_lowercase();
+
+    if lower.ends_with(".geoparquet") {
+        return Some(SourceFormatKind::GeoParquetLike);
+    }
+
+    let extension = Path::new(&lower).extension()?.to_str()?;
+    match extension {
+        "parquet" => Some(SourceFormatKind::Parquet),
+        "geojson" | "json" => Some(SourceFormatKind::GeoJson),
+        "fgb" => Some(SourceFormatKind::FlatGeobuf),
+        "csv" | "tsv" => Some(SourceFormatKind::CsvCoordinates),
+        "las" | "laz" => Some(SourceFormatKind::LasLazPointCloud),
+        "sqlite" | "sqlite3" | "db" => Some(SourceFormatKind::SqliteTableOrView),
+        "gpkg" => Some(SourceFormatKind::GeoPackage),
+        "spatialite" => Some(SourceFormatKind::SpatiaLite),
+        "shp" => Some(SourceFormatKind::Shapefile),
+        _ => None,
     }
 }
 
@@ -13137,11 +13248,11 @@ mod tests {
         PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
         ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
         ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceBundleInclusion,
-        SourceExternalReferenceStatus, SourceFormatKind, SourceFormatSupportStatus,
-        SourceLocatorKind, SourcePackageManifestArtifactRole, SourcePackageManifestExternalStatus,
-        SourcePackageManifestPreview, SourceProvenance, SubstrateCoordinateContract,
-        SubstrateOrigin, SubstrateYAxis, ViewerGeometry, load_cubic_bezier_parquet,
-        load_cubic_bezier_parquet_with_metadata,
+        SourceExternalReferenceStatus, SourceFormatInferenceStatus, SourceFormatKind,
+        SourceFormatSupportStatus, SourceLocatorKind, SourcePackageManifestArtifactRole,
+        SourcePackageManifestExternalStatus, SourcePackageManifestPreview, SourceProvenance,
+        SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis, ViewerGeometry,
+        load_cubic_bezier_parquet, load_cubic_bezier_parquet_with_metadata,
     };
     use std::sync::Arc;
 
@@ -20629,6 +20740,117 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         assert_eq!(deferred.len(), 1);
         assert_eq!(deferred[0].kind, SourceFormatKind::Shapefile);
         assert!(deferred[0].notes.contains("CRS expectations"));
+    }
+
+    #[test]
+    fn source_format_inference_reports_capabilities_from_locator_extensions() {
+        let graph = GraphDocument::sample();
+        let cases = [
+            (
+                "/tmp/curves.parquet",
+                SourceFormatKind::Parquet,
+                SourceFormatSupportStatus::Supported,
+            ),
+            (
+                "s3://bucket/curves.geoparquet?version=1",
+                SourceFormatKind::GeoParquetLike,
+                SourceFormatSupportStatus::PlannedV1,
+            ),
+            (
+                "https://example.test/features.geojson#latest",
+                SourceFormatKind::GeoJson,
+                SourceFormatSupportStatus::PlannedV1,
+            ),
+            (
+                "/tmp/features.fgb",
+                SourceFormatKind::FlatGeobuf,
+                SourceFormatSupportStatus::PlannedV1,
+            ),
+            (
+                "/tmp/points.csv",
+                SourceFormatKind::CsvCoordinates,
+                SourceFormatSupportStatus::PlannedV1,
+            ),
+            (
+                "/tmp/points.laz",
+                SourceFormatKind::LasLazPointCloud,
+                SourceFormatSupportStatus::PlannedV1,
+            ),
+            (
+                "/tmp/source.sqlite3",
+                SourceFormatKind::SqliteTableOrView,
+                SourceFormatSupportStatus::PlannedV1,
+            ),
+            (
+                "/tmp/source.gpkg",
+                SourceFormatKind::GeoPackage,
+                SourceFormatSupportStatus::LaterCompatibility,
+            ),
+            (
+                "/tmp/source.spatialite",
+                SourceFormatKind::SpatiaLite,
+                SourceFormatSupportStatus::LaterCompatibility,
+            ),
+            (
+                "/tmp/source.shp",
+                SourceFormatKind::Shapefile,
+                SourceFormatSupportStatus::Deferred,
+            ),
+        ];
+
+        for (locator, expected_kind, expected_status) in cases {
+            let metadata = super::SourceMetadata::from_geometry(
+                SourceProvenance::ParquetImport,
+                Some(locator.to_owned()),
+                &graph.geometry,
+                Vec::new(),
+            );
+            let report = metadata.source_format_inference_report();
+
+            assert_eq!(report.status, SourceFormatInferenceStatus::Inferred);
+            assert_eq!(report.readable_locator, locator);
+            assert_eq!(report.kind, Some(expected_kind));
+            assert_eq!(report.support_status, Some(expected_status));
+            assert!(!report.notes.is_empty());
+        }
+    }
+
+    #[test]
+    fn source_format_inference_reports_unknown_generated_and_live_sources() {
+        let graph = GraphDocument::sample();
+        let demo_report = graph.source.metadata.source_format_inference_report();
+        assert_eq!(demo_report.status, SourceFormatInferenceStatus::Generated);
+        assert_eq!(demo_report.kind, None);
+        assert_eq!(demo_report.support_status, None);
+
+        let unknown_metadata = super::SourceMetadata::from_geometry(
+            SourceProvenance::ParquetImport,
+            Some("/tmp/source.unknown".to_owned()),
+            &graph.geometry,
+            Vec::new(),
+        );
+        let unknown_report = unknown_metadata.source_format_inference_report();
+        assert_eq!(unknown_report.status, SourceFormatInferenceStatus::Unknown);
+        assert_eq!(unknown_report.kind, None);
+        assert_eq!(unknown_report.support_status, None);
+        assert!(unknown_report.notes.contains("No known v1 source format"));
+
+        let bridge = super::RerunQueryBridge {
+            mode: super::RerunQueryBridgeMode::ProductForkViewOwned,
+            view_id: "view(1234)".to_owned(),
+            space_origin: "/".to_owned(),
+            timeline: "frame".to_owned(),
+            latest_at: 42,
+            matching_entity_count: 1,
+            visualized_entity_count: 1,
+            visible_data_result_count: 1,
+        };
+        let source = super::GraphSource::from_query_bridge(&bridge);
+        let live_report = source.metadata.source_format_inference_report();
+        assert_eq!(live_report.status, SourceFormatInferenceStatus::LiveInput);
+        assert_eq!(live_report.kind, None);
+        assert_eq!(live_report.support_status, None);
+        assert!(live_report.notes.contains("live viewer inputs"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
