@@ -41,10 +41,27 @@ for the dataset/source breadth lane.
 | `#210` | complete | External source reference action hints | Adds graph-owned recommended and secondary action hints for generated, local available, local missing, URI, and recording-query sources without performing OS, clipboard, relink, package, or parser actions. |
 | `#212` | complete | Explicit source package manifest writing | Adds an explicit native workbench action and model-owned JSON write seam for source package manifests without copying files, computing hashes, relinking sources, or embedding heavy artifacts. |
 | `#214` | complete | Source package manifest inclusion choices | Adds runtime/action-scoped include-available versus reference-only choices for eligible local source manifest artifacts without copying, hashing, relinking, or persisting choice state in sidecar JSON. |
+| `#244` | planned | Source gallery view PRD | Adds a product PRD for a Houdini workbench gallery that browses local or URL-backed source collections, renders image thumbnails or generic typed thumbnails, and defines explicit follow-up actions for Rerun views and graph source nodes. |
+| `#245` | planned | Source gallery indexing model | Normalize bounded local paths, explicit URLs, and manifest-like source lists into stable gallery item records with locator, kind, capability, availability, and thumbnail intent. |
+| `#246` | planned | Source gallery thumbnail intents | Distinguish image thumbnail intents from generic typed thumbnails for tables, polygon tables, recordings, point clouds, manifests, missing entries, and unknown sources. |
+| `#247` | planned | Source Gallery workbench view | Register a movable Gallery view that presents the source gallery index, filters, selection, and selected-item metadata. |
+| `#248` | planned | Source-gallery open-in-Rerun actions | Add explicit context actions for supported selected items to route through suitable Rerun-native image, 2D, or recording pathways. |
+| `#249` | planned | Source-gallery source-node actions | Add explicit graph-owned source node and source collection node creation actions from selected gallery entries. |
 
 ## Next implementation candidates
 
-1. Package/export manifest writing.
+1. Source gallery browsing.
+   - Build on `#196`, `#198`, `#200`, `#202`, `#208`, and `#210`.
+   - Start with a bounded gallery source model that reports item identity,
+     locator, source kind, capability, availability, and thumbnail intent.
+   - Treat URL support as direct file URLs or explicit manifests before
+     provider-specific browsing.
+   - Keep decoded thumbnails and fetch attempts out of durable graph sidecar
+     state.
+   - Promote context actions to graph commands or Rerun-native view actions only
+     after gallery indexing is stable.
+
+2. Package/export manifest writing.
    - Build on `#202` bundle metadata and `#206` manifest preview records.
    - `#212` writes manifest records only when an explicit package/export action
      exists.
@@ -54,14 +71,14 @@ for the dataset/source breadth lane.
      actions have copied files or chosen reference-only entries.
    - Keep content hashing and copying explicit, bounded, and testable.
 
-2. Source-format import breadth.
+3. Source-format import breadth.
    - Build on `#198` capability records and `#208` inference reports.
    - Add one parser family at a time.
    - Keep source records and prepared representations inspectable.
    - Avoid GIS/CRS expansion unless a source-specific issue explicitly reopens
      that product scope.
 
-3. External-reference UI actions.
+4. External-reference UI actions.
    - Build on `#200`, `#202`, and `#210`.
    - Show missing/includable/reference-only status near source inspection and
      future package/export flows.
