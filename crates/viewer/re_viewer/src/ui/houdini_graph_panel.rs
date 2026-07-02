@@ -6374,6 +6374,35 @@ impl HoudiniGraphPanel {
                 rows.len()
             ));
         }
+        let selected_row =
+            self.table_selected_record_fingerprint
+                .as_ref()
+                .and_then(|fingerprint| {
+                    rows.iter()
+                        .find(|row| row.geometry_fingerprint == *fingerprint)
+                });
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(selected_row.is_some(), |ui| {
+                if ui.button("Commit selected row to Selection").clicked() {
+                    if let Some(row) = selected_row {
+                        let report = graph.transient_table_selection_for_row(row);
+                        match graph.commit_transient_selection_as_subset(&report) {
+                            Ok(node_index) => {
+                                self.set_selected_node_set(vec![node_index]);
+                                self.table_selection_status =
+                                    Some("committed: created graph Selection node".to_owned());
+                            }
+                            Err(err) => {
+                                self.table_selection_status = Some(err.summary());
+                            }
+                        }
+                    }
+                }
+            });
+            if selected_row.is_none() {
+                ui.weak("Select a visible row to commit graph-backed subset data");
+            }
+        });
         egui::ScrollArea::vertical()
             .id_salt("houdini_graph_attribute_table")
             .max_height(160.0)

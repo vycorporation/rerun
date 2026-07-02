@@ -281,7 +281,7 @@ impl GraphDataFlowEdgeDiagnosticStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[allow(dead_code)]
 pub(crate) struct GraphRecordIdentity {
     pub graph_id: String,
@@ -361,6 +361,47 @@ impl TransientViewportSelectionStatus {
             Self::Unsupported => "unsupported",
             Self::MissingOutput => "missing output",
             Self::MissingRecord => "missing record",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct SelectionSubsetNode {
+    pub identities: Vec<GraphRecordIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SelectionSubsetDiagnostic {
+    pub identity: GraphRecordIdentity,
+    pub status: TransientViewportSelectionStatus,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SelectionCommitError {
+    EmptySelection,
+    UnresolvedSelection {
+        status: TransientViewportSelectionStatus,
+        diagnostics: Vec<String>,
+    },
+}
+
+impl SelectionCommitError {
+    pub fn summary(&self) -> String {
+        match self {
+            Self::EmptySelection => {
+                "Selection report did not include graph record identities.".to_owned()
+            }
+            Self::UnresolvedSelection {
+                status,
+                diagnostics,
+            } => {
+                let diagnostic = diagnostics
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| status.as_str().to_owned());
+                format!("Cannot commit {} selection: {diagnostic}", status.as_str())
+            }
         }
     }
 }
@@ -539,6 +580,44 @@ impl GraphDocument {
                 row.geometry_fingerprint.clone(),
             ),
         })
+    }
+
+    pub fn commit_transient_selection_as_subset(
+        &mut self,
+        report: &TransientViewportSelectionReport,
+    ) -> Result<usize, SelectionCommitError> {
+        if report.status != TransientViewportSelectionStatus::Resolved {
+            return Err(SelectionCommitError::UnresolvedSelection {
+                status: report.status,
+                diagnostics: report.diagnostics.clone(),
+            });
+        }
+        if report.identities.is_empty() {
+            return Err(SelectionCommitError::EmptySelection);
+        }
+
+        let name = self.unique_node_name("Selection");
+        let insert_index = self
+            .nodes
+            .iter()
+            .position(|node| node.kind == NodeKind::Output)
+            .unwrap_or(self.nodes.len());
+        let mut node = GraphNode::selection_subset(
+            self.unique_node_id("selection"),
+            name,
+            SelectionSubsetNode {
+                identities: report.identities.clone(),
+            },
+        );
+        node.parent_graph_id = self.current_graph_id().to_owned();
+        node.layout_position = GraphPoint::new(0.72, GENERATED_NODE_LANE_Y);
+        let selection_node = node.clone();
+        self.nodes.insert(insert_index, node);
+        self.record_project_command(ProjectCommand::SelectionNodeCreate {
+            selection_node: Box::new(selection_node),
+            insert_index,
+        });
+        Ok(insert_index)
     }
 
     #[allow(dead_code)]
@@ -1489,6 +1568,45 @@ impl GraphDocument {
         }
     }
 
+    fn selection_subset_diagnostics(
+        &self,
+        subset: &SelectionSubsetNode,
+    ) -> Vec<SelectionSubsetDiagnostic> {
+        subset
+            .identities
+            .iter()
+            .filter_map(|identity| {
+                let match_count = self
+                    .active_geometry()
+                    .iter()
+                    .filter(|geometry| self.emits(geometry))
+                    .filter(|geometry| {
+                        geometry_record_fingerprint(geometry) == identity.geometry_fingerprint
+                    })
+                    .count();
+                match match_count {
+                    0 => Some(SelectionSubsetDiagnostic {
+                        identity: identity.clone(),
+                        status: TransientViewportSelectionStatus::MissingRecord,
+                        message: format!(
+                            "Selection record '{}' no longer matches a visible graph record.",
+                            identity.geometry_fingerprint
+                        ),
+                    }),
+                    1 => None,
+                    _ => Some(SelectionSubsetDiagnostic {
+                        identity: identity.clone(),
+                        status: TransientViewportSelectionStatus::Ambiguous,
+                        message: format!(
+                            "Selection record '{}' now matches {match_count} visible graph records.",
+                            identity.geometry_fingerprint
+                        ),
+                    }),
+                }
+            })
+            .collect()
+    }
+
     fn readable_data_flow_edge_path(&self, edge: &GraphDataFlowEdge) -> String {
         format!(
             "{}:{} -> {}:{}",
@@ -1582,6 +1700,7 @@ impl GraphDocument {
                     generated: None,
                     coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
                     source_node: None,
+                    selection_subset: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1610,6 +1729,7 @@ impl GraphDocument {
                     generated: None,
                     coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
                     source_node: None,
+                    selection_subset: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1640,6 +1760,7 @@ impl GraphDocument {
                     generated: None,
                     coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
                     source_node: None,
+                    selection_subset: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1668,6 +1789,7 @@ impl GraphDocument {
                     generated: None,
                     coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
                     source_node: None,
+                    selection_subset: None,
                     output_operator: Some(OutputOperatorNode::rerun_scene()),
                     null_operator: None,
                     reference_input: None,
@@ -1837,6 +1959,7 @@ impl GraphDocument {
                     generated: None,
                     coordinate_contract: Some(coordinate_contract.clone()),
                     source_node: None,
+                    selection_subset: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1865,6 +1988,7 @@ impl GraphDocument {
                     generated: None,
                     coordinate_contract: Some(coordinate_contract.clone()),
                     source_node: None,
+                    selection_subset: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1893,6 +2017,7 @@ impl GraphDocument {
                     generated: None,
                     coordinate_contract: Some(coordinate_contract.clone()),
                     source_node: None,
+                    selection_subset: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1923,6 +2048,7 @@ impl GraphDocument {
                     )),
                     coordinate_contract: Some(coordinate_contract.clone()),
                     source_node: None,
+                    selection_subset: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1953,6 +2079,7 @@ impl GraphDocument {
                     generated: None,
                     coordinate_contract: Some(coordinate_contract.clone()),
                     source_node: None,
+                    selection_subset: None,
                     output_operator: None,
                     null_operator: None,
                     reference_input: None,
@@ -1981,6 +2108,7 @@ impl GraphDocument {
                     generated: None,
                     coordinate_contract: Some(coordinate_contract),
                     source_node: None,
+                    selection_subset: None,
                     output_operator: Some(OutputOperatorNode::rerun_scene()),
                     null_operator: None,
                     reference_input: None,
@@ -2959,6 +3087,34 @@ impl GraphDocument {
                     }
                     let insert_index = (*insert_index).min(self.nodes.len());
                     self.nodes.insert(insert_index, (**source_node).clone());
+                    true
+                }
+            },
+            ProjectCommand::SelectionNodeCreate {
+                selection_node,
+                insert_index,
+            } => match direction {
+                ProjectCommandDirection::Undo => {
+                    let Some(node_index) = self
+                        .nodes
+                        .iter()
+                        .position(|node| node.node_id == selection_node.node_id)
+                    else {
+                        return false;
+                    };
+                    self.nodes.remove(node_index);
+                    true
+                }
+                ProjectCommandDirection::Redo => {
+                    if self
+                        .nodes
+                        .iter()
+                        .any(|node| node.node_id == selection_node.node_id)
+                    {
+                        return false;
+                    }
+                    let insert_index = (*insert_index).min(self.nodes.len());
+                    self.nodes.insert(insert_index, (**selection_node).clone());
                     true
                 }
             },
@@ -4151,6 +4307,7 @@ impl GraphDocument {
             | NodeKind::PythonOperator
             | NodeKind::ProceduralAsset
             | NodeKind::NativeOperator => Some(HoudiniDataKind::GeometryTable),
+            NodeKind::Selection => Some(HoudiniDataKind::RecordSubset),
             NodeKind::ReferenceInput | NodeKind::GraphContainer | NodeKind::Output => None,
         }
     }
@@ -4650,6 +4807,9 @@ impl GraphDocument {
                 0
             };
         }
+        if let Some(selection_subset) = &node.selection_subset {
+            return selection_subset.identities.len();
+        }
         self.node_output_record_count(node.kind)
     }
 
@@ -4670,7 +4830,7 @@ impl GraphDocument {
             | NodeKind::PythonOperator
             | NodeKind::ProceduralAsset
             | NodeKind::NativeOperator => filtered_count,
-            NodeKind::ReferenceInput | NodeKind::GraphContainer => 0,
+            NodeKind::Selection | NodeKind::ReferenceInput | NodeKind::GraphContainer => 0,
             NodeKind::Output => self.visible_output_count(),
         }
     }
@@ -6386,6 +6546,10 @@ impl GraphDocument {
                 NodeKind::Source => "Loaded native graph geometry.".to_owned(),
                 NodeKind::Filter => "Applied minimum score threshold.".to_owned(),
                 NodeKind::Style => "Prepared stroke scale for viewer output.".to_owned(),
+                NodeKind::Selection => {
+                    "Committed record subset; explicit consumers are required to filter or style."
+                        .to_owned()
+                }
                 NodeKind::Null => {
                     "Typed pass-through anchor; geometry, provenance, and evaluation flow are unchanged.".to_owned()
                 }
@@ -6867,6 +7031,54 @@ impl GraphDocument {
                 procedural_asset: None,
                 native_operator: None,
             },
+            NodeKind::Selection => {
+                let selection_subset = node.selection_subset.as_ref()?;
+                let selection_diagnostics = self.selection_subset_diagnostics(selection_subset);
+                let warnings = selection_diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.clone())
+                    .collect::<Vec<_>>();
+                NodeInfo {
+                    kind: node.kind,
+                    role: node.kind.role(),
+                    graph_location: graph_location.clone(),
+                    data_flow: data_flow.clone(),
+                    input_count: 0,
+                    output_count: selection_subset.identities.len(),
+                    status: if warnings.is_empty() {
+                        NodeStatus::Healthy
+                    } else {
+                        NodeStatus::Warning
+                    },
+                    data_kind: "Record subset",
+                    record_count: selection_subset.identities.len(),
+                    bounds: None,
+                    provenance: selection_subset
+                        .identities
+                        .first()
+                        .map(|identity| identity.source_provenance),
+                    attributes: vec!["record_identity".to_owned()],
+                    parameter: node.parameter.clone(),
+                    summary: "Selection node stores committed record identities. It does not filter records or change appearance without an explicit consumer.",
+                    source_metadata: None,
+                    coordinate_contract: None,
+                    substrate_raster: None,
+                    source_error: None,
+                    style: None,
+                    generated: node.generated,
+                    evaluation: node.evaluation.clone(),
+                    warnings,
+                    reference_consumers: reference_consumers.clone(),
+                    reference_output_warning: reference_output_warning.clone(),
+                    output_operator: None,
+                    null_operator: None,
+                    reference_input: None,
+                    graph_container: None,
+                    python_operator: None,
+                    procedural_asset: None,
+                    native_operator: None,
+                }
+            }
             NodeKind::Null => {
                 let contract = self.null_operator_contract(index)?;
                 NodeInfo {
@@ -10187,6 +10399,7 @@ impl HoudiniGraphSidecar {
                     generated: node.generated,
                     coordinate_contract: Some(node.coordinate_contract.clone()),
                     source_node: node.source_node.clone(),
+                    selection_subset: node.selection_subset.clone(),
                     output_operator: node.output_operator.clone(),
                     null_operator: node.null_operator.clone(),
                     reference_input: node.reference_input.clone(),
@@ -10365,6 +10578,8 @@ struct NodeSidecar {
     #[serde(default)]
     source_node: Option<SourceNode>,
     #[serde(default)]
+    selection_subset: Option<SelectionSubsetNode>,
+    #[serde(default)]
     output_operator: Option<OutputOperatorNode>,
     #[serde(default)]
     null_operator: Option<NullOperatorNode>,
@@ -10398,6 +10613,7 @@ impl NodeSidecar {
             self.kind,
             NodeKind::Source
                 | NodeKind::Null
+                | NodeKind::Selection
                 | NodeKind::ReferenceInput
                 | NodeKind::SubstrateProjection
                 | NodeKind::GraphContainer
@@ -10425,6 +10641,10 @@ impl NodeSidecar {
             NodeKind::Null => (
                 "Null",
                 "Passes typed geometry through unchanged as a visible graph anchor.",
+            ),
+            NodeKind::Selection => (
+                "Selection",
+                "Holds graph-owned record identities without filtering or styling by itself.",
             ),
             NodeKind::ReferenceInput => (
                 "Reference Input",
@@ -10463,6 +10683,7 @@ impl NodeSidecar {
                 .coordinate_contract
                 .unwrap_or_else(|| GraphDocument::default_coordinate_contract_for_kind(self.kind)),
             source_node: self.source_node,
+            selection_subset: self.selection_subset,
             output_operator: self.output_operator,
             null_operator: self.null_operator,
             reference_input: self.reference_input,
@@ -10488,6 +10709,7 @@ impl NodeSidecar {
 fn node_matches_snapshot_identity(node: &GraphNode, snapshot: &NodeSidecar) -> bool {
     match node.kind {
         NodeKind::Null
+        | NodeKind::Selection
         | NodeKind::ReferenceInput
         | NodeKind::SubstrateProjection
         | NodeKind::GraphContainer => {
@@ -10593,6 +10815,7 @@ pub(crate) struct GraphNode {
     pub generated: Option<GeneratedNodeInfo>,
     pub coordinate_contract: Option<SubstrateCoordinateContract>,
     pub source_node: Option<SourceNode>,
+    pub selection_subset: Option<SelectionSubsetNode>,
     pub output_operator: Option<OutputOperatorNode>,
     pub null_operator: Option<NullOperatorNode>,
     pub reference_input: Option<ReferenceInputNode>,
@@ -10895,6 +11118,7 @@ impl GraphNode {
             generated: None,
             coordinate_contract: None,
             source_node: Some(source_node),
+            selection_subset: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,
@@ -10926,6 +11150,7 @@ impl GraphNode {
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
             source_node: None,
+            selection_subset: None,
             output_operator: None,
             null_operator: Some(NullOperatorNode {
                 input_kind: HoudiniDataKind::GeometryTable,
@@ -10950,6 +11175,44 @@ impl GraphNode {
         }
     }
 
+    fn selection_subset(
+        node_id: String,
+        name: String,
+        selection_subset: SelectionSubsetNode,
+    ) -> Self {
+        Self {
+            node_id,
+            parent_graph_id: MAIN_GRAPH_ID.to_owned(),
+            name,
+            kind: NodeKind::Selection,
+            layout_position: GraphPoint::new(0.5, 0.5),
+            generated: Some(GeneratedNodeInfo::managed(
+                GeneratedNodeSource::TransientSelectionCommit,
+            )),
+            coordinate_contract: None,
+            source_node: None,
+            selection_subset: Some(selection_subset),
+            output_operator: None,
+            null_operator: None,
+            reference_input: None,
+            substrate_projection: None,
+            python_operator: None,
+            procedural_asset: None,
+            native_operator: None,
+            evaluation: NodeEvaluation::clean(),
+            participates_in_output: false,
+            comment: "Committed record subset; explicit filter or style consumers are required to change output.".to_owned(),
+            show_comment_in_network: true,
+            parameter: NodeParameter::scalar(
+                "Selected",
+                1.0,
+                0.0..=1.0,
+                "Selection subset is graph-owned identity data, not a filter or style override.",
+            ),
+            info: "Holds committed graph record identities without filtering records or changing appearance by itself.",
+        }
+    }
+
     fn reference_input(node_id: String, target: ReferenceTargetEntry) -> Self {
         Self {
             node_id,
@@ -10960,6 +11223,7 @@ impl GraphNode {
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
             source_node: None,
+            selection_subset: None,
             output_operator: None,
             null_operator: None,
             reference_input: Some(ReferenceInputNode {
@@ -10993,6 +11257,7 @@ impl GraphNode {
             generated: None,
             coordinate_contract: Some(projection.to_contract.clone()),
             source_node: None,
+            selection_subset: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,
@@ -11024,6 +11289,7 @@ impl GraphNode {
             generated: None,
             coordinate_contract: None,
             source_node: None,
+            selection_subset: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,
@@ -11055,6 +11321,7 @@ impl GraphNode {
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
             source_node: None,
+            selection_subset: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,
@@ -11097,6 +11364,7 @@ impl GraphNode {
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
             source_node: None,
+            selection_subset: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,
@@ -11139,6 +11407,7 @@ impl GraphNode {
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
             source_node: None,
+            selection_subset: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,
@@ -12459,6 +12728,7 @@ fn next_asset_definition_version(version: &str) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum HoudiniDataKind {
     GeometryTable,
+    RecordSubset,
     AttributeTable,
     Scalar,
     String,
@@ -12599,6 +12869,10 @@ pub(crate) enum ProjectCommand {
     },
     SourceNodeCreate {
         source_node: Box<GraphNode>,
+        insert_index: usize,
+    },
+    SelectionNodeCreate {
+        selection_node: Box<GraphNode>,
         insert_index: usize,
     },
     NodeDelete {
@@ -12761,6 +13035,9 @@ impl ProjectCommand {
             }
             Self::SourceNodeCreate { source_node, .. } => {
                 format!("Create {}", source_node.name)
+            }
+            Self::SelectionNodeCreate { selection_node, .. } => {
+                format!("Create {}", selection_node.name)
             }
             Self::ReferenceInputCreate { reference_node, .. } => {
                 format!("Create {}", reference_node.name)
@@ -13713,12 +13990,14 @@ impl GeneratedNodeInfo {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum GeneratedNodeSource {
     AttributeTableCommit,
+    TransientSelectionCommit,
 }
 
 impl GeneratedNodeSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AttributeTableCommit => "Generated from attribute table commit",
+            Self::TransientSelectionCommit => "Generated from transient selection commit",
         }
     }
 }
@@ -13919,6 +14198,7 @@ pub(crate) enum NodeKind {
     Source,
     Filter,
     Style,
+    Selection,
     Null,
     ReferenceInput,
     SubstrateProjection,
@@ -13935,6 +14215,7 @@ impl NodeKind {
             Self::Source => "Source",
             Self::Filter => "Filter",
             Self::Style => "Style",
+            Self::Selection => "Selection",
             Self::Null => "Null",
             Self::ReferenceInput => "Reference Input",
             Self::SubstrateProjection => "Substrate Projection",
@@ -13951,6 +14232,7 @@ impl NodeKind {
             Self::Source => "Read",
             Self::Filter => "Cull",
             Self::Style => "Style",
+            Self::Selection => "Subset",
             Self::Null => "Anchor",
             Self::ReferenceInput => "Reference",
             Self::SubstrateProjection => "Project",
@@ -13967,6 +14249,7 @@ impl NodeKind {
             Self::Source => "source_copy",
             Self::Filter => "filter_copy",
             Self::Style => "style_copy",
+            Self::Selection => "selection_copy",
             Self::Null => "null_copy",
             Self::ReferenceInput => "reference_input_copy",
             Self::SubstrateProjection => "substrate_projection_copy",
@@ -15101,8 +15384,8 @@ mod tests {
         PythonOperatorParameterValue, PythonOperatorPort, PythonOperatorSource,
         PythonProjectRequirements, PythonRequirementSource, PythonRequirementsSource,
         ReferenceDiagnosticStatus, ReferenceTargetEntry, ReferenceTargetIdentity,
-        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SourceBundleInclusion,
-        SourceExternalReferenceActionKind, SourceExternalReferenceStatus,
+        ReferenceTargetProvenance, RerunSceneDebugItem, RerunSceneItem, SelectionCommitError,
+        SourceBundleInclusion, SourceExternalReferenceActionKind, SourceExternalReferenceStatus,
         SourceFormatInferenceStatus, SourceFormatKind, SourceFormatSupportStatus,
         SourceGalleryDecodedThumbnail, SourceGalleryIndex, SourceGalleryItemKind,
         SourceGalleryManifestError, SourceGalleryOpenActionKind, SourceGalleryThumbnailCache,
@@ -17585,6 +17868,172 @@ mod tests {
     }
 
     #[test]
+    fn committed_transient_selection_creates_graph_subset_node_without_filtering() {
+        let mut graph = GraphDocument::sample();
+        let row = graph
+            .attribute_table_rows(&AttributeTableQuery::default())
+            .first()
+            .expect("sample graph should expose table rows")
+            .clone();
+        let report = graph.transient_table_selection_for_row(&row);
+        let before_visible_count = graph.visible_output_count();
+
+        let selection_index = graph
+            .commit_transient_selection_as_subset(&report)
+            .expect("resolved selection should create subset node");
+
+        assert_eq!(graph.visible_output_count(), before_visible_count);
+        let selection_node = &graph.nodes[selection_index];
+        assert_eq!(selection_node.kind, NodeKind::Selection);
+        assert!(!selection_node.participates_in_output);
+        assert_eq!(
+            selection_node
+                .selection_subset
+                .as_ref()
+                .expect("selection node should carry subset data")
+                .identities
+                .len(),
+            1
+        );
+        assert_eq!(
+            selection_node.generated.map(|generated| generated.source),
+            Some(GeneratedNodeSource::TransientSelectionCommit)
+        );
+        let info = graph
+            .selected_node_info(selection_index)
+            .expect("selection node should expose node info");
+        assert_eq!(info.kind, NodeKind::Selection);
+        assert_eq!(info.status, NodeStatus::Healthy);
+        assert_eq!(info.data_kind, "Record subset");
+        assert_eq!(info.record_count, 1);
+        assert_eq!(info.output_count, 1);
+        assert!(info.warnings.is_empty());
+    }
+
+    #[test]
+    fn committed_transient_selection_records_undoable_project_command() {
+        let mut graph = GraphDocument::sample();
+        let row = graph
+            .attribute_table_rows(&AttributeTableQuery::default())
+            .first()
+            .expect("sample graph should expose table rows")
+            .clone();
+        let report = graph.transient_table_selection_for_row(&row);
+        let before_len = graph.nodes.len();
+
+        let selection_index = graph
+            .commit_transient_selection_as_subset(&report)
+            .expect("resolved selection should create subset node");
+        let selection_id = graph.nodes[selection_index].node_id.clone();
+
+        assert_eq!(graph.nodes.len(), before_len + 1);
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Create Selection")
+        );
+        assert!(graph.undo_project_command());
+        assert_eq!(graph.nodes.len(), before_len);
+        assert!(!graph.nodes.iter().any(|node| node.node_id == selection_id));
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Create Selection")
+        );
+        assert!(graph.redo_project_command());
+        assert!(graph.nodes.iter().any(|node| node.node_id == selection_id));
+    }
+
+    #[test]
+    fn committed_selection_node_reports_stale_identity_diagnostics() {
+        let mut graph = GraphDocument::sample();
+        let row = graph
+            .attribute_table_rows(&AttributeTableQuery::default())
+            .first()
+            .expect("sample graph should expose table rows")
+            .clone();
+        let report = graph.transient_table_selection_for_row(&row);
+        let selection_index = graph
+            .commit_transient_selection_as_subset(&report)
+            .expect("resolved selection should create subset node");
+        graph.geometry.clear();
+
+        let info = graph
+            .selected_node_info(selection_index)
+            .expect("selection node should expose node info");
+
+        assert_eq!(info.status, NodeStatus::Warning);
+        assert!(
+            info.warnings
+                .iter()
+                .any(|warning| warning.contains("no longer matches a visible graph record"))
+        );
+        assert_eq!(graph.visible_output_count(), 0);
+    }
+
+    #[test]
+    fn unresolved_transient_selection_does_not_create_subset_node() {
+        let mut graph = GraphDocument::sample();
+        let unresolved = graph.resolve_transient_viewport_selection(&TransientViewportSelection {
+            graph_id: graph.current_graph_id().to_owned(),
+            output_node_id: "style.main".to_owned(),
+            output_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+            record: TransientViewportRecordTarget::ViewportPickId("pick-17".to_owned()),
+        });
+        let before_len = graph.nodes.len();
+
+        let err = graph
+            .commit_transient_selection_as_subset(&unresolved)
+            .expect_err("unresolved transient selection should not create graph data");
+
+        assert!(matches!(
+            err,
+            SelectionCommitError::UnresolvedSelection {
+                status: TransientViewportSelectionStatus::Unsupported,
+                ..
+            }
+        ));
+        assert_eq!(graph.nodes.len(), before_len);
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .all(|node| node.kind != NodeKind::Selection)
+        );
+    }
+
+    #[test]
+    fn committed_selection_subset_round_trips_through_sidecar() {
+        let mut graph = GraphDocument::sample();
+        let row = graph
+            .attribute_table_rows(&AttributeTableQuery::default())
+            .first()
+            .expect("sample graph should expose table rows")
+            .clone();
+        let report = graph.transient_table_selection_for_row(&row);
+        graph
+            .commit_transient_selection_as_subset(&report)
+            .expect("resolved selection should create subset node");
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+        let restored_selection = restored
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Selection)
+            .expect("selection node should round-trip");
+
+        assert_eq!(
+            restored_selection
+                .selection_subset
+                .as_ref()
+                .expect("selection subset should round-trip")
+                .identities[0]
+                .geometry_fingerprint,
+            row.geometry_fingerprint
+        );
+    }
+
+    #[test]
     fn committed_attribute_table_filter_updates_graph_filter_node() {
         let mut graph = GraphDocument::sample();
         let committed = graph.commit_attribute_table_query_as_filter(&AttributeTableQuery {
@@ -19857,6 +20306,7 @@ mod tests {
             generated: None,
             coordinate_contract: Some(SubstrateCoordinateContract::demo_byteplot()),
             source_node: None,
+            selection_subset: None,
             output_operator: None,
             null_operator: None,
             reference_input: None,

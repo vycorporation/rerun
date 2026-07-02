@@ -38,7 +38,7 @@ This ledger tracks how PRD/ADR material maps to issue-backed implementation in t
 | Node duplication and deletion | complete for ordinary single-node duplicate/delete | `node-duplication.md`, command-history tracker | `#92`, `#108`, `#113` |
 | Connection editing semantics | partial | this ledger until a focused tracker is added | `#136`, `#137`, `#138`, `#180`, `#182`, `#184`, `#186`, `#188`, `#190`, `#192`, `#194` |
 | Dataset/source breadth and external artifact references | partial | `dataset-source-breadth-tracker.md`, `source-gallery-view-prd.md` | `#196`, `#198`, `#200`, `#202`, `#204`, `#206`, `#208`, `#210`, `#212`, `#214`, `#244`, `#245`, `#246`, `#247`, `#248`, `#249` |
-| Minimal graph-backed viewport editing | partial | `viewport-editing-tracker.md` | `#256`, `#257`; planned: `#258` |
+| Minimal graph-backed viewport editing | complete for current v1 selection/subset spine | `viewport-editing-tracker.md` | `#256`, `#257`, `#258` |
 | Malware byteplot starter workflow | complete for current starter graph and raster output slice | `malware-byteplot-workflow.md` | `#75`, `#79` |
 | Project command history | complete through the current command-history batch | `project-command-history.md` | `#88`, `#96`, `#98`, `#100`, `#102`, `#104`, `#106`, `#108`, `#110`, `#111`, `#112`, `#113`, `#114`, `#120`, `#121`, `#122`, `#123` |
 | PRD/ADR implementation status tracking | complete for the initial status ledger | `prd-adr-implementation-status.md` | `#128` |
@@ -88,8 +88,8 @@ issue-backed implementation slices next.
      `#257` read-only table-to-selection interactions, and `#258` commit
      transient selections as graph-backed subset nodes.
    - Manual edit/source-edit skeletons and direct drawing tools are deferred
-     until the selection identity bridge and committed subset behavior have been
-     validated.
+     until after the current graph-backed selection/subset spine is validated in
+     use.
    - Viewport work should prefer graph-model, workbench, blueprint, and existing
      selection/table seams over broad edits to Rerun core viewport or renderer
      internals, so the product fork can keep updating from upstream with low
