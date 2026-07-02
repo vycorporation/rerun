@@ -28,7 +28,7 @@ This ledger tracks how PRD/ADR material maps to issue-backed implementation in t
 | Demand-driven evaluation and work items | complete | `execution-work-items.md` | `#27`, `#84`, `#86` |
 | Native cubic and renderer-native preview path | partial | `specialized-renderer-path.md` | `#29`, `#36`, `#37`, `#38` |
 | Python operator and project environment lane | partial | `python-operator-surface.md`, `python-environment-status.md` | `#31`, `#32`, `#39`, `#40`, `#41`, `#42`, `#43`, `#44`, `#45`, `#46`, `#55` |
-| Native plugin operator lane | partial | `native-plugin-operator-lane.md` | `#34`, `#51`, `#52`, `#53`, `#54` |
+| Native plugin operator lane | partial | `native-plugin-operator-lane.md` | `#34`, `#51`, `#52`, `#53`, `#54`, `#270` |
 | Procedural asset interface | partial | `procedural-asset-interface.md` | `#33`, `#47`, `#48`, `#49`, `#50`, `#61`, `#152`, `#156`, `#158`, `#160`, `#162`, `#218`, `#220`, `#228`, `#232` |
 | Graph hierarchy and named graph registry | partial | `graph-hierarchy-tracker.md` | `#130`, `#131`, `#132`, `#142`, `#144`, `#146`, `#148`, `#164`, `#166`, `#168`, `#170`, `#172`, `#174`, `#176`, `#178`, `#216`, `#220`, `#222`, `#224`, `#226`, `#228`, `#230` |
 | Reference inputs, stable IDs, diagnostics, and target sets | complete for current v1 reference-input spine | PRD ADRs plus command-history tracker | `#57`, `#58`, `#59`, `#60`, `#62`, `#98`, `#113`, `#114`, `#121`, `#122` |
@@ -102,7 +102,10 @@ issue-backed implementation slices next.
 
 7. Plugin capability and trust policy hardening.
    - Source ADRs: `0012`, `0013`, `0023`, `0068`.
-   - First likely slices: project trust prompts, capability grant persistence, operator enable/disable history, and failure messaging for denied capabilities.
+   - Issue-backed slices: `#270` model-owned native operator trust controls
+     for project trust, per-operator enablement, and capability grants.
+   - Later likely slices: project trust prompts and failure messaging for
+     denied capabilities.
 
 ## Maintenance checklist
 

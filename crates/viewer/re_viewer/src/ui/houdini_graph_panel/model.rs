@@ -3368,6 +3368,72 @@ impl GraphDocument {
                     ProjectCommandDirection::Redo => *new_enabled,
                 },
             ),
+            ProjectCommand::NativeOperatorProjectTrustEdit {
+                old_trusted,
+                new_trusted,
+            } => {
+                self.native_operator_trust.project_trusted = match direction {
+                    ProjectCommandDirection::Undo => *old_trusted,
+                    ProjectCommandDirection::Redo => *new_trusted,
+                };
+                self.refresh_native_operator_cache_statuses();
+                true
+            }
+            ProjectCommand::NativeOperatorEnablementEdit {
+                operator_id,
+                old_enabled,
+                new_enabled,
+            } => {
+                let enabled = match direction {
+                    ProjectCommandDirection::Undo => *old_enabled,
+                    ProjectCommandDirection::Redo => *new_enabled,
+                };
+                if enabled {
+                    if !self
+                        .native_operator_trust
+                        .enabled_operator_ids
+                        .iter()
+                        .any(|enabled_operator_id| enabled_operator_id == operator_id)
+                    {
+                        self.native_operator_trust
+                            .enabled_operator_ids
+                            .push(operator_id.clone());
+                    }
+                } else {
+                    self.native_operator_trust
+                        .enabled_operator_ids
+                        .retain(|enabled_operator_id| enabled_operator_id != operator_id);
+                }
+                self.refresh_native_operator_cache_statuses();
+                true
+            }
+            ProjectCommand::NativeOperatorCapabilityGrantEdit {
+                capability,
+                old_granted,
+                new_granted,
+            } => {
+                let granted = match direction {
+                    ProjectCommandDirection::Undo => *old_granted,
+                    ProjectCommandDirection::Redo => *new_granted,
+                };
+                if granted {
+                    if !self
+                        .native_operator_trust
+                        .granted_capabilities
+                        .contains(capability)
+                    {
+                        self.native_operator_trust
+                            .granted_capabilities
+                            .push(*capability);
+                    }
+                } else {
+                    self.native_operator_trust
+                        .granted_capabilities
+                        .retain(|granted_capability| granted_capability != capability);
+                }
+                self.refresh_native_operator_cache_statuses();
+                true
+            }
             ProjectCommand::ReferenceTargetRemove {
                 reference_node_id,
                 removed_entry,
@@ -5901,6 +5967,92 @@ impl GraphDocument {
         }
 
         Some(record)
+    }
+
+    #[allow(dead_code)]
+    pub fn set_native_operator_project_trusted(&mut self, trusted: bool) -> bool {
+        if self.native_operator_trust.project_trusted == trusted {
+            return false;
+        }
+
+        let old_trusted = self.native_operator_trust.project_trusted;
+        self.native_operator_trust.project_trusted = trusted;
+        self.refresh_native_operator_cache_statuses();
+        self.record_project_command(ProjectCommand::NativeOperatorProjectTrustEdit {
+            old_trusted,
+            new_trusted: trusted,
+        });
+        true
+    }
+
+    #[allow(dead_code)]
+    pub fn set_native_operator_enabled(
+        &mut self,
+        operator_id: impl Into<String>,
+        enabled: bool,
+    ) -> bool {
+        let operator_id = operator_id.into();
+        if operator_id.is_empty() {
+            return false;
+        }
+
+        let old_enabled = self
+            .native_operator_trust
+            .enabled_operator_ids
+            .iter()
+            .any(|enabled_operator_id| enabled_operator_id == &operator_id);
+        if old_enabled == enabled {
+            return false;
+        }
+
+        if enabled {
+            self.native_operator_trust
+                .enabled_operator_ids
+                .push(operator_id.clone());
+        } else {
+            self.native_operator_trust
+                .enabled_operator_ids
+                .retain(|enabled_operator_id| enabled_operator_id != &operator_id);
+        }
+        self.refresh_native_operator_cache_statuses();
+        self.record_project_command(ProjectCommand::NativeOperatorEnablementEdit {
+            operator_id,
+            old_enabled,
+            new_enabled: enabled,
+        });
+        true
+    }
+
+    #[allow(dead_code)]
+    pub fn set_native_operator_capability_grant(
+        &mut self,
+        capability: NativeOperatorCapability,
+        granted: bool,
+    ) -> bool {
+        let old_granted = self
+            .native_operator_trust
+            .granted_capabilities
+            .contains(&capability);
+        if old_granted == granted {
+            return false;
+        }
+
+        if granted {
+            self.native_operator_trust
+                .granted_capabilities
+                .push(capability);
+        } else {
+            self.native_operator_trust
+                .granted_capabilities
+                .retain(|granted_capability| *granted_capability != capability);
+        }
+        self.refresh_native_operator_cache_statuses();
+        self.record_project_command(ProjectCommand::NativeOperatorCapabilityGrantEdit {
+            capability,
+            old_granted,
+            new_granted: granted,
+        });
+        true
     }
 
     #[allow(dead_code)]
@@ -13421,6 +13573,20 @@ pub(crate) enum ProjectCommand {
         old_enabled: bool,
         new_enabled: bool,
     },
+    NativeOperatorProjectTrustEdit {
+        old_trusted: bool,
+        new_trusted: bool,
+    },
+    NativeOperatorEnablementEdit {
+        operator_id: String,
+        old_enabled: bool,
+        new_enabled: bool,
+    },
+    NativeOperatorCapabilityGrantEdit {
+        capability: NativeOperatorCapability,
+        old_granted: bool,
+        new_granted: bool,
+    },
     ReferenceTargetRemove {
         reference_node_id: String,
         reference_node_name: String,
@@ -13562,6 +13728,15 @@ impl ProjectCommand {
                 ..
             } => {
                 format!("Set {reference_node_name} target {target_node_name}")
+            }
+            Self::NativeOperatorProjectTrustEdit { .. } => {
+                "Set native operator project trust".to_owned()
+            }
+            Self::NativeOperatorEnablementEdit { operator_id, .. } => {
+                format!("Set native operator {operator_id} enablement")
+            }
+            Self::NativeOperatorCapabilityGrantEdit { capability, .. } => {
+                format!("Set native operator {capability:?} grant")
             }
             Self::ReferenceTargetRemove {
                 reference_node_name,
@@ -26770,6 +26945,231 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             .expect("native info should exist")
             .load_status;
         assert_eq!(incompatible, NativeOperatorLoadStatus::HostIncompatible);
+    }
+
+    #[test]
+    fn native_operator_trust_controls_are_undoable_project_commands() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+
+        assert!(graph.set_native_operator_project_trusted(true));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Set native operator project trust")
+        );
+        assert!(matches!(
+            graph.command_history.undo_stack.last(),
+            Some(ProjectCommand::NativeOperatorProjectTrustEdit {
+                old_trusted: false,
+                new_trusted: true,
+            })
+        ));
+        assert_eq!(
+            graph
+                .selected_node_info(node_index)
+                .expect("native node info should exist")
+                .native_operator
+                .expect("native info should exist")
+                .load_status,
+            NativeOperatorLoadStatus::MissingCapabilityGrant
+        );
+
+        assert!(graph.undo_project_command());
+        assert!(!graph.native_operator_trust.project_trusted);
+        assert_eq!(
+            graph.redo_project_command_label().as_deref(),
+            Some("Set native operator project trust")
+        );
+        assert_eq!(
+            graph
+                .selected_node_info(node_index)
+                .expect("native node info should exist")
+                .native_operator
+                .expect("native info should exist")
+                .load_status,
+            NativeOperatorLoadStatus::TrustRequired
+        );
+
+        assert!(graph.redo_project_command());
+        assert!(graph.native_operator_trust.project_trusted);
+        assert!(!graph.set_native_operator_project_trusted(true));
+    }
+
+    #[test]
+    fn native_operator_enablement_and_capability_grants_are_undoable() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+
+        assert!(graph.set_native_operator_enabled("vy.native.simplify_curves", true));
+        assert_eq!(
+            graph.undo_project_command_label().as_deref(),
+            Some("Set native operator vy.native.simplify_curves enablement")
+        );
+        assert_eq!(
+            graph
+                .selected_node_info(node_index)
+                .expect("native node info should exist")
+                .native_operator
+                .expect("native info should exist")
+                .load_status,
+            NativeOperatorLoadStatus::MissingCapabilityGrant
+        );
+
+        assert!(
+            graph
+                .set_native_operator_capability_grant(NativeOperatorCapability::GeometryRead, true)
+        );
+        assert!(
+            graph.set_native_operator_capability_grant(
+                NativeOperatorCapability::GeometryWrite,
+                true
+            )
+        );
+        assert_eq!(
+            graph
+                .selected_node_info(node_index)
+                .expect("native node info should exist")
+                .native_operator
+                .expect("native info should exist")
+                .load_status,
+            NativeOperatorLoadStatus::Ready
+        );
+
+        assert!(graph.undo_project_command());
+        assert_eq!(
+            graph
+                .selected_node_info(node_index)
+                .expect("native node info should exist")
+                .native_operator
+                .expect("native info should exist")
+                .load_status,
+            NativeOperatorLoadStatus::MissingCapabilityGrant
+        );
+
+        assert!(graph.undo_project_command());
+        assert!(
+            !graph
+                .native_operator_trust
+                .granted_capabilities
+                .contains(&NativeOperatorCapability::GeometryRead)
+        );
+        assert!(graph.undo_project_command());
+        assert!(
+            !graph
+                .native_operator_trust
+                .enabled_operator_ids
+                .iter()
+                .any(|operator_id| operator_id == "vy.native.simplify_curves")
+        );
+        assert_eq!(
+            graph
+                .selected_node_info(node_index)
+                .expect("native node info should exist")
+                .native_operator
+                .expect("native info should exist")
+                .load_status,
+            NativeOperatorLoadStatus::TrustRequired
+        );
+
+        assert!(graph.redo_project_command());
+        assert!(graph.redo_project_command());
+        assert!(graph.redo_project_command());
+        assert_eq!(
+            graph
+                .selected_node_info(node_index)
+                .expect("native node info should exist")
+                .native_operator
+                .expect("native info should exist")
+                .load_status,
+            NativeOperatorLoadStatus::Ready
+        );
+    }
+
+    #[test]
+    fn native_operator_trust_policy_changes_invalidate_cached_native_outputs() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+        trust_sample_native_operator(&mut graph);
+        let node_index = graph.add_native_operator_node("vy.native.simplify_curves");
+        graph
+            .record_native_operator_output(
+                node_index,
+                NativeOperatorOutputCounts {
+                    geometry_records: 4,
+                    attribute_records: 0,
+                    layer_records: 0,
+                },
+            )
+            .expect("native output should record");
+        graph.nodes[node_index].evaluation.state = EvaluationState::Cached;
+
+        assert!(
+            graph.set_native_operator_capability_grant(
+                NativeOperatorCapability::GeometryWrite,
+                false
+            )
+        );
+
+        let info = graph
+            .selected_node_info(node_index)
+            .expect("native node info should exist");
+        assert_eq!(info.evaluation.state, EvaluationState::Stale);
+        assert_eq!(
+            info.native_operator
+                .expect("native info should exist")
+                .load_status,
+            NativeOperatorLoadStatus::MissingCapabilityGrant
+        );
+        assert!(
+            info.evaluation
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("cache key changed"))
+        );
+    }
+
+    #[test]
+    fn native_operator_trust_policy_round_trips_after_model_actions() {
+        let mut graph = GraphDocument::sample();
+        graph
+            .native_operator_declarations
+            .push(sample_native_operator_declaration());
+
+        assert!(graph.set_native_operator_project_trusted(true));
+        assert!(graph.set_native_operator_enabled("vy.native.simplify_curves", true));
+        assert!(
+            graph
+                .set_native_operator_capability_grant(NativeOperatorCapability::GeometryRead, true)
+        );
+
+        let json = graph.to_sidecar_json().unwrap();
+        let mut restored = GraphDocument::sample();
+        restored.apply_sidecar_json(&json).unwrap();
+
+        assert!(restored.native_operator_trust.project_trusted);
+        assert!(
+            restored
+                .native_operator_trust
+                .enabled_operator_ids
+                .iter()
+                .any(|operator_id| operator_id == "vy.native.simplify_curves")
+        );
+        assert!(
+            restored
+                .native_operator_trust
+                .granted_capabilities
+                .contains(&NativeOperatorCapability::GeometryRead)
+        );
+        assert!(restored.command_history.undo_stack.is_empty());
+        assert!(restored.command_history.redo_stack.is_empty());
     }
 
     #[test]
