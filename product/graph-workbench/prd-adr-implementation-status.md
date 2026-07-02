@@ -85,8 +85,8 @@ issue-backed implementation slices next.
 5. Minimal graph-backed viewport editing.
    - Source ADRs: `0029`, `0047`, `0050`.
    - Issue-backed slices: `#256` transient viewport selection identity bridge,
-     `#257` commit transient selections as graph-backed subset nodes, and `#258`
-     read-only table-to-selection interactions.
+     `#257` read-only table-to-selection interactions, and `#258` commit
+     transient selections as graph-backed subset nodes.
    - Manual edit/source-edit skeletons and direct drawing tools are deferred
      until the selection identity bridge and committed subset behavior have been
      validated.

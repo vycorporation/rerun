@@ -35,8 +35,8 @@ for selection, table inspection, and later graph-backed edit operations.
 | Issue | Status | Slice | Outcome |
 | --- | --- | --- | --- |
 | `#256` | planned | Transient viewport selection identity bridge | Map supported viewport selections to graph record identities without persisting viewport-only pick ids, row positions, or screen positions as durable graph data. |
-| `#257` | planned | Commit transient selections as graph-backed subset nodes | Add an explicit commit action that creates or updates visible selection or mask graph data using stable record identities from `#256`. |
-| `#258` | planned | Read-only table-to-selection interactions | Let table row selection and local inspection filters share the transient selection identity bridge while keeping table values read-only and local filters non-durable until committed. |
+| `#257` | planned | Read-only table-to-selection interactions | Let table row selection and local inspection filters share the transient selection identity bridge while keeping table values read-only and local filters non-durable until committed. |
+| `#258` | planned | Commit transient selections as graph-backed subset nodes | Add an explicit commit action that creates or updates visible selection or mask graph data using stable record identities from `#256`. |
 
 ## Deferred implementation candidates
 
