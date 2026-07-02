@@ -141,6 +141,8 @@ pub(crate) struct HoudiniGraphPanel {
     table_sort: AttributeTableSort,
     table_sort_descending: bool,
     table_commit_status: Option<String>,
+    table_selected_record_fingerprint: Option<String>,
+    table_selection_status: Option<String>,
     asset_name: String,
     asset_description: String,
     asset_help: String,
@@ -210,6 +212,8 @@ impl Default for HoudiniGraphPanel {
             table_sort: AttributeTableSort::RecordIndex,
             table_sort_descending: false,
             table_commit_status: None,
+            table_selected_record_fingerprint: None,
+            table_selection_status: None,
             asset_name: DEFAULT_ASSET_NAME.to_owned(),
             asset_description: DEFAULT_ASSET_DESCRIPTION.to_owned(),
             asset_help: DEFAULT_ASSET_HELP.to_owned(),
@@ -6343,6 +6347,9 @@ impl HoudiniGraphPanel {
         if let Some(status) = &self.table_commit_status {
             ui.weak(status);
         }
+        if let Some(status) = &self.table_selection_status {
+            ui.weak(status);
+        }
 
         let visible_output_count = graph.visible_output_count();
         let use_preview = visible_output_count > LARGE_ATTRIBUTE_TABLE_ROW_LIMIT;
@@ -6386,14 +6393,29 @@ impl HoudiniGraphPanel {
                         ui.end_row();
 
                         for row in rows {
-                            self.attribute_table_row_ui(ui, &row);
+                            self.attribute_table_row_ui(ui, graph, &row);
                         }
                     });
             });
     }
 
-    fn attribute_table_row_ui(&self, ui: &mut Ui, row: &AttributeTableRow) {
-        ui.label(row.record_index.to_string());
+    fn attribute_table_row_ui(
+        &mut self,
+        ui: &mut Ui,
+        graph: &GraphDocument,
+        row: &AttributeTableRow,
+    ) {
+        let selected = self.table_selected_record_fingerprint.as_deref()
+            == Some(row.geometry_fingerprint.as_str());
+        if ui
+            .selectable_label(selected, row.record_index.to_string())
+            .on_hover_text("Select this read-only record for graph identity inspection.")
+            .clicked()
+        {
+            self.table_selected_record_fingerprint = Some(row.geometry_fingerprint.clone());
+            self.table_selection_status =
+                Some(graph.transient_table_selection_for_row(row).summary());
+        }
         ui.label(row.geometry_kind.as_str());
         ui.label(format!("{:.2}", row.score));
         ui.label(row.layer.as_str());
