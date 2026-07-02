@@ -8020,7 +8020,10 @@ impl GraphDocument {
     }
 
     pub fn update_source_from_query_bridge(&mut self, query_bridge: &RerunQueryBridge) {
-        if self.source.metadata.provenance == SourceProvenance::ParquetImport {
+        if matches!(
+            self.source.metadata.provenance,
+            SourceProvenance::ParquetImport | SourceProvenance::CsvImport
+        ) {
             return;
         }
 
@@ -8039,6 +8042,32 @@ impl GraphDocument {
     ) -> anyhow::Result<usize> {
         let path = path.as_ref();
         match load_cubic_bezier_parquet_with_metadata(path) {
+            Ok(load) => {
+                let count = load.records.len();
+                self.source = GraphSource::recording_import(
+                    count,
+                    Some(path.display().to_string()),
+                    load.metadata,
+                );
+                self.recording_geometry = load
+                    .records
+                    .into_iter()
+                    .map(|record| record.geometry)
+                    .collect();
+                self.substrate_raster = None;
+                self.update_source_node_readiness();
+                Ok(count)
+            }
+            Err(err) => {
+                self.source = self.source.clone().with_import_error(path, &err);
+                Err(err)
+            }
+        }
+    }
+
+    pub fn import_polygon_csv_path(&mut self, path: impl AsRef<Path>) -> anyhow::Result<usize> {
+        let path = path.as_ref();
+        match load_polygon_csv_with_metadata(path) {
             Ok(load) => {
                 let count = load.records.len();
                 self.source = GraphSource::recording_import(
@@ -8427,6 +8456,149 @@ pub(crate) struct HoudiniParquetLoad {
     pub metadata: SourceMetadata,
 }
 
+pub(crate) struct HoudiniCsvCoordinateSchema;
+
+impl HoudiniCsvCoordinateSchema {
+    const MIN_VERTEX_COUNT: usize = 3;
+    const SCORE_COLUMN: &'static str = "score";
+
+    fn x_column(index: usize) -> String {
+        format!("x{index}")
+    }
+
+    fn y_column(index: usize) -> String {
+        format!("y{index}")
+    }
+}
+
+pub(crate) struct HoudiniCsvLoad {
+    pub records: Vec<HoudiniGeometryRecord>,
+    pub metadata: SourceMetadata,
+}
+
+pub(crate) fn load_polygon_csv_with_metadata(
+    path: impl AsRef<Path>,
+) -> anyhow::Result<HoudiniCsvLoad> {
+    let path = path.as_ref();
+    let contents = std::fs::read_to_string(path)?;
+    let delimiter = if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("tsv"))
+    {
+        '\t'
+    } else {
+        ','
+    };
+    let mut lines = contents.lines().filter(|line| !line.trim().is_empty());
+    let header = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("CSV coordinate source is empty."))?;
+    let headers = split_delimited_row(header, delimiter);
+    let vertex_columns = csv_polygon_vertex_columns(&headers)?;
+    let score_column = headers
+        .iter()
+        .position(|header| header.eq_ignore_ascii_case(HoudiniCsvCoordinateSchema::SCORE_COLUMN));
+
+    let mut records = Vec::new();
+    for (line_index, line) in lines.enumerate() {
+        let row_number = line_index + 2;
+        let values = split_delimited_row(line, delimiter);
+        let mut points = Vec::with_capacity(vertex_columns.len());
+        for (x_index, y_index) in &vertex_columns {
+            let x = csv_numeric_value(&values, *x_index, row_number, &headers[*x_index])?;
+            let y = csv_numeric_value(&values, *y_index, row_number, &headers[*y_index])?;
+            points.push(GraphPoint::new(x, y));
+        }
+        let score = if let Some(score_column) = score_column {
+            csv_numeric_value(&values, score_column, row_number, &headers[score_column])?
+        } else {
+            1.0
+        };
+        let Some(record) = HoudiniGeometryRecord::polygon(LayerKind::Polygons, points, score)
+        else {
+            anyhow::bail!(
+                "CSV coordinate row {row_number} must contain at least three polygon vertices."
+            );
+        };
+        records.push(record);
+    }
+
+    if records.is_empty() {
+        anyhow::bail!("CSV coordinate source did not contain any polygon rows.");
+    }
+
+    let geometry = records
+        .iter()
+        .map(|record| record.geometry.clone())
+        .collect::<Vec<_>>();
+    let recognized_columns = vertex_columns
+        .iter()
+        .flat_map(|(x_index, y_index)| [headers[*x_index].clone(), headers[*y_index].clone()])
+        .collect::<Vec<_>>();
+    let metadata = SourceMetadata::from_geometry(
+        SourceProvenance::CsvImport,
+        Some(path.display().to_string()),
+        &geometry,
+        recognized_columns,
+    );
+
+    Ok(HoudiniCsvLoad { records, metadata })
+}
+
+fn csv_polygon_vertex_columns(headers: &[String]) -> anyhow::Result<Vec<(usize, usize)>> {
+    let mut columns = Vec::new();
+    for vertex_index in 0.. {
+        let x_name = HoudiniCsvCoordinateSchema::x_column(vertex_index);
+        let y_name = HoudiniCsvCoordinateSchema::y_column(vertex_index);
+        let x_index = headers
+            .iter()
+            .position(|header| header.eq_ignore_ascii_case(&x_name));
+        let y_index = headers
+            .iter()
+            .position(|header| header.eq_ignore_ascii_case(&y_name));
+        match (x_index, y_index) {
+            (Some(x_index), Some(y_index)) => columns.push((x_index, y_index)),
+            (None, None) => break,
+            _ => anyhow::bail!(
+                "CSV coordinate source must provide both `{x_name}` and `{y_name}` columns."
+            ),
+        }
+    }
+
+    if columns.len() < HoudiniCsvCoordinateSchema::MIN_VERTEX_COUNT {
+        anyhow::bail!("CSV coordinate source requires x0,y0,x1,y1,x2,y2 polygon columns.");
+    }
+
+    Ok(columns)
+}
+
+fn csv_numeric_value(
+    values: &[String],
+    index: usize,
+    row_number: usize,
+    column_name: &str,
+) -> anyhow::Result<f32> {
+    let value = values
+        .get(index)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("CSV coordinate row {row_number} is missing `{column_name}`.")
+        })?;
+    value.parse::<f32>().map_err(|err| {
+        anyhow::anyhow!(
+            "CSV coordinate row {row_number} has invalid `{column_name}` value `{value}`: {err}"
+        )
+    })
+}
+
+fn split_delimited_row(row: &str, delimiter: char) -> Vec<String> {
+    row.split(delimiter)
+        .map(|value| value.trim().trim_matches('"').to_owned())
+        .collect()
+}
+
 fn append_cubic_bezier_batch(
     batch: RecordBatch,
     records: &mut Vec<HoudiniGeometryRecord>,
@@ -8753,6 +8925,7 @@ impl SourceLocator {
             SourceProvenance::SyntheticMalware => Self::generated("synthetic malware starter"),
             SourceProvenance::PythonOperator => Self::generated("python operator output"),
             SourceProvenance::ParquetImport => Self::generated("parquet import"),
+            SourceProvenance::CsvImport => Self::generated("csv coordinate import"),
         }
     }
 
@@ -10239,9 +10412,9 @@ fn source_format_capabilities() -> Vec<SourceFormatCapability> {
         },
         SourceFormatCapability {
             kind: Kind::CsvCoordinates,
-            status: Status::PlannedV1,
+            status: Status::Supported,
             geometry_kinds: vec![HoudiniGeometryKind::Polygon],
-            notes: "Planned v1 source format when coordinate or geometry columns are configured."
+            notes: "Supports headered CSV/TSV polygon coordinate rows with x0,y0,x1,y1,x2,y2 columns and optional score."
                 .to_owned(),
         },
         SourceFormatCapability {
@@ -10286,6 +10459,7 @@ fn source_format_capabilities() -> Vec<SourceFormatCapability> {
 pub(crate) enum SourceProvenance {
     DemoFallback,
     ParquetImport,
+    CsvImport,
     RecordingQuery,
     SyntheticBenchmark,
     SyntheticMalware,
@@ -10297,6 +10471,7 @@ impl SourceProvenance {
         match self {
             Self::DemoFallback => "demo fallback",
             Self::ParquetImport => "parquet import",
+            Self::CsvImport => "csv coordinate import",
             Self::RecordingQuery => "recording query",
             Self::SyntheticBenchmark => "synthetic benchmark",
             Self::SyntheticMalware => "synthetic malware",
@@ -15514,7 +15689,7 @@ mod tests {
         SubstrateCoordinateContract, SubstrateOrigin, SubstrateYAxis,
         TransientViewportRecordTarget, TransientViewportSelection,
         TransientViewportSelectionStatus, ViewerGeometry, load_cubic_bezier_parquet,
-        load_cubic_bezier_parquet_with_metadata,
+        load_cubic_bezier_parquet_with_metadata, load_polygon_csv_with_metadata,
     };
     use std::sync::Arc;
 
@@ -23040,6 +23215,126 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
     }
 
     #[test]
+    fn polygon_csv_loader_builds_polygon_records_from_coordinate_columns() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let csv_path = temp_dir.path().join("polygons.csv");
+        std::fs::write(
+            &csv_path,
+            "id,x0,y0,x1,y1,x2,y2,x3,y3,score\nfirst,0,0,1,0,1,1,0,1,0.75\nsecond,2,2,3,2,2,3,2,2,0.5\n",
+        )
+        .unwrap();
+
+        let load = load_polygon_csv_with_metadata(&csv_path).unwrap();
+
+        assert_eq!(load.records.len(), 2);
+        assert_eq!(load.metadata.provenance, SourceProvenance::CsvImport);
+        assert_eq!(load.metadata.record_count, 2);
+        assert_eq!(load.metadata.polygon_count, 2);
+        assert_eq!(load.metadata.cubic_bezier_count, 0);
+        assert_eq!(
+            load.metadata.recognized_control_point_columns,
+            vec!["x0", "y0", "x1", "y1", "x2", "y2", "x3", "y3"]
+        );
+        let Geometry::Polygon(polygon) = load.records[0].geometry.clone() else {
+            panic!("expected polygon record");
+        };
+        assert_eq!(polygon.points.len(), 4);
+        assert_eq!(polygon.points[0], GraphPoint::new(0.0, 0.0));
+        assert_eq!(polygon.points[3], GraphPoint::new(0.0, 1.0));
+        assert_eq!(polygon.score, 0.75);
+    }
+
+    #[test]
+    fn polygon_tsv_loader_uses_tab_delimiter_and_default_score() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let tsv_path = temp_dir.path().join("polygons.tsv");
+        std::fs::write(&tsv_path, "x0\ty0\tx1\ty1\tx2\ty2\n0\t0\t2\t0\t0\t2\n").unwrap();
+
+        let load = load_polygon_csv_with_metadata(&tsv_path).unwrap();
+
+        assert_eq!(load.records.len(), 1);
+        let Geometry::Polygon(polygon) = load.records[0].geometry.clone() else {
+            panic!("expected polygon record");
+        };
+        assert_eq!(polygon.points.len(), 3);
+        assert_eq!(polygon.score, 1.0);
+    }
+
+    #[test]
+    fn polygon_csv_loader_requires_coordinate_columns_and_numeric_values() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing_path = temp_dir.path().join("missing.csv");
+        std::fs::write(&missing_path, "x0,y0,x1,y1,x2\n0,0,1,0,1\n").unwrap();
+        let missing_err = match load_polygon_csv_with_metadata(&missing_path) {
+            Ok(_) => panic!("missing y2 should fail"),
+            Err(err) => err,
+        };
+        assert!(missing_err.to_string().contains("y2"));
+
+        let malformed_path = temp_dir.path().join("malformed.csv");
+        std::fs::write(&malformed_path, "x0,y0,x1,y1,x2,y2\n0,0,nope,0,1,1\n").unwrap();
+        let malformed_err = match load_polygon_csv_with_metadata(&malformed_path) {
+            Ok(_) => panic!("invalid numeric coordinate should fail"),
+            Err(err) => err,
+        };
+        assert!(malformed_err.to_string().contains("invalid `x1` value"));
+    }
+
+    #[test]
+    fn graph_document_can_import_polygon_csv_path_without_query_bridge() {
+        let mut graph = GraphDocument::sample();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let csv_path = temp_dir.path().join("polygons.csv");
+        std::fs::write(&csv_path, "x0,y0,x1,y1,x2,y2,score\n0,0,1,0,0,1,0.8\n").unwrap();
+
+        let imported = graph.import_polygon_csv_path(&csv_path).unwrap();
+
+        assert_eq!(imported, 1);
+        assert_eq!(graph.source.mode, super::GraphSourceMode::RecordingQuery);
+        assert_eq!(graph.source.matching_entity_count, 1);
+        assert_eq!(
+            graph.source.metadata.provenance,
+            SourceProvenance::CsvImport
+        );
+        assert_eq!(graph.source.metadata.record_count, 1);
+        assert_eq!(graph.source.metadata.polygon_count, 1);
+        assert!(graph.source.metadata.bounds.is_some());
+        assert_eq!(graph.visible_output_count(), 1);
+        assert!(
+            graph
+                .viewer_output()
+                .items
+                .iter()
+                .any(|item| matches!(item.geometry, ViewerGeometry::Polygon(_)))
+        );
+    }
+
+    #[test]
+    fn failed_polygon_csv_import_preserves_current_source_geometry() {
+        let mut graph = GraphDocument::sample();
+        let previous_visible_count = graph.visible_output_count();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let csv_path = temp_dir.path().join("bad-polygons.csv");
+        std::fs::write(&csv_path, "x0,y0,x1,y1,x2,y2\n0,0,bad,0,1,1\n").unwrap();
+
+        let err = graph
+            .import_polygon_csv_path(&csv_path)
+            .expect_err("malformed CSV should fail import");
+
+        assert!(err.to_string().contains("invalid `x1` value"));
+        assert_eq!(graph.visible_output_count(), previous_visible_count);
+        assert_eq!(
+            graph.source.metadata.provenance,
+            SourceProvenance::DemoFallback
+        );
+        assert!(graph.source.import_error.is_some());
+        assert_eq!(
+            graph.source.source_path,
+            Some(csv_path.display().to_string())
+        );
+    }
+
+    #[test]
     fn checked_in_sample_parquet_loads_native_cubic_beziers() {
         let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("data/houdini_cubic_sample.parquet");
@@ -24306,6 +24601,14 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
         );
         assert!(parquet.notes.contains("eight control-point columns"));
 
+        let csv = capabilities
+            .iter()
+            .find(|capability| capability.kind == SourceFormatKind::CsvCoordinates)
+            .expect("CSV coordinate capability should be present");
+        assert_eq!(csv.status, SourceFormatSupportStatus::Supported);
+        assert_eq!(csv.geometry_kinds, vec![HoudiniGeometryKind::Polygon]);
+        assert!(csv.notes.contains("x0,y0,x1,y1,x2,y2"));
+
         let planned =
             graph.source_format_capabilities_with_status(SourceFormatSupportStatus::PlannedV1);
         assert!(
@@ -24317,11 +24620,6 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             planned
                 .iter()
                 .any(|capability| capability.kind == SourceFormatKind::FlatGeobuf)
-        );
-        assert!(
-            planned
-                .iter()
-                .any(|capability| capability.kind == SourceFormatKind::CsvCoordinates)
         );
         assert!(
             planned
@@ -24382,7 +24680,7 @@ with open(args.houdini_output, "w", encoding="utf-8") as handle:
             (
                 "/tmp/points.csv",
                 SourceFormatKind::CsvCoordinates,
-                SourceFormatSupportStatus::PlannedV1,
+                SourceFormatSupportStatus::Supported,
             ),
             (
                 "/tmp/points.laz",
