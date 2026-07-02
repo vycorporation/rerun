@@ -3176,12 +3176,11 @@ impl HoudiniGraphPanel {
                         ui.weak("No instances in this project.");
                     } else {
                         egui::Grid::new(format!("houdini_asset_gallery_usage_{}", entry.asset_id))
-                            .num_columns(7)
+                            .num_columns(6)
                             .spacing([10.0, 4.0])
                             .striped(true)
                             .show(ui, |ui| {
                                 ui.strong("Node");
-                                ui.strong("Graph");
                                 ui.strong("Version");
                                 ui.strong("State");
                                 ui.strong("");
@@ -3189,54 +3188,61 @@ impl HoudiniGraphPanel {
                                 ui.strong("");
                                 ui.end_row();
 
-                                for usage in &entry.usages {
-                                    ui.label(&usage.node_name).on_hover_text(&usage.node_path);
-                                    ui.label(&usage.graph_path);
-                                    ui.label(format!(
-                                        "{} / {}",
-                                        usage.instance_version,
-                                        usage.version_status.as_str()
-                                    ));
-                                    ui.label(if usage.contents_unlocked {
-                                        "unlocked"
-                                    } else {
-                                        "matched"
-                                    });
-                                    if ui.button("Go").clicked() {
-                                        self.jump_to_graph_node(
-                                            graph,
-                                            usage.node_index,
-                                            &usage.graph_id,
-                                        );
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            usage.can_match_definition,
-                                            egui::Button::new("Match"),
-                                        )
-                                        .on_hover_text(
-                                            "Relock local contents to the pinned definition.",
-                                        )
-                                        .clicked()
-                                    {
-                                        self.match_asset_definition(graph, usage.node_index);
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            usage.can_upgrade_to_current_definition,
-                                            egui::Button::new("Upgrade"),
-                                        )
-                                        .on_hover_text(
-                                            "Upgrade this instance to the current definition.",
-                                        )
-                                        .clicked()
-                                    {
-                                        self.upgrade_asset_to_current_definition(
-                                            graph,
-                                            usage.node_index,
-                                        );
+                                for group in asset_usage_graph_groups(&entry.usages) {
+                                    ui.strong(group.graph_path);
+                                    for _ in 0..5 {
+                                        ui.strong("");
                                     }
                                     ui.end_row();
+
+                                    for usage in group.usages {
+                                        ui.label(&usage.node_name).on_hover_text(&usage.node_path);
+                                        ui.label(format!(
+                                            "{} / {}",
+                                            usage.instance_version,
+                                            usage.version_status.as_str()
+                                        ));
+                                        ui.label(if usage.contents_unlocked {
+                                            "unlocked"
+                                        } else {
+                                            "matched"
+                                        });
+                                        if ui.button("Go").clicked() {
+                                            self.jump_to_graph_node(
+                                                graph,
+                                                usage.node_index,
+                                                &usage.graph_id,
+                                            );
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                usage.can_match_definition,
+                                                egui::Button::new("Match"),
+                                            )
+                                            .on_hover_text(
+                                                "Relock local contents to the pinned definition.",
+                                            )
+                                            .clicked()
+                                        {
+                                            self.match_asset_definition(graph, usage.node_index);
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                usage.can_upgrade_to_current_definition,
+                                                egui::Button::new("Upgrade"),
+                                            )
+                                            .on_hover_text(
+                                                "Upgrade this instance to the current definition.",
+                                            )
+                                            .clicked()
+                                        {
+                                            self.upgrade_asset_to_current_definition(
+                                                graph,
+                                                usage.node_index,
+                                            );
+                                        }
+                                        ui.end_row();
+                                    }
                                 }
                             });
                     }
@@ -6157,6 +6163,31 @@ fn asset_gallery_entry_matches(entry: &model::ProceduralAssetGalleryEntry, filte
         })
 }
 
+struct AssetUsageGraphGroup<'a> {
+    graph_path: &'a str,
+    usages: Vec<&'a model::ProceduralAssetUsageInfo>,
+}
+
+fn asset_usage_graph_groups(
+    usages: &[model::ProceduralAssetUsageInfo],
+) -> Vec<AssetUsageGraphGroup<'_>> {
+    let mut groups = Vec::<AssetUsageGraphGroup<'_>>::new();
+    for usage in usages {
+        if let Some(group) = groups
+            .last_mut()
+            .filter(|group| group.graph_path == usage.graph_path)
+        {
+            group.usages.push(usage);
+        } else {
+            groups.push(AssetUsageGraphGroup {
+                graph_path: &usage.graph_path,
+                usages: vec![usage],
+            });
+        }
+    }
+    groups
+}
+
 fn operator_matches(filter: &str, label: &str, aliases: &[&str]) -> bool {
     filter.is_empty()
         || label.to_lowercase().contains(filter)
@@ -7429,8 +7460,8 @@ fn draw_arrowhead(painter: &egui::Painter, tip: Pos2, color: Color32) {
 mod tests {
     use super::{
         ConnectionDragPreview, ConnectionDragState, GraphSearchTarget, GraphWorkbenchPane,
-        HoudiniGraphPanel, NodePortKind, OperatorPaletteAction, connection_drag_preview,
-        distance_to_segment, graph_edge_at, layout_node_rects,
+        HoudiniGraphPanel, NodePortKind, OperatorPaletteAction, asset_usage_graph_groups,
+        connection_drag_preview, distance_to_segment, graph_edge_at, layout_node_rects,
         model::{GraphContainerStatus, NodeKind, ProjectGraphMetadata, ProjectGraphRole},
         node_indices_in_selection_rect, node_primary_port_at, node_primary_port_rect,
         operator_palette_action_available, operator_palette_entries,
@@ -8077,6 +8108,39 @@ mod tests {
 
         panel.asset_gallery_filter = "no such asset".to_owned();
         assert!(panel.filtered_asset_gallery_entries(&graph).is_empty());
+    }
+
+    #[test]
+    fn asset_gallery_usages_group_by_graph_path() {
+        let mut graph = GraphDocument::sample();
+        let (asset_id, _) = graph.create_asset_instance_from_graph(
+            "Grouped Gallery",
+            "Created for grouping tests.",
+            "Use from the asset gallery.",
+        );
+        graph.graph_registry.graphs.push(ProjectGraphMetadata {
+            graph_id: "analysis".to_owned(),
+            name: "Analysis".to_owned(),
+            path: "/obj/analysis".to_owned(),
+            role: ProjectGraphRole::Subgraph,
+        });
+        graph
+            .select_graph_by_id("analysis")
+            .expect("analysis graph should be selectable");
+        graph.add_procedural_asset_node(asset_id);
+
+        let entry = graph
+            .procedural_asset_gallery_entries()
+            .into_iter()
+            .find(|entry| entry.display_name == "Grouped Gallery")
+            .expect("asset gallery entry should exist");
+        let groups = asset_usage_graph_groups(&entry.usages);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].graph_path, "/obj/analysis");
+        assert_eq!(groups[0].usages.len(), 1);
+        assert_eq!(groups[1].graph_path, "/obj/main");
+        assert_eq!(groups[1].usages.len(), 1);
     }
 
     #[test]
