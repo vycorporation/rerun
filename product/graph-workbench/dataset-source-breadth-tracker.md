@@ -48,6 +48,7 @@ for the dataset/source breadth lane.
 | `#248` | complete | Source-gallery open-in-Rerun actions | Adds explicit selected-item actions that route image and recording sources through Rerun's native file/URL loader while leaving missing, live, generated, manifest, and unsupported data sources disabled with explanatory status. |
 | `#249` | complete | Source-gallery source-node actions | Adds explicit selected-entry and checked-entry actions that create graph-owned source nodes or source collections with durable locator metadata, undo/redo support, and sidecar persistence without embedding source contents or thumbnails. |
 | `#262` | complete | Source package writes with copied local artifacts and hashes | Adds an explicit native package write action that creates a package directory, copies eligible local source artifacts to manifest-owned relative paths, records deterministic content hashes, and leaves missing, remote, generated, live, and reference-only artifacts external with diagnostics. |
+| `#264` | complete | Polygon coordinate CSV import | Adds a graph-owned CSV/TSV import path for headered polygon coordinate rows, updates source metadata/capability reporting, and preserves the current source geometry when malformed coordinate files fail to load. |
 
 ## Next implementation candidates
 
@@ -77,6 +78,8 @@ for the dataset/source breadth lane.
 3. Source-format import breadth.
    - Build on `#198` capability records and `#208` inference reports.
    - Add one parser family at a time.
+   - `#264` adds the first CSV/TSV polygon coordinate parser for explicit
+     `x0,y0,x1,y1,x2,y2` style coordinate columns.
    - Keep source records and prepared representations inspectable.
    - Avoid GIS/CRS expansion unless a source-specific issue explicitly reopens
      that product scope.

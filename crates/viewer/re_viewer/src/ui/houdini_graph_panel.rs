@@ -2780,6 +2780,15 @@ impl HoudiniGraphPanel {
             {
                 self.import_parquet_path(graph, path);
             }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if ui.button("Import CSV/TSV...").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("CSV/TSV", &["csv", "tsv"])
+                    .pick_file()
+            {
+                self.import_csv_path(graph, path);
+            }
         });
         if let Some(path) = &self.last_parquet_path {
             ui.weak(path);
@@ -4175,6 +4184,20 @@ impl HoudiniGraphPanel {
             Err(err) => {
                 self.last_parquet_path = Some(path.display().to_string());
                 self.parquet_status = Some(format!("Parquet import failed: {err}"));
+            }
+        }
+    }
+
+    fn import_csv_path(&mut self, graph: &mut GraphDocument, path: impl AsRef<std::path::Path>) {
+        let path = path.as_ref();
+        match graph.import_polygon_csv_path(path) {
+            Ok(imported) => {
+                self.last_parquet_path = Some(path.display().to_string());
+                self.parquet_status = Some(format!("Imported {imported} CSV polygon records"));
+            }
+            Err(err) => {
+                self.last_parquet_path = Some(path.display().to_string());
+                self.parquet_status = Some(format!("CSV import failed: {err}"));
             }
         }
     }
