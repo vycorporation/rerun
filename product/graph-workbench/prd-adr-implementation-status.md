@@ -68,8 +68,8 @@ issue-backed implementation slices next.
 
 2. Procedural asset authoring depth.
    - Source ADRs: `0009`, `0010`, `0011`, `0077`, `0078`.
-   - Issue-backed slices: `#152` promoted parameter binding metadata, `#156` match-definition and upgrade-to-current-definition model actions, `#158` external artifact reference metadata and warnings, `#160` typed asset input/output boundary editing model actions, `#162` bundle/export artifact inclusion previews, `#218` explicit save-definition actions, `#220` graph-container asset draft promotion, `#222` drag marquee multi-select for subnet creation, `#224` Tab palette subnet collapse action, `#226` Houdini-style subnet enter/up navigation, `#228` Tab palette asset draft creation from selected subnet, and `#232` project asset gallery with usage navigation.
-   - Later likely slices: asset-definition polish for selected connected subgraphs, including promotion/version controls after manual subnet creation QA.
+   - Issue-backed slices: `#152` promoted parameter binding metadata, `#156` match-definition and upgrade-to-current-definition model actions, `#158` external artifact reference metadata and warnings, `#160` typed asset input/output boundary editing model actions, `#162` bundle/export artifact inclusion previews, `#218` explicit save-definition actions, `#220` graph-container asset draft promotion, `#222` drag marquee multi-select for subnet creation, `#224` Tab palette subnet collapse action, `#226` Houdini-style subnet enter/up navigation, `#228` Tab palette asset draft creation from selected subnet, `#232` project asset gallery with usage navigation, and `#234` subnet asset draft naming/id polish.
+   - Later likely slices: deeper promotion/version controls after manual subnet creation QA.
 
 3. Connection editing semantics.
    - Source ADRs: `0004`, `0006`, `0074`.
