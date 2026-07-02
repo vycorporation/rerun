@@ -4877,6 +4877,22 @@ impl HoudiniGraphPanel {
                 ));
                 ui.end_row();
 
+                ui.weak("Locator");
+                ui.label(metadata.locator.kind.as_str());
+                ui.end_row();
+
+                ui.weak("Location");
+                ui.label(metadata.locator.readable());
+                ui.end_row();
+
+                ui.weak("External");
+                ui.label(yes_no(metadata.locator.is_external_reference()));
+                ui.end_row();
+
+                ui.weak("Generated");
+                ui.label(yes_no(metadata.locator.is_generated()));
+                ui.end_row();
+
                 ui.weak("Bounds");
                 ui.label(format_bounds(metadata.bounds.as_ref()));
                 ui.end_row();
