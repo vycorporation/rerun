@@ -18,10 +18,10 @@ use self::model::{
     GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphContainerAssetDraftError,
     GraphContainerCollapseError, GraphDocument, GraphEvaluationMode, GraphNavigationError,
     GraphNodeClipboard, GraphNodeClipboardPasteOptions, GraphNodeDuplicateOptions, GraphPoint,
-    GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding, LayerKind, NativeOperatorLoadStatus,
-    NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot, NetworkCommentDisplayMode,
-    NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeKind, NodeStatus,
-    PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
+    GraphStyle, GraphWorkItemStatus, HoudiniDataKind, HoudiniNodeBinding, LayerKind,
+    NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot,
+    NetworkCommentDisplayMode, NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeKind,
+    NodeStatus, PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
     PythonOperatorDependencyStatus, ReferenceDiagnosticStatus, SourceExternalReferenceActionHint,
     SourceExternalReferenceActionKind, SourceExternalReferenceActionReport, SourceGalleryIndex,
     SourceGalleryItem, SourceGalleryItemKind, SourceLocator, SourceMetadata,
@@ -307,10 +307,23 @@ enum NodePortKind {
     Output,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct NodePortHit {
     node_index: usize,
     kind: NodePortKind,
+    port_name: String,
+    data_kind: HoudiniDataKind,
+    primary_quick_wire: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct NodePortLayout {
+    node_index: usize,
+    kind: NodePortKind,
+    port_name: String,
+    data_kind: HoudiniDataKind,
+    primary_quick_wire: bool,
+    rect: Rect,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4951,6 +4964,7 @@ impl HoudiniGraphPanel {
                         graph,
                         &node_rects,
                         pointer_pos,
+                        self.graph_view_zoom,
                         edge_hit_radius(self.graph_view_zoom),
                     )
                     .map(|edge_id| {
@@ -5024,6 +5038,7 @@ impl HoudiniGraphPanel {
                         graph,
                         &node_rects,
                         pointer_pos,
+                        self.graph_view_zoom,
                         edge_hit_radius(self.graph_view_zoom),
                     )
                 {
@@ -5207,6 +5222,7 @@ impl HoudiniGraphPanel {
                         graph,
                         &node_rects,
                         pointer_pos,
+                        self.graph_view_zoom,
                         edge_hit_radius(self.graph_view_zoom),
                     )
                 })
@@ -5218,8 +5234,28 @@ impl HoudiniGraphPanel {
         for edge in graph.graph_layout().edges {
             let from_rect = node_rects[edge.from_node];
             let to_rect = node_rects[edge.to_node];
-            let start = Pos2::new(from_rect.right(), from_rect.center().y);
-            let end = Pos2::new(to_rect.left(), to_rect.center().y);
+            let start = node_primary_port_rect_for_node(
+                graph,
+                edge.from_node,
+                from_rect,
+                NodePortKind::Output,
+                self.graph_view_zoom,
+            )
+            .unwrap_or_else(|| {
+                node_primary_port_rect(from_rect, NodePortKind::Output, self.graph_view_zoom)
+            })
+            .center();
+            let end = node_primary_port_rect_for_node(
+                graph,
+                edge.to_node,
+                to_rect,
+                NodePortKind::Input,
+                self.graph_view_zoom,
+            )
+            .unwrap_or_else(|| {
+                node_primary_port_rect(to_rect, NodePortKind::Input, self.graph_view_zoom)
+            })
+            .center();
             let wire_length = (end.x - start.x).hypot(end.y - start.y);
             let fade = if wire_length > layout_rect.width() * 0.34 {
                 1.0 - network_view.long_wire_fading * 0.65
@@ -5249,9 +5285,17 @@ impl HoudiniGraphPanel {
             && let Some(from_rect) = node_rects.get(connection_drag.from_node_index)
             && let Some(pointer_pos) = ui.input(|input| input.pointer.hover_pos())
         {
-            let start =
+            let start = node_primary_port_rect_for_node(
+                graph,
+                connection_drag.from_node_index,
+                *from_rect,
+                NodePortKind::Output,
+                self.graph_view_zoom,
+            )
+            .unwrap_or_else(|| {
                 node_primary_port_rect(*from_rect, NodePortKind::Output, self.graph_view_zoom)
-                    .center();
+            })
+            .center();
             let preview = connection_drag_preview(
                 graph,
                 &node_rects,
@@ -5386,7 +5430,7 @@ impl HoudiniGraphPanel {
                 network_view,
                 ui.visuals(),
             );
-            draw_node_primary_ports(
+            draw_node_ports(
                 &painter,
                 node_rect,
                 graph,
@@ -8035,34 +8079,110 @@ fn node_primary_port_rect(node_rect: Rect, kind: NodePortKind, zoom: f32) -> Rec
     Rect::from_center_size(center, egui::vec2(diameter, diameter))
 }
 
+fn node_port_row_rect(
+    node_rect: Rect,
+    kind: NodePortKind,
+    row_index: usize,
+    row_count: usize,
+    zoom: f32,
+) -> Rect {
+    if row_count <= 1 {
+        return node_primary_port_rect(node_rect, kind, zoom);
+    }
+
+    let diameter = (8.0 * zoom).clamp(6.0, 10.0);
+    let top = node_rect.top() + diameter * 0.5 + 4.0;
+    let bottom = node_rect.bottom() - diameter * 0.5 - 4.0;
+    let row_fraction = row_index as f32 / (row_count - 1) as f32;
+    let center_y = top + (bottom - top) * row_fraction;
+    let center_x = match kind {
+        NodePortKind::Input => node_rect.left(),
+        NodePortKind::Output => node_rect.right(),
+    };
+    Rect::from_center_size(
+        egui::pos2(center_x, center_y),
+        egui::vec2(diameter, diameter),
+    )
+}
+
+fn node_port_layouts_for_node(
+    graph: &GraphDocument,
+    node_index: usize,
+    node_rect: Rect,
+    zoom: f32,
+) -> Vec<NodePortLayout> {
+    let Some(port_info) = graph.selected_node_port_info(node_index) else {
+        return Vec::new();
+    };
+
+    let mut layouts = Vec::new();
+    for (kind, ports) in [
+        (NodePortKind::Input, port_info.inputs.as_slice()),
+        (NodePortKind::Output, port_info.outputs.as_slice()),
+    ] {
+        for (row_index, port) in ports.iter().enumerate() {
+            let rect = node_port_row_rect(node_rect, kind, row_index, ports.len(), zoom);
+            layouts.push(NodePortLayout {
+                node_index,
+                kind,
+                port_name: port.name.clone(),
+                data_kind: port.data_kind,
+                primary_quick_wire: port.primary_quick_wire,
+                rect,
+            });
+        }
+    }
+
+    layouts
+}
+
+fn node_port_layouts(graph: &GraphDocument, node_rects: &[Rect], zoom: f32) -> Vec<NodePortLayout> {
+    node_rects
+        .iter()
+        .enumerate()
+        .flat_map(|(node_index, rect)| node_port_layouts_for_node(graph, node_index, *rect, zoom))
+        .collect()
+}
+
+fn node_primary_port_rect_for_node(
+    graph: &GraphDocument,
+    node_index: usize,
+    node_rect: Rect,
+    kind: NodePortKind,
+    zoom: f32,
+) -> Option<Rect> {
+    node_port_layouts_for_node(graph, node_index, node_rect, zoom)
+        .into_iter()
+        .find(|layout| layout.kind == kind && layout.primary_quick_wire)
+        .map(|layout| layout.rect)
+}
+
+fn node_port_at(
+    graph: &GraphDocument,
+    node_rects: &[Rect],
+    pointer_pos: Pos2,
+    zoom: f32,
+) -> Option<NodePortHit> {
+    node_port_layouts(graph, node_rects, zoom)
+        .into_iter()
+        .find_map(|layout| {
+            layout.rect.contains(pointer_pos).then_some(NodePortHit {
+                node_index: layout.node_index,
+                kind: layout.kind,
+                port_name: layout.port_name,
+                data_kind: layout.data_kind,
+                primary_quick_wire: layout.primary_quick_wire,
+            })
+        })
+}
+
 fn node_primary_port_at(
     graph: &GraphDocument,
     node_rects: &[Rect],
     pointer_pos: Pos2,
     zoom: f32,
 ) -> Option<NodePortHit> {
-    node_rects
-        .iter()
-        .enumerate()
-        .find_map(|(node_index, rect)| {
-            if graph.node_has_primary_geometry_output(node_index)
-                && node_primary_port_rect(*rect, NodePortKind::Output, zoom).contains(pointer_pos)
-            {
-                return Some(NodePortHit {
-                    node_index,
-                    kind: NodePortKind::Output,
-                });
-            }
-            if graph.node_has_primary_geometry_input(node_index)
-                && node_primary_port_rect(*rect, NodePortKind::Input, zoom).contains(pointer_pos)
-            {
-                return Some(NodePortHit {
-                    node_index,
-                    kind: NodePortKind::Input,
-                });
-            }
-            None
-        })
+    node_port_at(graph, node_rects, pointer_pos, zoom).filter(|hit| hit.primary_quick_wire)
 }
 
 fn connection_drag_preview(
@@ -8106,7 +8226,7 @@ fn connection_drag_preview_color(
     }
 }
 
-fn draw_node_primary_ports(
+fn draw_node_ports(
     painter: &egui::Painter,
     node_rect: Rect,
     graph: &GraphDocument,
@@ -8114,29 +8234,22 @@ fn draw_node_primary_ports(
     zoom: f32,
     visuals: &egui::Visuals,
 ) {
-    for (kind, available) in [
-        (
-            NodePortKind::Input,
-            graph.node_has_primary_geometry_input(node_index),
-        ),
-        (
-            NodePortKind::Output,
-            graph.node_has_primary_geometry_output(node_index),
-        ),
-    ] {
-        if !available {
-            continue;
-        }
-        let rect = node_primary_port_rect(node_rect, kind, zoom);
-        painter.circle_filled(
-            rect.center(),
-            rect.width() * 0.5,
-            visuals.widgets.inactive.bg_fill,
-        );
+    for port in node_port_layouts_for_node(graph, node_index, node_rect, zoom) {
+        let fill = if port.primary_quick_wire {
+            visuals.widgets.inactive.bg_fill
+        } else {
+            faded_color(visuals.widgets.inactive.fg_stroke.color, 0.24)
+        };
+        let stroke_color = if port.primary_quick_wire {
+            visuals.widgets.inactive.fg_stroke.color
+        } else {
+            visuals.weak_text_color()
+        };
+        painter.circle_filled(port.rect.center(), port.rect.width() * 0.5, fill);
         painter.circle_stroke(
-            rect.center(),
-            rect.width() * 0.5,
-            Stroke::new(1.0, visuals.widgets.inactive.fg_stroke.color),
+            port.rect.center(),
+            port.rect.width() * 0.5,
+            Stroke::new(1.0, stroke_color),
         );
     }
 }
@@ -8149,6 +8262,7 @@ fn graph_edge_at(
     graph: &GraphDocument,
     node_rects: &[Rect],
     pointer_pos: Pos2,
+    zoom: f32,
     hit_radius: f32,
 ) -> Option<String> {
     graph
@@ -8158,8 +8272,24 @@ fn graph_edge_at(
         .filter_map(|edge| {
             let from_rect = *node_rects.get(edge.from_node)?;
             let to_rect = *node_rects.get(edge.to_node)?;
-            let start = Pos2::new(from_rect.right(), from_rect.center().y);
-            let end = Pos2::new(to_rect.left(), to_rect.center().y);
+            let start = node_primary_port_rect_for_node(
+                graph,
+                edge.from_node,
+                from_rect,
+                NodePortKind::Output,
+                zoom,
+            )
+            .unwrap_or_else(|| node_primary_port_rect(from_rect, NodePortKind::Output, zoom))
+            .center();
+            let end = node_primary_port_rect_for_node(
+                graph,
+                edge.to_node,
+                to_rect,
+                NodePortKind::Input,
+                zoom,
+            )
+            .unwrap_or_else(|| node_primary_port_rect(to_rect, NodePortKind::Input, zoom))
+            .center();
             let distance = distance_to_segment(pointer_pos, start, end);
             (distance <= hit_radius).then_some((edge.edge_id, distance))
         })
@@ -8622,15 +8752,49 @@ mod tests {
         connection_drag_preview, copy_locator_action_hint, distance_to_segment, graph_edge_at,
         layout_node_rects,
         model::{
-            GraphContainerStatus, GraphNodeClipboardPasteOptions, NodeKind, ProjectGraphMetadata,
-            ProjectGraphRole, SourceExternalReferenceActionKind, SourceGalleryIndex, SourceLocator,
-            SourceMetadata, SourceProvenance,
+            GraphContainerStatus, GraphNodeClipboardPasteOptions, HoudiniDataKind,
+            HoudiniOperatorPort, NodeKind, ProjectGraphMetadata, ProjectGraphRole,
+            SourceExternalReferenceActionKind, SourceGalleryIndex, SourceLocator, SourceMetadata,
+            SourceProvenance,
         },
-        node_indices_in_selection_rect, node_primary_port_at, node_primary_port_rect,
-        operator_palette_action_available, operator_palette_entries, source_gallery_filtered_items,
-        source_gallery_selected_item, source_gallery_thumbnail_label, source_gallery_tile_detail,
+        node_indices_in_selection_rect, node_port_at, node_port_layouts, node_primary_port_at,
+        node_primary_port_rect, operator_palette_action_available, operator_palette_entries,
+        source_gallery_filtered_items, source_gallery_selected_item,
+        source_gallery_thumbnail_label, source_gallery_tile_detail,
     };
     use crate::ui::houdini_graph_panel::model::{GraphDocument, PRIMARY_GEOMETRY_OUTPUT};
+
+    fn add_multi_port_graph_container(graph: &mut GraphDocument) -> usize {
+        let container_index = graph.add_graph_container_node(
+            "Multi Port Subnet",
+            ProjectGraphMetadata {
+                graph_id: "graph.multi_port".to_owned(),
+                name: "Multi Port".to_owned(),
+                path: "/obj/main/multi_port".to_owned(),
+                role: ProjectGraphRole::Subgraph,
+            },
+        );
+        let container_node_id = graph.nodes[container_index].node_id.clone();
+        let metadata = graph
+            .graph_containers
+            .iter_mut()
+            .find(|metadata| metadata.container_node_id == container_node_id)
+            .expect("graph container metadata should exist");
+        metadata.boundary.inputs.push(HoudiniOperatorPort {
+            name: "mask".to_owned(),
+            data_kind: HoudiniDataKind::RecordSubset,
+            required: false,
+            help: "Optional mask subset.".to_owned(),
+        });
+        metadata.boundary.outputs.push(HoudiniOperatorPort {
+            name: "style".to_owned(),
+            data_kind: HoudiniDataKind::LayerStyle,
+            required: false,
+            help: "Optional style metadata.".to_owned(),
+        });
+
+        container_index
+    }
 
     #[test]
     fn distance_to_segment_clamps_to_nearest_endpoint_or_segment() {
@@ -8732,11 +8896,17 @@ mod tests {
         let midpoint = start + (end - start) * 0.5;
 
         assert_eq!(
-            graph_edge_at(&graph, &node_rects, midpoint + egui::vec2(0.0, 3.0), 8.0),
+            graph_edge_at(
+                &graph,
+                &node_rects,
+                midpoint + egui::vec2(0.0, 3.0),
+                1.0,
+                8.0
+            ),
             Some(first_edge.edge_id.clone())
         );
         assert_eq!(
-            graph_edge_at(&graph, &node_rects, egui::pos2(8.0, 210.0), 4.0),
+            graph_edge_at(&graph, &node_rects, egui::pos2(8.0, 210.0), 1.0, 4.0),
             None
         );
     }
@@ -8759,6 +8929,9 @@ mod tests {
             Some(super::NodePortHit {
                 node_index: 0,
                 kind: NodePortKind::Output,
+                port_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                data_kind: HoudiniDataKind::GeometryTable,
+                primary_quick_wire: true,
             })
         );
         let source_input = node_primary_port_rect(node_rects[0], NodePortKind::Input, 1.0);
@@ -8773,6 +8946,9 @@ mod tests {
             Some(super::NodePortHit {
                 node_index: 3,
                 kind: NodePortKind::Input,
+                port_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                data_kind: HoudiniDataKind::GeometryTable,
+                primary_quick_wire: true,
             })
         );
 
@@ -8780,6 +8956,80 @@ mod tests {
         assert_eq!(
             node_primary_port_at(&graph, &node_rects, output_output.center(), 1.0),
             None
+        );
+    }
+
+    #[test]
+    fn node_port_layouts_expose_distinct_typed_multi_port_regions() {
+        let mut graph = GraphDocument::sample();
+        let container_index = add_multi_port_graph_container(&mut graph);
+        let node_size = egui::vec2(116.0, 48.0);
+        let node_rects = (0..graph.nodes.len())
+            .map(|index| {
+                egui::Rect::from_min_size(egui::pos2(20.0 + index as f32 * 160.0, 20.0), node_size)
+            })
+            .collect::<Vec<_>>();
+        let container_rect = node_rects[container_index];
+
+        let layouts = node_port_layouts(&graph, &node_rects, 1.0);
+        let container_ports = layouts
+            .iter()
+            .filter(|layout| layout.node_index == container_index)
+            .collect::<Vec<_>>();
+
+        assert_eq!(container_ports.len(), 4);
+        let input_geometry = container_ports
+            .iter()
+            .find(|layout| {
+                layout.kind == NodePortKind::Input && layout.port_name == PRIMARY_GEOMETRY_OUTPUT
+            })
+            .expect("container should expose primary geometry input");
+        let input_mask = container_ports
+            .iter()
+            .find(|layout| layout.kind == NodePortKind::Input && layout.port_name == "mask")
+            .expect("container should expose mask input");
+        let output_geometry = container_ports
+            .iter()
+            .find(|layout| {
+                layout.kind == NodePortKind::Output && layout.port_name == PRIMARY_GEOMETRY_OUTPUT
+            })
+            .expect("container should expose primary geometry output");
+        let output_style = container_ports
+            .iter()
+            .find(|layout| layout.kind == NodePortKind::Output && layout.port_name == "style")
+            .expect("container should expose style output");
+
+        assert_eq!(input_geometry.rect.center().x, container_rect.left());
+        assert_eq!(output_geometry.rect.center().x, container_rect.right());
+        assert_ne!(input_geometry.rect.center(), input_mask.rect.center());
+        assert_ne!(output_geometry.rect.center(), output_style.rect.center());
+        assert!(!input_mask.primary_quick_wire);
+        assert_eq!(input_mask.data_kind, HoudiniDataKind::RecordSubset);
+        assert_eq!(output_style.data_kind, HoudiniDataKind::LayerStyle);
+
+        assert_eq!(
+            node_port_at(&graph, &node_rects, input_mask.rect.center(), 1.0),
+            Some(super::NodePortHit {
+                node_index: container_index,
+                kind: NodePortKind::Input,
+                port_name: "mask".to_owned(),
+                data_kind: HoudiniDataKind::RecordSubset,
+                primary_quick_wire: false,
+            })
+        );
+        assert_eq!(
+            node_primary_port_at(&graph, &node_rects, input_mask.rect.center(), 1.0),
+            None
+        );
+        assert_eq!(
+            node_primary_port_at(&graph, &node_rects, input_geometry.rect.center(), 1.0),
+            Some(super::NodePortHit {
+                node_index: container_index,
+                kind: NodePortKind::Input,
+                port_name: PRIMARY_GEOMETRY_OUTPUT.to_owned(),
+                data_kind: HoudiniDataKind::GeometryTable,
+                primary_quick_wire: true,
+            })
         );
     }
 
