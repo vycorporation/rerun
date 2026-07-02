@@ -123,3 +123,4 @@ Python-backed assets are deferred until the Python operator lane is implemented.
 13. #232 - Complete: add a project asset gallery that lists active project asset definitions and every graph usage with jump-to-instance navigation.
 14. #234 - Complete: seed subnet asset drafts from the selected graph container when authoring fields are still generic, while preserving explicit user metadata and collision-safe project-local asset ids.
 15. #236 - Complete: expose match-definition and upgrade-to-current-definition actions from the selected asset panel and asset gallery usage rows while preserving exact-version pins.
+16. #238 - Complete: add project asset gallery filtering by asset metadata, labels, wrapped graph ids, and usage paths with an explicit no-match state.

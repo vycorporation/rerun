@@ -137,6 +137,7 @@ pub(crate) struct HoudiniGraphPanel {
     asset_name: String,
     asset_description: String,
     asset_help: String,
+    asset_gallery_filter: String,
     asset_status: Option<String>,
     python_uv_executable_path: String,
     python_existing_environment_path: String,
@@ -198,6 +199,7 @@ impl Default for HoudiniGraphPanel {
             asset_name: DEFAULT_ASSET_NAME.to_owned(),
             asset_description: DEFAULT_ASSET_DESCRIPTION.to_owned(),
             asset_help: DEFAULT_ASSET_HELP.to_owned(),
+            asset_gallery_filter: String::new(),
             asset_status: None,
             python_uv_executable_path: String::new(),
             python_existing_environment_path: String::new(),
@@ -3113,9 +3115,20 @@ impl HoudiniGraphPanel {
 
     fn asset_gallery_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
         ui.strong("Asset Gallery");
-        let entries = graph.procedural_asset_gallery_entries();
+        ui.horizontal(|ui| {
+            ui.weak("Find");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.asset_gallery_filter)
+                    .hint_text("asset, label, graph, or usage"),
+            );
+        });
+        let entries = self.filtered_asset_gallery_entries(graph);
         if entries.is_empty() {
-            ui.weak("No project assets.");
+            if self.asset_gallery_filter.trim().is_empty() {
+                ui.weak("No project assets.");
+            } else {
+                ui.weak("No project assets match the current filter.");
+            }
             return;
         }
 
@@ -3229,6 +3242,22 @@ impl HoudiniGraphPanel {
                     }
                 });
         }
+    }
+
+    fn filtered_asset_gallery_entries(
+        &self,
+        graph: &GraphDocument,
+    ) -> Vec<model::ProceduralAssetGalleryEntry> {
+        let filter = self.asset_gallery_filter.trim().to_lowercase();
+        let entries = graph.procedural_asset_gallery_entries();
+        if filter.is_empty() {
+            return entries;
+        }
+
+        entries
+            .into_iter()
+            .filter(|entry| asset_gallery_entry_matches(entry, &filter))
+            .collect()
     }
 
     fn jump_to_graph_node(
@@ -6112,6 +6141,22 @@ fn metadata_value_or_fallback(value: &str, default_value: &str, fallback: &str) 
     }
 }
 
+fn asset_gallery_entry_matches(entry: &model::ProceduralAssetGalleryEntry, filter: &str) -> bool {
+    let matches = |value: &str| value.to_lowercase().contains(filter);
+    matches(&entry.display_name)
+        || matches(&entry.asset_id)
+        || matches(&entry.description)
+        || entry.labels.iter().any(|label| matches(label))
+        || entry.wrapped_graph_id.as_deref().is_some_and(matches)
+        || entry.usages.iter().any(|usage| {
+            matches(&usage.node_name)
+                || matches(&usage.node_id)
+                || matches(&usage.graph_id)
+                || matches(&usage.graph_path)
+                || matches(&usage.node_path)
+        })
+}
+
 fn operator_matches(filter: &str, label: &str, aliases: &[&str]) -> bool {
     filter.is_empty()
         || label.to_lowercase().contains(filter)
@@ -7999,6 +8044,39 @@ mod tests {
                 .instance_version,
             "0.2.0"
         );
+    }
+
+    #[test]
+    fn asset_gallery_filter_matches_asset_metadata_and_usage_paths() {
+        let mut graph = GraphDocument::sample();
+        let (_asset_id, _) = graph.create_asset_instance_from_graph(
+            "Gallery Filter",
+            "Findable gallery description.",
+            "Use from the asset gallery.",
+        );
+        graph.add_procedural_asset_node("vy.asset.missing_cleanup");
+        let mut panel = HoudiniGraphPanel::default();
+
+        panel.asset_gallery_filter = "filter".to_owned();
+        let filtered_entries = panel.filtered_asset_gallery_entries(&graph);
+        assert_eq!(filtered_entries.len(), 1);
+        assert_eq!(filtered_entries[0].display_name, "Gallery Filter");
+
+        panel.asset_gallery_filter = "/obj/main/Asset".to_owned();
+        let path_entries = panel.filtered_asset_gallery_entries(&graph);
+        assert!(
+            path_entries
+                .iter()
+                .any(|entry| entry.display_name == "Gallery Filter")
+        );
+
+        panel.asset_gallery_filter = "missing_cleanup".to_owned();
+        let missing_entries = panel.filtered_asset_gallery_entries(&graph);
+        assert_eq!(missing_entries.len(), 1);
+        assert!(missing_entries[0].missing_declaration);
+
+        panel.asset_gallery_filter = "no such asset".to_owned();
+        assert!(panel.filtered_asset_gallery_entries(&graph).is_empty());
     }
 
     #[test]
