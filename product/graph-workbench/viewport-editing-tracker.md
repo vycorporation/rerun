@@ -36,7 +36,7 @@ for selection, table inspection, and later graph-backed edit operations.
 | --- | --- | --- | --- |
 | `#256` | complete | Transient viewport selection identity bridge | Adds a graph-model runtime report that resolves supported transient viewport selections to graph record identities, while rejecting renderer pick ids, row positions, screen positions, missing records, and ambiguous matches with diagnostics. |
 | `#257` | complete | Read-only table-to-selection interactions | Adds read-only attribute-table row selection backed by graph record fingerprints, routes selected rows through the transient selection identity bridge from `#256`, and reports selected, stale, or unsupported rows without mutating table values or graph output. |
-| `#258` | planned | Commit transient selections as graph-backed subset nodes | Add an explicit commit action that creates or updates visible selection or mask graph data using stable record identities from `#256`. |
+| `#258` | complete | Commit transient selections as graph-backed subset nodes | Adds an explicit commit action that creates visible graph-owned Selection nodes from resolved transient/table selections, persists stable record identities in sidecar JSON, supports undo/redo, reports stale subset identities, and does not filter records or change appearance by itself. |
 
 ## Deferred implementation candidates
 
