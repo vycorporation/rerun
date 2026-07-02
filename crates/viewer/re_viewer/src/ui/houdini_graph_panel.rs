@@ -17,10 +17,11 @@ use self::model::{
     AttributeTableQuery, AttributeTableRow, AttributeTableSort, EvaluationState,
     GeneratedNodeBindingState, GeometryBounds, GraphAnnotationKind, GraphContainerAssetDraftError,
     GraphContainerCollapseError, GraphDocument, GraphEvaluationMode, GraphNavigationError,
-    GraphNodeClipboard, GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniNodeBinding, LayerKind,
-    NativeOperatorLoadStatus, NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot,
-    NetworkCommentDisplayMode, NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeKind,
-    NodeStatus, PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
+    GraphNodeClipboard, GraphNodeClipboardPasteOptions, GraphPoint, GraphStyle,
+    GraphWorkItemStatus, HoudiniNodeBinding, LayerKind, NativeOperatorLoadStatus,
+    NetworkBadgeVisibility, NetworkBoxOrganizationSnapshot, NetworkCommentDisplayMode,
+    NetworkNodeRingVisibility, NetworkViewDisplayOptions, NodeKind, NodeStatus,
+    PRIMARY_GEOMETRY_OUTPUT, PythonEnvironmentResolveTrigger, PythonEnvironmentStatus,
     PythonOperatorDependencyStatus, ReferenceDiagnosticStatus, SourceExternalReferenceActionHint,
     SourceExternalReferenceActionKind, SourceExternalReferenceActionReport, SourceGalleryIndex,
     SourceGalleryItem, SourceGalleryItemKind, SourceLocator, SourceMetadata,
@@ -161,6 +162,7 @@ pub(crate) struct HoudiniGraphPanel {
     source_gallery_status: Option<String>,
     source_reference_copied_locator: Option<String>,
     node_clipboard: Option<GraphNodeClipboard>,
+    node_clipboard_status: Option<String>,
     python_uv_executable_path: String,
     python_existing_environment_path: String,
     python_create_environment_path: String,
@@ -236,6 +238,7 @@ impl Default for HoudiniGraphPanel {
             source_gallery_status: None,
             source_reference_copied_locator: None,
             node_clipboard: None,
+            node_clipboard_status: None,
             python_uv_executable_path: String::new(),
             python_existing_environment_path: String::new(),
             python_create_environment_path: String::new(),
@@ -590,25 +593,15 @@ impl HoudiniGraphPanel {
                         self.selected_node < graph.nodes.len(),
                         egui::Button::new("Copy Selected    Cmd/Ctrl+C"),
                     )
-                    .on_hover_text("Copy the selected graph nodes to the project-local node clipboard.")
+                    .on_hover_text(
+                        "Copy the selected graph nodes to the project-local node clipboard.",
+                    )
                     .clicked()
                 {
                     self.copy_selected_nodes_to_clipboard(graph);
                     ui.close();
                 }
-                if ui
-                    .add_enabled(
-                        self.node_clipboard.is_some(),
-                        egui::Button::new("Paste Nodes    Cmd/Ctrl+V"),
-                    )
-                    .on_hover_text(
-                        "Paste copied graph nodes with fresh identities and selected-internal wiring.",
-                    )
-                    .clicked()
-                {
-                    self.paste_copied_nodes(graph);
-                    ui.close();
-                }
+                self.node_clipboard_paste_menu_ui(ui, graph);
                 ui.separator();
                 self.operator_menu_action_ui_with_label(
                     ui,
@@ -747,6 +740,10 @@ impl HoudiniGraphPanel {
 
             ui.separator();
             ui.weak(selected_label);
+            if let Some(status) = &self.node_clipboard_status {
+                ui.separator();
+                ui.weak(status);
+            }
             ui.separator();
             if ui.small_button("-").clicked() {
                 self.zoom_graph_view(1.0 / 1.15);
@@ -1195,24 +1192,103 @@ impl HoudiniGraphPanel {
         let Some(clipboard) = graph.copy_node_set(&selected_nodes) else {
             return false;
         };
+        self.node_clipboard_status = Some(format!(
+            "Copied {} node(s), {} external input connection(s), and {} external output connection(s).",
+            clipboard.node_count(),
+            clipboard.external_incoming_edge_count(),
+            clipboard.external_outgoing_edge_count()
+        ));
         self.node_clipboard = Some(clipboard);
         true
     }
 
     fn paste_copied_nodes(&mut self, graph: &mut GraphDocument) -> bool {
+        self.paste_copied_nodes_with_options(graph, GraphNodeClipboardPasteOptions::disconnected())
+    }
+
+    fn paste_copied_nodes_with_options(
+        &mut self,
+        graph: &mut GraphDocument,
+        options: GraphNodeClipboardPasteOptions,
+    ) -> bool {
         let Some(clipboard) = self.node_clipboard.clone() else {
             return false;
         };
-        let pasted_nodes = graph.paste_node_clipboard(&clipboard);
+        let result = graph.paste_node_clipboard_with_options(&clipboard, options);
+        let pasted_nodes = result.pasted_node_indices;
         if pasted_nodes.is_empty() {
             return false;
         }
+        self.node_clipboard_status = Some(format!(
+            "Pasted {} node(s), reconnected {} external connection(s), skipped {} invalid reconnect candidate(s).",
+            pasted_nodes.len(),
+            result.reconnected_edges.len(),
+            result.skipped_diagnostics.len()
+        ));
         self.set_selected_node_set(pasted_nodes);
         self.selected_annotation = None;
         self.selected_edge = None;
         self.node_info_open = true;
         self.show_graph_workbench_pane(GraphWorkbenchPane::Parameters);
         true
+    }
+
+    fn node_clipboard_paste_menu_ui(&mut self, ui: &mut Ui, graph: &mut GraphDocument) {
+        let Some(clipboard) = self.node_clipboard.clone() else {
+            ui.add_enabled(false, egui::Button::new("Paste Nodes    Cmd/Ctrl+V"))
+                .on_hover_text("Copy graph nodes before pasting.");
+            return;
+        };
+
+        if ui
+            .button("Paste Nodes    Cmd/Ctrl+V")
+            .on_hover_text(
+                "Paste copied graph nodes without external incoming/outgoing connections.",
+            )
+            .clicked()
+        {
+            self.paste_copied_nodes_with_options(
+                graph,
+                GraphNodeClipboardPasteOptions::disconnected(),
+            );
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                clipboard.has_external_incoming_edges(),
+                egui::Button::new("Paste with External Inputs"),
+            )
+            .on_hover_text("Reconnect original external input edges to pasted nodes when valid.")
+            .clicked()
+        {
+            self.paste_copied_nodes_with_options(graph, GraphNodeClipboardPasteOptions::incoming());
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                clipboard.has_external_outgoing_edges(),
+                egui::Button::new("Paste with External Outputs"),
+            )
+            .on_hover_text("Reconnect pasted nodes to original external output targets when valid.")
+            .clicked()
+        {
+            self.paste_copied_nodes_with_options(graph, GraphNodeClipboardPasteOptions::outgoing());
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                clipboard.has_external_incoming_edges() || clipboard.has_external_outgoing_edges(),
+                egui::Button::new("Paste with External Connections"),
+            )
+            .on_hover_text("Reconnect original external input and output edges when valid.")
+            .clicked()
+        {
+            self.paste_copied_nodes_with_options(
+                graph,
+                GraphNodeClipboardPasteOptions::all_external(),
+            );
+            ui.close();
+        }
     }
 
     fn record_operator_palette_action(&mut self, action: OperatorPaletteAction) {
@@ -5462,16 +5538,7 @@ impl HoudiniGraphPanel {
             self.copy_selected_nodes_to_clipboard(graph);
             ui.close();
         }
-        if ui
-            .add_enabled(
-                self.node_clipboard.is_some(),
-                egui::Button::new("Paste Nodes    Cmd/Ctrl+V"),
-            )
-            .clicked()
-        {
-            self.paste_copied_nodes(graph);
-            ui.close();
-        }
+        self.node_clipboard_paste_menu_ui(ui, graph);
         self.operator_menu_action_ui_with_label(
             ui,
             graph,
@@ -5619,16 +5686,7 @@ impl HoudiniGraphPanel {
             self.open_operator_chooser_at(anchor);
             ui.close();
         }
-        if ui
-            .add_enabled(
-                self.node_clipboard.is_some(),
-                egui::Button::new("Paste Nodes    Cmd/Ctrl+V"),
-            )
-            .clicked()
-        {
-            self.paste_copied_nodes(graph);
-            ui.close();
-        }
+        self.node_clipboard_paste_menu_ui(ui, graph);
         self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddOutNull);
         self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddReference);
         self.operator_menu_action_ui(ui, graph, OperatorPaletteAction::AddRepairProjection);
@@ -8478,9 +8536,9 @@ mod tests {
         connection_drag_preview, copy_locator_action_hint, distance_to_segment, graph_edge_at,
         layout_node_rects,
         model::{
-            GraphContainerStatus, NodeKind, ProjectGraphMetadata, ProjectGraphRole,
-            SourceExternalReferenceActionKind, SourceGalleryIndex, SourceLocator, SourceMetadata,
-            SourceProvenance,
+            GraphContainerStatus, GraphNodeClipboardPasteOptions, NodeKind, ProjectGraphMetadata,
+            ProjectGraphRole, SourceExternalReferenceActionKind, SourceGalleryIndex, SourceLocator,
+            SourceMetadata, SourceProvenance,
         },
         node_indices_in_selection_rect, node_primary_port_at, node_primary_port_rect,
         operator_palette_action_available, operator_palette_entries, source_gallery_filtered_items,
@@ -8701,6 +8759,33 @@ mod tests {
             GraphWorkbenchPane::Parameters
         ));
         assert!(panel.selected_edge.is_none());
+    }
+
+    #[test]
+    fn panel_node_clipboard_paste_can_reconnect_external_edges() {
+        let mut graph = GraphDocument::sample();
+        let mut panel = HoudiniGraphPanel::default();
+        panel.set_selected_node_set(vec![1]);
+
+        assert!(panel.copy_selected_nodes_to_clipboard(&graph));
+        assert!(panel.paste_copied_nodes_with_options(
+            &mut graph,
+            GraphNodeClipboardPasteOptions::all_external()
+        ));
+
+        let pasted_node_id = graph.nodes[panel.selected_node].node_id.clone();
+        assert!(graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == graph.nodes[0].node_id && edge.to_node_id == pasted_node_id
+        }));
+        assert!(graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == pasted_node_id && edge.to_node_id == graph.nodes[2].node_id
+        }));
+        assert!(
+            panel
+                .node_clipboard_status
+                .as_deref()
+                .is_some_and(|status| status.contains("reconnected 2 external connection(s)"))
+        );
     }
 
     #[test]

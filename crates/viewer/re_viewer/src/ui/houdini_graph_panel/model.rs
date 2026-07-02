@@ -245,12 +245,73 @@ pub(crate) struct GraphDataFlowEdgeDiagnostic {
 pub(crate) struct GraphNodeClipboard {
     nodes: Vec<GraphNode>,
     data_flow_edges: Vec<GraphDataFlowEdge>,
+    external_incoming_edges: Vec<GraphDataFlowEdge>,
+    external_outgoing_edges: Vec<GraphDataFlowEdge>,
 }
 
 impl GraphNodeClipboard {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn external_incoming_edge_count(&self) -> usize {
+        self.external_incoming_edges.len()
+    }
+
+    pub fn external_outgoing_edge_count(&self) -> usize {
+        self.external_outgoing_edges.len()
+    }
+
+    pub fn has_external_incoming_edges(&self) -> bool {
+        !self.external_incoming_edges.is_empty()
+    }
+
+    pub fn has_external_outgoing_edges(&self) -> bool {
+        !self.external_outgoing_edges.is_empty()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GraphNodeClipboardPasteOptions {
+    pub reconnect_incoming: bool,
+    pub reconnect_outgoing: bool,
+}
+
+impl GraphNodeClipboardPasteOptions {
+    pub fn disconnected() -> Self {
+        Self::default()
+    }
+
+    pub fn incoming() -> Self {
+        Self {
+            reconnect_incoming: true,
+            reconnect_outgoing: false,
+        }
+    }
+
+    pub fn outgoing() -> Self {
+        Self {
+            reconnect_incoming: false,
+            reconnect_outgoing: true,
+        }
+    }
+
+    pub fn all_external() -> Self {
+        Self {
+            reconnect_incoming: true,
+            reconnect_outgoing: true,
+        }
+    }
+}
+
+pub(crate) struct GraphNodeClipboardPasteResult {
+    pub pasted_node_indices: Vec<usize>,
+    pub reconnected_edges: Vec<GraphDataFlowEdge>,
+    pub skipped_diagnostics: Vec<GraphDataFlowEdgeDiagnostic>,
 }
 
 #[derive(Clone)]
@@ -4233,6 +4294,24 @@ impl GraphDocument {
             })
             .cloned()
             .collect();
+        let external_incoming_edges = self
+            .data_flow_edges
+            .iter()
+            .filter(|edge| {
+                !copied_node_ids.contains(edge.from_node_id.as_str())
+                    && copied_node_ids.contains(edge.to_node_id.as_str())
+            })
+            .cloned()
+            .collect();
+        let external_outgoing_edges = self
+            .data_flow_edges
+            .iter()
+            .filter(|edge| {
+                copied_node_ids.contains(edge.from_node_id.as_str())
+                    && !copied_node_ids.contains(edge.to_node_id.as_str())
+            })
+            .cloned()
+            .collect();
 
         Some(GraphNodeClipboard {
             nodes: source_indices
@@ -4240,12 +4319,22 @@ impl GraphDocument {
                 .map(|index| self.nodes[index].clone())
                 .collect(),
             data_flow_edges,
+            external_incoming_edges,
+            external_outgoing_edges,
         })
     }
 
-    pub fn paste_node_clipboard(&mut self, clipboard: &GraphNodeClipboard) -> Vec<usize> {
+    pub fn paste_node_clipboard_with_options(
+        &mut self,
+        clipboard: &GraphNodeClipboard,
+        options: GraphNodeClipboardPasteOptions,
+    ) -> GraphNodeClipboardPasteResult {
         if clipboard.is_empty() {
-            return Vec::new();
+            return GraphNodeClipboardPasteResult {
+                pasted_node_indices: Vec::new(),
+                reconnected_edges: Vec::new(),
+                skipped_diagnostics: Vec::new(),
+            };
         }
 
         let data_flow_edges_before = self.data_flow_edges.clone();
@@ -4254,6 +4343,8 @@ impl GraphDocument {
         let mut duplicated_node_ids = Vec::new();
         let mut duplicated_nodes = Vec::new();
         let mut duplicated_ids_by_source_id = std::collections::BTreeMap::new();
+        let mut reconnected_edges = Vec::new();
+        let mut skipped_diagnostics = Vec::new();
 
         for source in &clipboard.nodes {
             let node =
@@ -4299,16 +4390,79 @@ impl GraphDocument {
             }
         }
 
+        if options.reconnect_incoming {
+            for edge in &clipboard.external_incoming_edges {
+                let Some(to_node_id) = duplicated_ids_by_source_id.get(&edge.to_node_id) else {
+                    continue;
+                };
+                let copied_edge = GraphDataFlowEdge {
+                    edge_id: Self::data_flow_edge_id(
+                        &edge.from_node_id,
+                        &edge.from_output,
+                        to_node_id,
+                        &edge.to_input,
+                    ),
+                    from_node_id: edge.from_node_id.clone(),
+                    from_output: edge.from_output.clone(),
+                    to_node_id: to_node_id.clone(),
+                    to_input: edge.to_input.clone(),
+                };
+                if let Some(diagnostic) = self.data_flow_edge_addition_diagnostic_with_edges(
+                    &copied_edge,
+                    &data_flow_edges_after,
+                ) {
+                    skipped_diagnostics.push(diagnostic);
+                } else {
+                    data_flow_edges_after.push(copied_edge.clone());
+                    reconnected_edges.push(copied_edge);
+                }
+            }
+        }
+
+        if options.reconnect_outgoing {
+            for edge in &clipboard.external_outgoing_edges {
+                let Some(from_node_id) = duplicated_ids_by_source_id.get(&edge.from_node_id) else {
+                    continue;
+                };
+                let copied_edge = GraphDataFlowEdge {
+                    edge_id: Self::data_flow_edge_id(
+                        from_node_id,
+                        &edge.from_output,
+                        &edge.to_node_id,
+                        &edge.to_input,
+                    ),
+                    from_node_id: from_node_id.clone(),
+                    from_output: edge.from_output.clone(),
+                    to_node_id: edge.to_node_id.clone(),
+                    to_input: edge.to_input.clone(),
+                };
+                if let Some(diagnostic) = self.data_flow_edge_addition_diagnostic_with_edges(
+                    &copied_edge,
+                    &data_flow_edges_after,
+                ) {
+                    skipped_diagnostics.push(diagnostic);
+                } else {
+                    data_flow_edges_after.push(copied_edge.clone());
+                    reconnected_edges.push(copied_edge);
+                }
+            }
+        }
+
         self.data_flow_edges = data_flow_edges_after.clone();
         self.record_project_command(ProjectCommand::NodesDuplicate {
             duplicated_nodes,
             data_flow_edges_before,
             data_flow_edges_after,
         });
-        duplicated_node_ids
+        let pasted_node_indices = duplicated_node_ids
             .into_iter()
             .filter_map(|node_id| self.nodes.iter().position(|node| node.node_id == node_id))
-            .collect()
+            .collect();
+        GraphNodeClipboardPasteResult {
+            pasted_node_indices,
+            reconnected_edges,
+            skipped_diagnostics,
+        }
     }
 
     fn unique_node_id(&self, prefix: &str) -> String {
@@ -16490,22 +16644,23 @@ mod tests {
         GraphColor, GraphContainerAssetDraftError, GraphContainerCollapseError, GraphContainerKind,
         GraphContainerMetadata, GraphContainerStatus, GraphDataFlowEdge,
         GraphDataFlowEdgeDiagnosticStatus, GraphDocument, GraphEvaluationMode,
-        GraphNavigationError, GraphNavigationTarget, GraphNode, GraphPoint, GraphStyle,
-        GraphWorkItemStatus, HoudiniCubicBezierParquetSchema, HoudiniDataKind, HoudiniGeometryKind,
-        HoudiniGeometryRecord, HoudiniGeometrySchema, HoudiniNumericRange, HoudiniOperatorPort,
-        HoudiniParameterBinding, HoudiniParameterDeclaration, HoudiniParameterKind,
-        HoudiniParameterValue, LayerKind, NativeOperatorCapability, NativeOperatorDeclaration,
-        NativeOperatorFailureMode, NativeOperatorImplementation, NativeOperatorLoadStatus,
-        NativeOperatorOutputCounts, NativeOperatorProvenance, NetworkBadgeVisibility,
-        NetworkCommentDisplayMode, NetworkNodeRingVisibility, NodeEvaluation, NodeKind,
-        NodeParameter, NodeParameterKind, NodeStatus, OperatorVersionStatus,
-        OutputCapabilityMapping, OutputOperatorKind, OutputOperatorNode, OutputTargetId,
-        PRIMARY_GEOMETRY_OUTPUT, ProceduralAssetArtifactBundleInclusion,
-        ProceduralAssetArtifactInclusionChoice, ProceduralAssetArtifactReference,
-        ProceduralAssetArtifactRole, ProceduralAssetArtifactStatus,
-        ProceduralAssetBoundaryDirection, ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot,
-        ProceduralAssetSource, ProceduralAssetSubgraphReference, ProjectCommand,
-        ProjectGraphMetadata, ProjectGraphRegistry, ProjectGraphRole, PythonDependencyHealth,
+        GraphNavigationError, GraphNavigationTarget, GraphNode, GraphNodeClipboardPasteOptions,
+        GraphPoint, GraphStyle, GraphWorkItemStatus, HoudiniCubicBezierParquetSchema,
+        HoudiniDataKind, HoudiniGeometryKind, HoudiniGeometryRecord, HoudiniGeometrySchema,
+        HoudiniNumericRange, HoudiniOperatorPort, HoudiniParameterBinding,
+        HoudiniParameterDeclaration, HoudiniParameterKind, HoudiniParameterValue, LayerKind,
+        NativeOperatorCapability, NativeOperatorDeclaration, NativeOperatorFailureMode,
+        NativeOperatorImplementation, NativeOperatorLoadStatus, NativeOperatorOutputCounts,
+        NativeOperatorProvenance, NetworkBadgeVisibility, NetworkCommentDisplayMode,
+        NetworkNodeRingVisibility, NodeEvaluation, NodeKind, NodeParameter, NodeParameterKind,
+        NodeStatus, OperatorVersionStatus, OutputCapabilityMapping, OutputOperatorKind,
+        OutputOperatorNode, OutputTargetId, PRIMARY_GEOMETRY_OUTPUT,
+        ProceduralAssetArtifactBundleInclusion, ProceduralAssetArtifactInclusionChoice,
+        ProceduralAssetArtifactReference, ProceduralAssetArtifactRole,
+        ProceduralAssetArtifactStatus, ProceduralAssetBoundaryDirection,
+        ProceduralAssetDeclaration, ProceduralAssetGraphSnapshot, ProceduralAssetSource,
+        ProceduralAssetSubgraphReference, ProjectCommand, ProjectGraphMetadata,
+        ProjectGraphRegistry, ProjectGraphRole, PythonDependencyHealth,
         PythonEnvironmentDescriptor, PythonEnvironmentPathMode, PythonEnvironmentPaths,
         PythonEnvironmentResolveState, PythonEnvironmentResolveTrigger, PythonEnvironmentResolver,
         PythonEnvironmentStatus, PythonOperatorCapability, PythonOperatorDataKind,
@@ -19774,7 +19929,12 @@ mod tests {
             .expect("selected nodes should copy to graph clipboard");
         assert_eq!(clipboard.nodes.len(), 2);
 
-        let pasted_indices = graph.paste_node_clipboard(&clipboard);
+        let pasted_indices = graph
+            .paste_node_clipboard_with_options(
+                &clipboard,
+                GraphNodeClipboardPasteOptions::disconnected(),
+            )
+            .pasted_node_indices;
 
         assert_eq!(pasted_indices.len(), 2);
         assert_eq!(graph.nodes.len(), original_node_count + 2);
@@ -19833,6 +19993,104 @@ mod tests {
         }
         assert_eq!(graph.data_flow_edges.len(), original_edge_count + 1);
         assert!(graph.copy_node_set(&[graph.nodes.len()]).is_none());
+    }
+
+    #[test]
+    fn node_clipboard_captures_and_reconnects_external_inputs_and_outputs() {
+        let mut graph = GraphDocument::sample();
+        let source_index = 1;
+        let clipboard = graph
+            .copy_node_set(&[source_index])
+            .expect("selected filter should copy to graph clipboard");
+        assert_eq!(clipboard.node_count(), 1);
+        assert_eq!(clipboard.external_incoming_edge_count(), 1);
+        assert_eq!(clipboard.external_outgoing_edge_count(), 1);
+        let original_edge_count = graph.data_flow_edges.len();
+
+        let disconnected = graph.paste_node_clipboard_with_options(
+            &clipboard,
+            GraphNodeClipboardPasteOptions::disconnected(),
+        );
+
+        assert_eq!(disconnected.pasted_node_indices.len(), 1);
+        assert!(disconnected.reconnected_edges.is_empty());
+        assert!(disconnected.skipped_diagnostics.is_empty());
+        assert_eq!(graph.data_flow_edges.len(), original_edge_count);
+        let disconnected_node_id = graph.nodes[disconnected.pasted_node_indices[0]]
+            .node_id
+            .clone();
+        assert!(!graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == disconnected_node_id || edge.to_node_id == disconnected_node_id
+        }));
+
+        let incoming = graph.paste_node_clipboard_with_options(
+            &clipboard,
+            GraphNodeClipboardPasteOptions::incoming(),
+        );
+
+        assert_eq!(incoming.reconnected_edges.len(), 1);
+        assert!(incoming.skipped_diagnostics.is_empty());
+        let incoming_node_id = graph.nodes[incoming.pasted_node_indices[0]].node_id.clone();
+        assert!(graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == graph.nodes[0].node_id && edge.to_node_id == incoming_node_id
+        }));
+        assert!(!graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == incoming_node_id && edge.to_node_id == graph.nodes[2].node_id
+        }));
+
+        let outgoing = graph.paste_node_clipboard_with_options(
+            &clipboard,
+            GraphNodeClipboardPasteOptions::outgoing(),
+        );
+
+        assert_eq!(outgoing.reconnected_edges.len(), 1);
+        assert!(outgoing.skipped_diagnostics.is_empty());
+        let outgoing_node_id = graph.nodes[outgoing.pasted_node_indices[0]].node_id.clone();
+        assert!(graph.data_flow_edges.iter().any(|edge| {
+            edge.from_node_id == outgoing_node_id && edge.to_node_id == graph.nodes[2].node_id
+        }));
+    }
+
+    #[test]
+    fn node_clipboard_external_reconnect_skips_invalid_candidates() {
+        let mut graph = GraphDocument::sample();
+        let clipboard = graph
+            .copy_node_set(&[1])
+            .expect("selected filter should copy to graph clipboard");
+        let missing_source_id = graph.nodes[0].node_id.clone();
+        graph.nodes.retain(|node| node.node_id != missing_source_id);
+        let original_edge_count = graph.data_flow_edges.len();
+
+        let result = graph.paste_node_clipboard_with_options(
+            &clipboard,
+            GraphNodeClipboardPasteOptions::incoming(),
+        );
+
+        assert_eq!(result.pasted_node_indices.len(), 1);
+        assert!(result.reconnected_edges.is_empty());
+        assert_eq!(result.skipped_diagnostics.len(), 1);
+        assert_eq!(
+            result.skipped_diagnostics[0].status,
+            GraphDataFlowEdgeDiagnosticStatus::MissingSourceNode
+        );
+        let pasted_node_id = graph.nodes[result.pasted_node_indices[0]].node_id.clone();
+        assert_eq!(graph.data_flow_edges.len(), original_edge_count);
+        assert_eq!(graph.command_history.undo_stack.len(), 1);
+
+        assert!(graph.undo_project_command());
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|node| node.node_id == pasted_node_id)
+        );
+        assert!(graph.redo_project_command());
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|node| node.node_id == pasted_node_id)
+        );
     }
 
     #[test]
